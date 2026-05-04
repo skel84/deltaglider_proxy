@@ -1,7 +1,7 @@
-import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
+import { createContext, useContext } from 'react';
 
 // Dark colors — deep navy instrument panel
-const darkColors = {
+export const darkColors = {
   BG_BASE: '#080c14',
   BG_SIDEBAR: '#0b1120',
   BG_CARD: '#111827',
@@ -26,7 +26,7 @@ const darkColors = {
 };
 
 // Light colors — clean, high-contrast
-const lightColors = {
+export const lightColors = {
   BG_BASE: '#f5f7fa',
   BG_SIDEBAR: '#edf0f5',
   BG_CARD: '#ffffff',
@@ -58,32 +58,11 @@ interface ThemeContextValue {
   colors: ColorTokens;
 }
 
-const ThemeContext = createContext<ThemeContextValue>({
+export const ThemeContext = createContext<ThemeContextValue>({
   isDark: true,
   toggleTheme: () => {},
   colors: darkColors,
 });
-
-export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [isDark, setIsDark] = useState(() => {
-    const saved = localStorage.getItem('dg-theme');
-    return saved ? saved === 'dark' : true;
-  });
-
-  const toggleTheme = () => setIsDark(prev => !prev);
-  const colors = isDark ? darkColors : lightColors;
-
-  useEffect(() => {
-    localStorage.setItem('dg-theme', isDark ? 'dark' : 'light');
-    document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
-  }, [isDark]);
-
-  return (
-    <ThemeContext.Provider value={{ isDark, toggleTheme, colors }}>
-      {children}
-    </ThemeContext.Provider>
-  );
-}
 
 export function useColors() {
   const { colors } = useContext(ThemeContext);

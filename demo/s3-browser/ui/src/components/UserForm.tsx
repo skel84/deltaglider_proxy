@@ -6,8 +6,8 @@ import { createUser, updateUser, deleteUser, rotateUserKeys, getCannedPolicies, 
 import { setCredentials, getCredentials } from '../s3client';
 import { useCardStyles } from './shared-styles';
 import { useColors } from '../ThemeContext';
-import PermissionEditor, { permissionsToRows, rowsToPermissions } from './PermissionEditor';
-import type { PermissionRow } from './PermissionEditor';
+import PermissionEditor from './PermissionEditor';
+import { permissionsToRows, rowsToPermissions, type PermissionRow } from './permissionRows';
 import CredentialsBanner from './CredentialsBanner';
 
 const { Text, Title } = Typography;

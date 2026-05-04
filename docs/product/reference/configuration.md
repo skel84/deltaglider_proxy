@@ -29,6 +29,7 @@ See the [upgrade guide](../21-upgrade-guide.md) for the full TOML → YAML migra
 - [Config Sync](#config-sync)
 - [Multi-Backend Routing](#multi-backend-routing)
 - [Bucket Policies](#bucket-policies)
+- [Lifecycle Rules](#lifecycle-rules)
 - [Encryption at Rest](#encryption-at-rest)
 - [CLI Subcommands](#cli-subcommands)
 - [Full Example](#full-example)
@@ -687,6 +688,31 @@ storage:
 ### Public Prefixes
 
 When `public_prefixes` (or `public: true`) is set, anonymous users can GET, HEAD, and LIST objects under the prefix. Writes always require authentication. Use trailing `/` for directory-aligned matching (`"builds/"` matches `builds/v1.zip` but not `buildscripts/`). The empty string `""` makes the entire bucket public (logged as a warning). Prefixes containing `..`, null bytes, or `//` are rejected. The proxy synthesizes `public-prefix:<bucket>` admission blocks from this config.
+
+---
+
+## Lifecycle Rules
+
+Delete-only expiration rules live under `storage.lifecycle`. v1 is disabled by default and deletes only through the DeltaGlider engine.
+
+```yaml
+storage:
+  lifecycle:
+    enabled: false
+    tick_interval: "1h"
+    max_failures_retained: 100
+    rules:
+      - name: expire-old-builds
+        enabled: false
+        bucket: releases
+        prefix: "builds/"
+        action: delete
+        expire_after: "30d"
+        include_globs: ["builds/**/*.zip"]
+        exclude_globs: [".deltaglider/**", "builds/golden/**"]
+```
+
+Use `POST /_/api/admin/lifecycle/rules/:name/preview` before enabling a rule. See [Lifecycle Rules](lifecycle.md) for API details, skip rules, and v1 limitations.
 
 ---
 

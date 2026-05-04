@@ -1,0 +1,218 @@
+//! Conservative lifecycle scheduler.
+
+use crate::api::handlers::AppState;
+use crate::config::SharedConfig;
+use crate::config_db::ConfigDb;
+use crate::config_sections::LifecycleConfig;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
+
+const DEFAULT_TICK: Duration = Duration::from_secs(3600);
+const MIN_TICK: Duration = Duration::from_secs(60);
+const DEFAULT_LEASE_TTL_SECS: i64 = 300;
+const DEFAULT_HEARTBEAT_SECS: i64 = 60;
+
+pub fn spawn_scheduler(
+    config: SharedConfig,
+    db: Option<Arc<Mutex<ConfigDb>>>,
+    state: Arc<AppState>,
+) -> tokio::task::JoinHandle<()> {
+    let instance_id = format!("lifecycle-scheduler:{}", uuid::Uuid::new_v4());
+    tokio::spawn(async move {
+        info!("Lifecycle scheduler started: instance_id={}", instance_id);
+        loop {
+            let tick = {
+                let cfg = config.read().await;
+                scheduler_tick(&cfg.lifecycle)
+            };
+            tokio::time::sleep(tick).await;
+
+            let lifecycle = { config.read().await.lifecycle.clone() };
+            if lifecycle.enabled {
+                run_due_rules(&lifecycle, db.clone(), &state, &instance_id).await;
+            } else {
+                debug!("Lifecycle scheduler skipped: global lifecycle disabled");
+            }
+        }
+    })
+}
+
+async fn run_due_rules(
+    lifecycle: &LifecycleConfig,
+    db: Option<Arc<Mutex<ConfigDb>>>,
+    state: &Arc<AppState>,
+    instance_id: &str,
+) {
+    for rule in lifecycle.rules.iter().filter(|rule| rule.enabled) {
+        let now = super::current_unix_seconds();
+        let mut process_guard = None;
+        let should_run = if let Some(db) = db.as_ref() {
+            let db_guard = db.lock().await;
+            if let Err(err) = db_guard.lifecycle_ensure_state(&rule.name, now) {
+                warn!(
+                    "Lifecycle scheduler could not initialise state for rule '{}': {}",
+                    rule.name, err
+                );
+                false
+            } else {
+                match db_guard.lifecycle_load_state(&rule.name) {
+                    Ok(Some(st)) if st.next_due_at > now => false,
+                    Ok(Some(_)) | Ok(None) => match db_guard.lifecycle_try_acquire_lease(
+                        &rule.name,
+                        instance_id,
+                        now,
+                        lease_ttl_secs(),
+                    ) {
+                        Ok(true) => true,
+                        Ok(false) => {
+                            debug!("Lifecycle scheduler skipped busy rule '{}'", rule.name);
+                            false
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Lifecycle scheduler could not acquire lease for rule '{}': {}",
+                                rule.name, err
+                            );
+                            false
+                        }
+                    },
+                    Err(err) => {
+                        warn!(
+                            "Lifecycle scheduler could not load state for rule '{}': {}",
+                            rule.name, err
+                        );
+                        false
+                    }
+                }
+            }
+        } else {
+            match super::try_acquire_rule(&rule.name) {
+                Some(guard) => {
+                    process_guard = Some(guard);
+                    true
+                }
+                None => {
+                    debug!("Lifecycle scheduler skipped busy rule '{}'", rule.name);
+                    false
+                }
+            }
+        };
+        if !should_run {
+            continue;
+        }
+
+        info!("Lifecycle scheduler running rule '{}'", rule.name);
+        let engine = state.engine.load().clone();
+        match super::run_rule(
+            db.clone(),
+            &engine,
+            rule,
+            lifecycle.max_failures_retained,
+            "scheduler",
+            scheduler_tick(lifecycle).as_secs() as i64,
+            Some(super::RunLease {
+                owner: instance_id.to_string(),
+                ttl_secs: lease_ttl_secs(),
+                heartbeat_secs: heartbeat_secs(),
+            }),
+        )
+        .await
+        {
+            Ok(outcome) if outcome.errors == 0 => {
+                info!(
+                    "Lifecycle rule '{}' completed: expired={} scanned={}",
+                    rule.name, outcome.objects_expired, outcome.objects_scanned
+                );
+            }
+            Ok(outcome) => {
+                warn!(
+                    "Lifecycle rule '{}' completed with {} errors (expired={}, scanned={})",
+                    rule.name, outcome.errors, outcome.objects_expired, outcome.objects_scanned
+                );
+            }
+            Err(err) => warn!("Lifecycle rule '{}' failed: {}", rule.name, err),
+        }
+        if let Some(db) = db.as_ref() {
+            let db = db.lock().await;
+            let _ = db.lifecycle_release_lease(&rule.name, instance_id);
+        }
+        drop(process_guard);
+    }
+}
+
+pub(crate) fn scheduler_tick(lifecycle: &LifecycleConfig) -> Duration {
+    parse_duration_or(
+        &lifecycle.tick_interval,
+        DEFAULT_TICK,
+        MIN_TICK,
+        "lifecycle.tick_interval",
+    )
+}
+
+pub(crate) fn lease_ttl_secs() -> i64 {
+    DEFAULT_LEASE_TTL_SECS
+}
+
+pub(crate) fn heartbeat_secs() -> i64 {
+    DEFAULT_HEARTBEAT_SECS
+}
+
+fn parse_duration_or(value: &str, default: Duration, minimum: Duration, label: &str) -> Duration {
+    match humantime::parse_duration(value) {
+        Ok(duration) if duration >= minimum => duration,
+        Ok(duration) => {
+            warn!(
+                "{}={} below minimum {}; using {}",
+                label,
+                humantime::format_duration(duration),
+                humantime::format_duration(minimum),
+                humantime::format_duration(minimum),
+            );
+            minimum
+        }
+        Err(err) => {
+            warn!(
+                "{}={} invalid: {}; using {}",
+                label,
+                value,
+                err,
+                humantime::format_duration(default),
+            );
+            default
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_tick_uses_configured_duration() {
+        let cfg = LifecycleConfig {
+            tick_interval: "2h".to_string(),
+            ..LifecycleConfig::default()
+        };
+        assert_eq!(scheduler_tick(&cfg), Duration::from_secs(7200));
+    }
+
+    #[test]
+    fn scheduler_tick_clamps_too_small_duration() {
+        let cfg = LifecycleConfig {
+            tick_interval: "1s".to_string(),
+            ..LifecycleConfig::default()
+        };
+        assert_eq!(scheduler_tick(&cfg), MIN_TICK);
+    }
+
+    #[test]
+    fn scheduler_tick_falls_back_on_invalid_duration() {
+        let cfg = LifecycleConfig {
+            tick_interval: "wat".to_string(),
+            ..LifecycleConfig::default()
+        };
+        assert_eq!(scheduler_tick(&cfg), DEFAULT_TICK);
+    }
+}

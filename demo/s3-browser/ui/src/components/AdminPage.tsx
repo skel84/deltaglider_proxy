@@ -16,6 +16,7 @@ import {
   SettingOutlined,
   MenuOutlined,
   SyncOutlined,
+  ClockCircleOutlined,
 } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import FullScreenHeader from './FullScreenHeader';
@@ -30,9 +31,11 @@ import AdmissionPanel from './AdmissionPanel';
 import CredentialsModePanel from './CredentialsModePanel';
 import BucketsPanel from './BucketsPanel';
 import ReplicationPanel from './ReplicationPanel';
+import LifecyclePanel from './LifecyclePanel';
 import SetupWizard from './SetupWizard';
 import TracePanel from './TracePanel';
 import AuditLogPanel from './AuditLogPanel';
+import EventOutboxPanel from './EventOutboxPanel';
 import CommandPalette, {
   FileTextOutlined as PaletteFileTextOutlined,
   ImportOutlined as PaletteImportOutlined,
@@ -169,6 +172,11 @@ const PAGE_HEADERS: Record<string, { icon: React.ReactNode; title: string; descr
     title: 'Audit log',
     description: 'Recent authentication + mutation events from this process (in-memory ring, default 500 entries). Stdout remains authoritative for long-term audit.',
   },
+  'diagnostics/event-outbox': {
+    icon: <DatabaseOutlined />,
+    title: 'Event outbox',
+    description: 'Durable object mutation events, delivery state, retry backoff, and failed webhook rows from the encrypted config DB.',
+  },
   'configuration/admission': {
     icon: <SecurityScanOutlined />,
     title: 'Admission',
@@ -208,6 +216,11 @@ const PAGE_HEADERS: Record<string, { icon: React.ReactNode; title: string; descr
     icon: <SyncOutlined />,
     title: 'Object replication',
     description: 'Object data replication between buckets and prefixes. Rules are storage config; runtime state lives in the encrypted config DB.',
+  },
+  'configuration/storage/lifecycle': {
+    icon: <ClockCircleOutlined />,
+    title: 'Object lifecycle',
+    description: 'Delete-only object expiration rules with read-only preview, guarded run-now, and scheduler history.',
   },
   'configuration/advanced/listener': {
     icon: <CloudServerOutlined />,
@@ -620,6 +633,14 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         </>
       );
     }
+    if (adminPath === 'diagnostics/event-outbox') {
+      return (
+        <>
+          {header}
+          <EventOutboxPanel onSessionExpired={onSessionExpired} />
+        </>
+      );
+    }
 
     // Configuration — Admission (Wave 4)
     if (adminPath === 'configuration/admission') {
@@ -716,6 +737,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
     // Configuration — Storage (Wave 6). Backends keeps the legacy
   // Backends owns storage infrastructure. Buckets owns per-bucket
   // policy. Object replication owns source → destination movement.
+  // Object lifecycle owns delete-only expiration rules.
     if (adminPath === 'configuration/storage/backends') {
       return (
         <>
@@ -737,6 +759,14 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         <>
           {header}
           <ReplicationPanel onSessionExpired={onSessionExpired} />
+        </>
+      );
+    }
+    if (adminPath === 'configuration/storage/lifecycle') {
+      return (
+        <>
+          {header}
+          <LifecyclePanel onSessionExpired={onSessionExpired} />
         </>
       );
     }

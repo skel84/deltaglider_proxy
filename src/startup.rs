@@ -705,6 +705,15 @@ pub fn init_config_db(
                     warn!("Failed to reconcile replication runtime state on boot: {err}");
                 }
             }
+            match db.lifecycle_reconcile_on_boot() {
+                Ok(count) if count > 0 => {
+                    warn!("Reconciled {count} lifecycle run(s) left running by a previous process");
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!("Failed to reconcile lifecycle runtime state on boot: {err}");
+                }
+            }
             // If DB has existing users, switch to IAM mode
             if let Ok(users) = db.load_users() {
                 if !users.is_empty() {

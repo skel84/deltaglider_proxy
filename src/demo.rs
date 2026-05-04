@@ -180,6 +180,16 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         // (all admins see the same log so there's no per-identity
         // filtering to do at this layer).
         .route("/_/api/admin/audit", get(admin::get_audit))
+        // Durable event outbox diagnostics and operator requeue controls.
+        .route("/_/api/admin/event-outbox", get(admin::event_outbox_list))
+        .route(
+            "/_/api/admin/event-outbox/requeue",
+            post(admin::event_outbox_requeue_many),
+        )
+        .route(
+            "/_/api/admin/event-outbox/:id/requeue",
+            post(admin::event_outbox_requeue_one),
+        )
         // Replication: overview + per-rule controls. Session-gated,
         // not IAM-gated (admins manage replication the same way they
         // manage other storage config).
@@ -206,6 +216,24 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         .route(
             "/_/api/admin/replication/rules/:name/failures",
             get(admin::replication_failures),
+        )
+        // Lifecycle: delete-only expiration preview + explicit run-now.
+        .route("/_/api/admin/lifecycle", get(admin::lifecycle_list_rules))
+        .route(
+            "/_/api/admin/lifecycle/rules/:name/preview",
+            post(admin::lifecycle_preview),
+        )
+        .route(
+            "/_/api/admin/lifecycle/rules/:name/run-now",
+            post(admin::lifecycle_run_now),
+        )
+        .route(
+            "/_/api/admin/lifecycle/rules/:name/history",
+            get(admin::lifecycle_history),
+        )
+        .route(
+            "/_/api/admin/lifecycle/rules/:name/failures",
+            get(admin::lifecycle_failures),
         )
         // Server-side bulk object operations. Replaces what the
         // browser used to do via @aws-sdk/client-s3. Same session

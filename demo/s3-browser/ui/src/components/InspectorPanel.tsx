@@ -6,7 +6,7 @@ import { GlobalOutlined } from '@ant-design/icons';
 import { formatBytes } from '../utils';
 import type { S3Object } from '../types';
 import { useColors } from '../ThemeContext';
-import { getPreviewMode } from './FilePreview';
+import { getPreviewMode } from './filePreviewMode';
 import { getAdminConfig } from '../adminApi';
 import { useOnClickOutside } from '../useDocumentEvent';
 

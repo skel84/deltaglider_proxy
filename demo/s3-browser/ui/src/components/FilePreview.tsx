@@ -5,31 +5,11 @@ import type { S3Object } from '../types';
 import { downloadObject, getPresignedUrl } from '../s3client';
 import { formatBytes } from '../utils';
 import { useColors } from '../ThemeContext';
+import { getPreviewMode } from './filePreviewMode';
 
 const { Text } = Typography;
 
-const TEXT_EXTENSIONS = new Set([
-  'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log',
-  'toml', 'ini', 'cfg', 'conf', 'properties', 'env',
-  'sh', 'bash', 'py', 'rs', 'js', 'ts', 'html', 'css',
-  'sha', 'sha1', 'sha256', 'sha512', 'sum',
-  'gitignore', 'dockerignore', 'dockerfile', 'makefile',
-  'license', 'readme', 'changelog',
-]);
-
-const IMAGE_EXTENSIONS = new Set([
-  'jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'ico',
-]);
-
 const MAX_TEXT_PREVIEW = 512 * 1024; // 512 KB
-
-export function getPreviewMode(filename: string): 'text' | 'image' | null {
-  const ext = filename.split('.').pop()?.toLowerCase() ?? '';
-  const basename = filename.split('/').pop()?.toLowerCase() ?? '';
-  if (TEXT_EXTENSIONS.has(ext) || TEXT_EXTENSIONS.has(basename)) return 'text';
-  if (IMAGE_EXTENSIONS.has(ext)) return 'image';
-  return null;
-}
 
 interface FilePreviewProps {
   open: boolean;

@@ -29,6 +29,7 @@ import {
   DatabaseOutlined,
   CloudOutlined,
   CloudServerOutlined,
+  ClockCircleOutlined,
   SettingOutlined,
   SyncOutlined,
 } from '@ant-design/icons';
@@ -297,6 +298,14 @@ export function StorageOverview({ onNavigateAdmin, onSessionExpired }: OverviewP
       icon: <SyncOutlined />,
       path: 'configuration/storage/replication',
       summary: 'Rules, run history, failures',
+    },
+    {
+      title: 'Object lifecycle',
+      blurb:
+        'Delete-only expiration rules with read-only preview, guarded run-now, and scheduler history. Disabled by default.',
+      icon: <ClockCircleOutlined />,
+      path: 'configuration/storage/lifecycle',
+      summary: 'Preview, delete, history',
     },
   ];
 

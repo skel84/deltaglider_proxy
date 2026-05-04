@@ -304,12 +304,24 @@ pub struct StorageSection {
     /// `deltaglider_proxy.example.yaml`.
     #[serde(default, skip_serializing_if = "is_default_replication")]
     pub replication: ReplicationConfig,
+
+    /// Object lifecycle expiration. v1 is delete-only and deliberately
+    /// disabled by default; operators can preview or run a named rule
+    /// explicitly through the admin API, and the background scheduler only
+    /// acts when this master switch and each rule are enabled.
+    #[serde(default, skip_serializing_if = "is_default_lifecycle")]
+    pub lifecycle: LifecycleConfig,
 }
 
 /// Skip emitting `replication:` from canonical YAML exports when it's
 /// the default (empty rules list with default replication controls).
 pub(crate) fn is_default_replication(r: &ReplicationConfig) -> bool {
     r == &ReplicationConfig::default()
+}
+
+/// Skip emitting `lifecycle:` from canonical YAML exports when it is inert.
+pub(crate) fn is_default_lifecycle(l: &LifecycleConfig) -> bool {
+    l == &LifecycleConfig::default()
 }
 
 /// Global replication controls + the rules list.
@@ -378,6 +390,237 @@ fn default_heartbeat_interval() -> String {
 
 fn default_max_failures() -> u32 {
     100
+}
+
+/// Global lifecycle controls + delete-only expiration rules.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LifecycleConfig {
+    /// Master kill-switch. Defaults to false because lifecycle deletes data.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Scheduler wake interval. Parsed via humantime. Defaults to `1h`;
+    /// minimum validation warns below `60s`.
+    #[serde(default = "default_lifecycle_tick_interval")]
+    pub tick_interval: String,
+
+    /// Per-run failure response cap. The worker keeps full counters but
+    /// only returns this many failure entries to callers.
+    #[serde(default = "default_lifecycle_max_failures")]
+    pub max_failures_retained: u32,
+
+    /// Delete-only lifecycle rules. Empty by default.
+    #[serde(default)]
+    pub rules: Vec<LifecycleRule>,
+}
+
+impl Default for LifecycleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tick_interval: default_lifecycle_tick_interval(),
+            max_failures_retained: default_lifecycle_max_failures(),
+            rules: Vec::new(),
+        }
+    }
+}
+
+fn default_lifecycle_tick_interval() -> String {
+    "1h".to_string()
+}
+
+fn default_lifecycle_max_failures() -> u32 {
+    100
+}
+
+/// v1 lifecycle action. Only delete is accepted; storage-class transitions
+/// are intentionally not modelled yet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum LifecycleAction {
+    #[default]
+    Delete,
+}
+
+/// A single lifecycle expiration rule.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LifecycleRule {
+    /// Rule name. Unique within lifecycle config, ASCII
+    /// `[A-Za-z0-9_.-]{1,64}`.
+    pub name: String,
+
+    /// Per-rule toggle. Defaults to false so adding a draft rule is inert
+    /// until the operator explicitly enables it.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Bucket to scan.
+    pub bucket: String,
+
+    /// Prefix to scan. Empty means whole bucket.
+    #[serde(default)]
+    pub prefix: String,
+
+    /// Delete-only in v1.
+    #[serde(default)]
+    pub action: LifecycleAction,
+
+    /// Delete objects whose `created_at` metadata is older than this age.
+    /// Humantime string, e.g. `30d`, `12h`.
+    pub expire_after: String,
+
+    /// Optional globset: if non-empty, only matching keys are candidates.
+    #[serde(default)]
+    pub include_globs: Vec<String>,
+
+    /// Optional globset: keys matching any pattern are skipped. Defaults
+    /// protect DeltaGlider's config-sync prefix.
+    #[serde(default = "default_lifecycle_exclude_globs")]
+    pub exclude_globs: Vec<String>,
+
+    /// Objects per listing page / worker batch. Defaults to 100.
+    #[serde(default = "default_lifecycle_batch_size")]
+    pub batch_size: u32,
+}
+
+fn default_lifecycle_exclude_globs() -> Vec<String> {
+    vec![".deltaglider/**".to_string()]
+}
+
+fn default_lifecycle_batch_size() -> u32 {
+    100
+}
+
+/// Disabled-by-default delivery for rows in the durable `event_outbox`.
+///
+/// The request path only appends rows; when this config is active a background
+/// worker claims due rows and POSTs them to `webhook_url` with at-least-once
+/// semantics. Empty/default config preserves the persistence-only behavior.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EventDeliveryConfig {
+    /// Master switch. Delivery is inactive unless this is true AND
+    /// `webhook_url` is present.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// HTTP endpoint that receives `{ schema, event }` JSON payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_url: Option<String>,
+
+    /// Dispatcher wake interval. Defaults to `10s`.
+    #[serde(default = "default_event_delivery_tick")]
+    pub tick_interval: String,
+
+    /// Max rows to claim per tick. Clamped to `[1, 500]` by the dispatcher.
+    #[serde(default = "default_event_delivery_batch_size")]
+    pub batch_size: u32,
+
+    /// Per-webhook HTTP timeout. Defaults to `5s`.
+    #[serde(default = "default_event_delivery_timeout")]
+    pub request_timeout: String,
+
+    /// Attempts after which a row becomes permanently `failed`.
+    #[serde(default = "default_event_delivery_max_attempts")]
+    pub max_attempts: u32,
+
+    /// Initial retry delay. Exponential backoff doubles this per attempt.
+    #[serde(default = "default_event_delivery_retry_base")]
+    pub retry_base: String,
+
+    /// Maximum retry delay.
+    #[serde(default = "default_event_delivery_retry_max")]
+    pub retry_max: String,
+
+    /// In-progress claims older than this are considered stale and reclaimable.
+    #[serde(default = "default_event_delivery_stale_claim")]
+    pub stale_claim_after: String,
+
+    /// Delivered rows older than this are pruned by the dispatcher. Set `0s`
+    /// to keep delivered rows until an operator prunes the DB manually.
+    #[serde(default = "default_event_delivery_retention")]
+    pub delivered_retention: String,
+
+    /// Maximum delivered rows retained after every dispatcher tick. Pending,
+    /// in-progress, and failed rows are never deleted by this cap.
+    #[serde(default = "default_event_delivery_delivered_max_rows")]
+    pub delivered_max_rows: u32,
+
+    /// Max delivered rows pruned per tick.
+    #[serde(default = "default_event_delivery_prune_batch")]
+    pub prune_batch: u32,
+}
+
+impl EventDeliveryConfig {
+    pub fn is_active(&self) -> bool {
+        self.enabled
+            && self
+                .webhook_url
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+    }
+}
+
+impl Default for EventDeliveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_url: None,
+            tick_interval: default_event_delivery_tick(),
+            batch_size: default_event_delivery_batch_size(),
+            request_timeout: default_event_delivery_timeout(),
+            max_attempts: default_event_delivery_max_attempts(),
+            retry_base: default_event_delivery_retry_base(),
+            retry_max: default_event_delivery_retry_max(),
+            stale_claim_after: default_event_delivery_stale_claim(),
+            delivered_retention: default_event_delivery_retention(),
+            delivered_max_rows: default_event_delivery_delivered_max_rows(),
+            prune_batch: default_event_delivery_prune_batch(),
+        }
+    }
+}
+
+fn default_event_delivery_tick() -> String {
+    "10s".to_string()
+}
+
+fn default_event_delivery_batch_size() -> u32 {
+    50
+}
+
+fn default_event_delivery_timeout() -> String {
+    "5s".to_string()
+}
+
+fn default_event_delivery_max_attempts() -> u32 {
+    8
+}
+
+fn default_event_delivery_retry_base() -> String {
+    "5s".to_string()
+}
+
+fn default_event_delivery_retry_max() -> String {
+    "5m".to_string()
+}
+
+fn default_event_delivery_stale_claim() -> String {
+    "60s".to_string()
+}
+
+fn default_event_delivery_retention() -> String {
+    "24h".to_string()
+}
+
+fn default_event_delivery_delivered_max_rows() -> u32 {
+    10_000
+}
+
+fn default_event_delivery_prune_batch() -> u32 {
+    100
+}
+
+fn is_default_event_delivery(e: &EventDeliveryConfig) -> bool {
+    e == &EventDeliveryConfig::default()
 }
 
 /// A single replication rule: copy objects from `source` to `destination`
@@ -644,6 +887,12 @@ pub struct AdvancedSection {
     /// by the same redactor that powers `to_canonical_yaml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_password_hash: Option<String>,
+
+    /// Background delivery for durable object events. Disabled by default;
+    /// when enabled, workers deliver outbox rows to an HTTP webhook without
+    /// blocking S3 operations.
+    #[serde(default, skip_serializing_if = "is_default_event_delivery")]
+    pub event_delivery: EventDeliveryConfig,
 }
 
 // ══ skip_serializing_if helpers — any non-default value surfaces. ══════
@@ -728,6 +977,7 @@ impl SectionedConfig {
                     .map(|(name, policy)| (name.clone(), policy.collapse_to_shorthand()))
                     .collect(),
                 replication: flat.replication.clone(),
+                lifecycle: flat.lifecycle.clone(),
                 // Shorthand fields never appear in the canonical export —
                 // the expanded `backend:` carries the information instead.
                 // Future `collapse_backend_to_shorthand()` could emit
@@ -763,6 +1013,7 @@ impl SectionedConfig {
                 config_sync_bucket: flat.config_sync_bucket.clone(),
                 tls: flat.tls.clone(),
                 bootstrap_password_hash: flat.bootstrap_password_hash.clone(),
+                event_delivery: flat.event_delivery.clone(),
             },
         }
     }
@@ -832,11 +1083,13 @@ impl SectionedConfig {
             log_level: self.advanced.log_level.unwrap_or(defaults.log_level),
             config_sync_bucket: self.advanced.config_sync_bucket,
             tls: self.advanced.tls,
+            event_delivery: self.advanced.event_delivery,
             buckets: self.storage.buckets,
             backend_encryption: self.storage.backend_encryption,
             backends: self.storage.backends,
             default_backend: self.storage.default_backend,
             replication: self.storage.replication,
+            lifecycle: self.storage.lifecycle,
             admission_blocks: self.admission.map(|s| s.blocks).unwrap_or_default(),
             // iam_mode already populated above from self.access.iam_mode.
         }
@@ -1051,6 +1304,158 @@ pub fn validate_replication(cfg: &ReplicationConfig) -> Vec<String> {
     // because each tick finds objects to copy back.
     warnings.extend(detect_replication_cycles(&cfg.rules));
 
+    warnings
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Lifecycle config validation — pure, unit-testable, no I/O.
+// ────────────────────────────────────────────────────────────────────────
+
+const MIN_LIFECYCLE_TICK_INTERVAL_SECS: u64 = 60;
+const MAX_LIFECYCLE_BATCH_SIZE: u32 = 10_000;
+
+/// Validate delete-only lifecycle config. Warning-only to preserve the
+/// existing `Config::check` contract; runtime run-now still refuses disabled
+/// global/rule switches before deleting anything.
+pub fn validate_lifecycle(cfg: &LifecycleConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    match humantime::parse_duration(&cfg.tick_interval) {
+        Ok(d) => {
+            if d.as_secs() < MIN_LIFECYCLE_TICK_INTERVAL_SECS {
+                warnings.push(format!(
+                    "lifecycle.tick_interval={} is below the minimum {}s",
+                    cfg.tick_interval, MIN_LIFECYCLE_TICK_INTERVAL_SECS
+                ));
+            }
+        }
+        Err(e) => warnings.push(format!(
+            "lifecycle.tick_interval={} is not a valid humantime duration: {}",
+            cfg.tick_interval, e
+        )),
+    }
+
+    if cfg.max_failures_retained == 0 {
+        warnings.push(
+            "lifecycle.max_failures_retained=0 hides lifecycle run failures from API responses"
+                .to_string(),
+        );
+    }
+
+    let mut seen_names = std::collections::HashSet::new();
+    for rule in &cfg.rules {
+        if !is_valid_replication_rule_name(&rule.name) {
+            warnings.push(format!(
+                "lifecycle rule name '{}' is invalid (must match [A-Za-z0-9_.-]{{1,64}})",
+                rule.name
+            ));
+            continue;
+        }
+        if !seen_names.insert(rule.name.clone()) {
+            warnings.push(format!(
+                "lifecycle rule name '{}' is duplicated — the first entry wins",
+                rule.name
+            ));
+            continue;
+        }
+
+        let prefix_norm = crate::replication::normalize_prefix(&rule.prefix);
+        if prefix_norm != rule.prefix {
+            warnings.push(format!(
+                "lifecycle rule '{}' prefix {:?} will be normalized to {:?}",
+                rule.name, rule.prefix, prefix_norm
+            ));
+        }
+
+        match humantime::parse_duration(&rule.expire_after) {
+            Ok(d) if d.as_secs() == 0 => warnings.push(format!(
+                "lifecycle rule '{}' expire_after={} would expire everything immediately",
+                rule.name, rule.expire_after
+            )),
+            Ok(_) => {}
+            Err(e) => warnings.push(format!(
+                "lifecycle rule '{}' expire_after={} invalid: {}",
+                rule.name, rule.expire_after, e
+            )),
+        }
+
+        if rule.batch_size == 0 || rule.batch_size > MAX_LIFECYCLE_BATCH_SIZE {
+            warnings.push(format!(
+                "lifecycle rule '{}' batch_size={} outside [1, {}]",
+                rule.name, rule.batch_size, MAX_LIFECYCLE_BATCH_SIZE
+            ));
+        }
+
+        for glob in rule.include_globs.iter().chain(rule.exclude_globs.iter()) {
+            if globset::Glob::new(glob).is_err() {
+                warnings.push(format!(
+                    "lifecycle rule '{}' glob pattern {:?} is invalid",
+                    rule.name, glob
+                ));
+            }
+        }
+    }
+
+    warnings
+}
+
+/// Validate event-delivery config. Warning-only to match `Config::check`;
+/// the dispatcher still treats invalid/missing webhook config as inactive.
+pub fn validate_event_delivery(cfg: &EventDeliveryConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if cfg.enabled && cfg.webhook_url.as_deref().unwrap_or("").trim().is_empty() {
+        warnings.push(
+            "event_delivery.enabled=true but event_delivery.webhook_url is empty; dispatcher will stay inactive"
+                .to_string(),
+        );
+    }
+    if let Some(url) = cfg.webhook_url.as_deref() {
+        match reqwest::Url::parse(url) {
+            Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {}
+            Ok(parsed) => warnings.push(format!(
+                "event_delivery.webhook_url uses unsupported scheme '{}'; expected http or https",
+                parsed.scheme()
+            )),
+            Err(e) => warnings.push(format!("event_delivery.webhook_url is invalid: {e}")),
+        }
+    }
+
+    for (label, value) in [
+        ("event_delivery.tick_interval", &cfg.tick_interval),
+        ("event_delivery.request_timeout", &cfg.request_timeout),
+        ("event_delivery.retry_base", &cfg.retry_base),
+        ("event_delivery.retry_max", &cfg.retry_max),
+        ("event_delivery.stale_claim_after", &cfg.stale_claim_after),
+        (
+            "event_delivery.delivered_retention",
+            &cfg.delivered_retention,
+        ),
+    ] {
+        if let Err(e) = humantime::parse_duration(value) {
+            warnings.push(format!(
+                "{label}={value:?} is not a valid humantime duration: {e}"
+            ));
+        }
+    }
+
+    if cfg.batch_size == 0 || cfg.batch_size > 500 {
+        warnings.push(format!(
+            "event_delivery.batch_size={} outside [1, 500]; dispatcher will clamp it",
+            cfg.batch_size
+        ));
+    }
+    if cfg.max_attempts == 0 {
+        warnings.push("event_delivery.max_attempts=0; dispatcher will treat it as 1".to_string());
+    }
+    if cfg.prune_batch == 0 {
+        warnings.push("event_delivery.prune_batch=0 disables delivered-row pruning".to_string());
+    }
+    if cfg.delivered_max_rows == 0 {
+        warnings.push(
+            "event_delivery.delivered_max_rows=0 prunes delivered rows on the next dispatcher tick"
+                .to_string(),
+        );
+    }
     warnings
 }
 

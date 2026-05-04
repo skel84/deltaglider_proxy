@@ -846,9 +846,31 @@ export interface ReplicationConfig {
   rules: ReplicationRuleConfig[];
 }
 
+export type LifecycleAction = 'delete';
+
+export interface LifecycleRuleConfig {
+  name: string;
+  enabled: boolean;
+  bucket: string;
+  prefix: string;
+  action?: LifecycleAction;
+  expire_after: string;
+  include_globs: string[];
+  exclude_globs: string[];
+  batch_size: number;
+}
+
+export interface LifecycleConfig {
+  enabled: boolean;
+  tick_interval: string;
+  max_failures_retained: number;
+  rules: LifecycleRuleConfig[];
+}
+
 export interface StorageSectionBody {
   buckets?: AdminConfig['bucket_policies'];
   replication?: ReplicationConfig;
+  lifecycle?: LifecycleConfig;
 }
 
 export interface ReplicationRuleOverview {
@@ -937,6 +959,107 @@ export async function getReplicationHistory(rule: string, limit = 20): Promise<{
 export async function getReplicationFailures(rule: string, limit = 20): Promise<{ failures: ReplicationFailureEntry[] }> {
   const res = await adminFetch(`/api/admin/replication/rules/${encodeURIComponent(rule)}/failures?limit=${encodeURIComponent(limit)}`);
   if (!res.ok) throw new Error(`Replication failures failed: ${res.status}`);
+  return safeJson(res);
+}
+
+// === Object Lifecycle ===
+
+export interface LifecycleRuleOverview {
+  name: string;
+  enabled: boolean;
+  bucket: string;
+  prefix: string;
+  action: LifecycleAction | string;
+  expire_after: string;
+  include_globs: string[];
+  exclude_globs: string[];
+  last_status: string;
+  last_run_at: number | null;
+  next_due_at: number;
+  objects_expired_lifetime: number;
+  bytes_expired_lifetime: number;
+}
+
+interface LifecycleOverview {
+  worker_enabled: boolean;
+  tick_interval: string;
+  rules: LifecycleRuleOverview[];
+}
+
+export interface LifecyclePreviewObject {
+  bucket: string;
+  key: string;
+  created_at: string;
+  size: number;
+}
+
+export interface LifecycleFailure {
+  key: string;
+  error: string;
+}
+
+export interface LifecycleRunOutcome {
+  run_id?: number;
+  rule_name: string;
+  status: string;
+  objects_scanned: number;
+  objects_expired: number;
+  objects_skipped: number;
+  bytes_expired: number;
+  errors: number;
+  candidates: LifecyclePreviewObject[];
+  failures: LifecycleFailure[];
+}
+
+export interface LifecycleHistoryEntry {
+  id: number;
+  triggered_by: 'scheduler' | 'run-now' | string;
+  started_at: number;
+  finished_at: number | null;
+  objects_scanned: number;
+  objects_expired: number;
+  objects_skipped: number;
+  bytes_expired: number;
+  errors: number;
+  status: string;
+}
+
+export interface LifecycleFailureEntry {
+  id: number;
+  run_id: number | null;
+  occurred_at: number;
+  bucket: string;
+  object_key: string;
+  error_message: string;
+}
+
+export async function getLifecycleOverview(): Promise<LifecycleOverview> {
+  const res = await adminFetch('/api/admin/lifecycle');
+  if (!res.ok) throw new Error(`Lifecycle overview failed: ${res.status}`);
+  return safeJson(res);
+}
+
+export async function previewLifecycleRule(rule: string): Promise<LifecycleRunOutcome> {
+  const res = await adminFetch(`/api/admin/lifecycle/rules/${encodeURIComponent(rule)}/preview`, 'POST');
+  if (!res.ok) throw new Error(await res.text());
+  return safeJson(res);
+}
+
+export async function runLifecycleNow(rule: string): Promise<LifecycleRunOutcome> {
+  const res = await adminFetch(`/api/admin/lifecycle/rules/${encodeURIComponent(rule)}/run-now`, 'POST');
+  if (!res.ok) throw new Error(await res.text());
+  return safeJson(res);
+}
+
+export async function getLifecycleHistory(rule: string, limit = 20): Promise<{ runs: LifecycleHistoryEntry[] }> {
+  const res = await adminFetch(`/api/admin/lifecycle/rules/${encodeURIComponent(rule)}/history?limit=${encodeURIComponent(limit)}`);
+  if (!res.ok) throw new Error(`Lifecycle history failed: ${res.status}`);
+  return safeJson(res);
+}
+
+export async function getLifecycleFailures(rule: string, limit = 20): Promise<{ failures: LifecycleFailureEntry[] }> {
+  const res = await adminFetch(`/api/admin/lifecycle/rules/${encodeURIComponent(rule)}/failures?limit=${encodeURIComponent(limit)}`);
+  if (!res.ok) throw new Error(`Lifecycle failures failed: ${res.status}`);
   return safeJson(res);
 }
 
@@ -1155,6 +1278,85 @@ interface AuditResponse {
 export async function fetchAudit(limit = 100): Promise<AuditResponse> {
   const res = await adminFetch(`/api/admin/audit?limit=${encodeURIComponent(limit)}`);
   if (!res.ok) throw new Error(`Audit fetch failed: ${res.status}`);
+  return safeJson(res);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Event outbox diagnostics
+// ─────────────────────────────────────────────────────────────
+
+export type EventOutboxStatus = 'pending' | 'in_progress' | 'delivered' | 'failed';
+
+export interface EventOutboxRecord {
+  id: number;
+  kind: string;
+  bucket: string;
+  key: string;
+  source: string;
+  occurred_at: number;
+  payload: unknown;
+  status: EventOutboxStatus;
+  attempts: number;
+  next_attempt_at: number | null;
+  claimed_by: string | null;
+  claimed_at: number | null;
+  delivered_at: number | null;
+  last_error: string | null;
+  created_at: number;
+}
+
+export interface EventOutboxCounts {
+  pending: number;
+  in_progress: number;
+  delivered: number;
+  failed: number;
+}
+
+interface EventOutboxResponse {
+  rows: EventOutboxRecord[];
+  counts: EventOutboxCounts;
+  total: number;
+  limit: number;
+  offset: number;
+  status: EventOutboxStatus | null;
+  sort: string;
+  order: string;
+  delivery_enabled: boolean;
+  delivery_active: boolean;
+}
+
+interface EventOutboxRequeueResponse {
+  requeued: number;
+}
+
+export async function fetchEventOutbox(
+  limit = 100,
+  status?: EventOutboxStatus | 'all',
+  offset = 0,
+  sort = 'occurred_at',
+  order: 'asc' | 'desc' = 'desc',
+): Promise<EventOutboxResponse> {
+  const qs = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+    sort,
+    order,
+  });
+  if (status && status !== 'all') qs.set('status', status);
+  const res = await adminFetch(`/api/admin/event-outbox?${qs.toString()}`);
+  if (!res.ok) throw new Error(`Event outbox fetch failed: ${res.status}`);
+  return safeJson(res);
+}
+
+export async function requeueEventOutbox(id: number): Promise<EventOutboxRequeueResponse> {
+  const res = await adminFetch(`/api/admin/event-outbox/${encodeURIComponent(id)}/requeue`, 'POST');
+  if (!res.ok) throw new Error(`Event outbox requeue failed: ${res.status}`);
+  return safeJson(res);
+}
+
+export async function requeueEventOutboxMany(ids: number[]): Promise<EventOutboxRequeueResponse> {
+  const res = await adminFetch('/api/admin/event-outbox/requeue', 'POST', { ids });
+  if (!res.ok) throw new Error(`Event outbox bulk requeue failed: ${res.status}`);
   return safeJson(res);
 }
 

@@ -303,6 +303,8 @@ pub fn run_init_inner(
         default_backend: None,
         backend_encryption: crate::config::BackendEncryptionConfig::default(),
         replication: crate::config_sections::ReplicationConfig::default(),
+        lifecycle: crate::config_sections::LifecycleConfig::default(),
+        event_delivery: crate::config_sections::EventDeliveryConfig::default(),
         admission_blocks: Vec::new(),
         iam_mode: crate::config_sections::IamMode::default(),
         iam_users: Vec::new(),

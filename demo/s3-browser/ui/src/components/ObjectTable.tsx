@@ -6,7 +6,7 @@ import { formatBytes, displayName, timeAgo } from '../utils';
 import type { ColumnsType } from 'antd/es/table';
 import { useColors } from '../ThemeContext';
 import type { FolderSizeState } from '../useComputeSize';
-import { getPreviewMode } from './FilePreview';
+import { getPreviewMode } from './filePreviewMode';
 
 const { Text } = Typography;
 

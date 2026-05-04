@@ -5,8 +5,10 @@ mod auth;
 pub(crate) mod backends;
 mod backup;
 mod config;
+mod event_outbox;
 pub mod external_auth;
 mod groups;
+mod lifecycle;
 pub(crate) mod objects;
 pub(crate) mod replication;
 mod scanner;
@@ -44,9 +46,19 @@ pub use config::{
     SectionApplyResponse, SyncNowResponse, TestS3Request, TestS3Response, TraceRequest,
     TraceResolved, TraceResponse,
 };
+pub use event_outbox::{
+    list as event_outbox_list, requeue_many as event_outbox_requeue_many,
+    requeue_one as event_outbox_requeue_one, EventOutboxQuery, EventOutboxResponse,
+    RequeueEventOutboxRequest, RequeueEventOutboxResponse,
+};
 pub use groups::{
     add_group_member, create_group, delete_group, list_groups, remove_group_member, update_group,
     AddGroupMemberRequest, CreateGroupRequest, UpdateGroupRequest,
+};
+pub use lifecycle::{
+    failures as lifecycle_failures, history as lifecycle_history,
+    list_rules as lifecycle_list_rules, preview as lifecycle_preview, run_now as lifecycle_run_now,
+    LifecycleOverview, LifecycleRuleOverview,
 };
 pub use objects::{
     bulk_delete as bulk_delete_objects, copy_objects, download_zip, list_all as list_all_objects,

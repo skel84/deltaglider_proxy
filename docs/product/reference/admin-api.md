@@ -131,6 +131,7 @@ Legacy JSON-only import path is still supported for pre-v0.8.4 scripts.
 | `POST` | `/_/api/admin/usage/scan` | Trigger a prefix-size scan |
 | `GET` | `/_/api/admin/usage` | Read the cached usage tree |
 | `GET` | `/_/api/admin/audit[?limit=N]` | Snapshot of the in-memory audit ring, newest first. Bounded (default 500, override `DGP_AUDIT_RING_SIZE`). Stdout `tracing::info!` is still the long-term audit source. |
+| `GET` | `/_/api/admin/event-outbox[?status=failed&limit=N&offset=N&sort=occurred_at&order=desc]` | Paged durable object-event outbox rows plus status counts. Delivery is background-only; delivered rows default to 24h/10,000-row retention; see [event-outbox.md](event-outbox.md). |
 | `GET` / `PUT` / `DELETE` | `/_/api/admin/session/s3-credentials` | Per-session S3 credential store for the browse panel |
 
 ## Replication
@@ -146,6 +147,23 @@ config DB. See [replication.md](replication.md) for the full shape.
 | `POST` | `/_/api/admin/replication/rules/:name/pause` / `/resume` | Operator pause controls (persisted across restarts). |
 | `GET` | `/_/api/admin/replication/rules/:name/history?limit=N` | Recent run records, newest first. |
 | `GET` | `/_/api/admin/replication/rules/:name/failures?limit=N` | Recent per-object failures, newest first. |
+
+## Lifecycle
+
+Delete-only lifecycle expiration via the engine. Rules are YAML-authoritative
+under `storage.lifecycle.rules[]`; v1 has preview/run-now and a conservative
+disabled-by-default scheduler. See [lifecycle.md](lifecycle.md) for the full
+shape and guardrails.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/_/api/admin/lifecycle` | Global status + configured rule overview. |
+| `POST` | `/_/api/admin/lifecycle/rules/:name/preview` | Dry-run a rule and return candidate keys without deleting. |
+| `POST` | `/_/api/admin/lifecycle/rules/:name/run-now` | Execute a rule synchronously. 409 when lifecycle/rule is disabled or already running. |
+| `GET` | `/_/api/admin/lifecycle/rules/:name/history?limit=N` | Recent persisted lifecycle executions, newest first. |
+| `GET` | `/_/api/admin/lifecycle/rules/:name/failures?limit=N` | Recent per-object lifecycle failures, linked to `run_id`. |
+
+Preview is intentionally read-only: it does not create history rows. Scheduler and run-now executions persist history/failure rows in the config DB and use per-rule leases to avoid duplicate deletes across instances sharing that DB.
 
 ## Resource limits (env vars)
 

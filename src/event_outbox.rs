@@ -1,9 +1,8 @@
 //! Durable object-event outbox.
 //!
-//! This is only the persistence foundation. Network delivery (webhooks,
-//! queues, etc.) should live in a future dispatcher that claims rows from
-//! `event_outbox`; request handlers only append facts after successful
-//! mutations.
+//! Request handlers only append facts after successful mutations. Delivery
+//! happens from a background dispatcher that claims due rows and never blocks
+//! the S3 request path.
 
 use crate::config_db::{ConfigDb, ConfigDbError};
 use rusqlite::{params, types::Type, OptionalExtension};
@@ -14,6 +13,91 @@ pub const STATUS_PENDING: &str = "pending";
 pub const STATUS_IN_PROGRESS: &str = "in_progress";
 pub const STATUS_DELIVERED: &str = "delivered";
 pub const STATUS_FAILED: &str = "failed";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventOutboxSort {
+    Id,
+    OccurredAt,
+    CreatedAt,
+    NextAttemptAt,
+    DeliveredAt,
+    Attempts,
+    Status,
+    Kind,
+    Bucket,
+    Key,
+}
+
+impl EventOutboxSort {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "id" => Some(Self::Id),
+            "occurred_at" => Some(Self::OccurredAt),
+            "created_at" => Some(Self::CreatedAt),
+            "next_attempt_at" => Some(Self::NextAttemptAt),
+            "delivered_at" => Some(Self::DeliveredAt),
+            "attempts" => Some(Self::Attempts),
+            "status" => Some(Self::Status),
+            "kind" => Some(Self::Kind),
+            "bucket" => Some(Self::Bucket),
+            "key" | "object_key" => Some(Self::Key),
+            _ => None,
+        }
+    }
+
+    fn column(self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::OccurredAt => "occurred_at",
+            Self::CreatedAt => "created_at",
+            Self::NextAttemptAt => "next_attempt_at",
+            Self::DeliveredAt => "delivered_at",
+            Self::Attempts => "attempts",
+            Self::Status => "status",
+            Self::Kind => "kind",
+            Self::Bucket => "bucket",
+            Self::Key => "object_key",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventOutboxSortOrder {
+    Asc,
+    Desc,
+}
+
+impl EventOutboxSortOrder {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "asc" | "ascend" => Some(Self::Asc),
+            "desc" | "descend" => Some(Self::Desc),
+            _ => None,
+        }
+    }
+
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Asc => "ASC",
+            Self::Desc => "DESC",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventOutboxListQuery<'a> {
+    pub status: Option<&'a str>,
+    pub limit: u32,
+    pub offset: u32,
+    pub sort: EventOutboxSort,
+    pub order: EventOutboxSortOrder,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EventOutboxPage {
+    pub rows: Vec<EventOutboxRecord>,
+    pub total: i64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventKind {
@@ -83,7 +167,7 @@ impl NewEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EventOutboxRecord {
     pub id: i64,
     pub kind: String,
@@ -100,6 +184,14 @@ pub struct EventOutboxRecord {
     pub delivered_at: Option<i64>,
     pub last_error: Option<String>,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EventOutboxStatusCounts {
+    pub pending: i64,
+    pub in_progress: i64,
+    pub delivered: i64,
+    pub failed: i64,
 }
 
 pub fn current_unix_seconds() -> i64 {
@@ -158,6 +250,127 @@ impl ConfigDb {
         Ok(rows)
     }
 
+    pub fn event_outbox_list(
+        &self,
+        query: EventOutboxListQuery<'_>,
+    ) -> Result<EventOutboxPage, ConfigDbError> {
+        if query.limit == 0 {
+            return Ok(EventOutboxPage {
+                rows: Vec::new(),
+                total: self.event_outbox_count(query.status)?,
+            });
+        }
+        if let Some(status) = query.status {
+            validate_status(status)?;
+        }
+
+        let column = query.sort.column();
+        let order = query.order.sql();
+        let sql = match query.status {
+            Some(_) => format!(
+                "SELECT id, kind, bucket, object_key, source, occurred_at,
+                        payload_json, status, attempts, next_attempt_at,
+                        claimed_by, claimed_at, delivered_at, last_error, created_at
+                   FROM event_outbox
+                  WHERE status = ?
+                  ORDER BY {column} {order}, id {order}
+                  LIMIT ? OFFSET ?"
+            ),
+            None => format!(
+                "SELECT id, kind, bucket, object_key, source, occurred_at,
+                        payload_json, status, attempts, next_attempt_at,
+                        claimed_by, claimed_at, delivered_at, last_error, created_at
+                   FROM event_outbox
+                  ORDER BY {column} {order}, id {order}
+                  LIMIT ? OFFSET ?"
+            ),
+        };
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = match query.status {
+            Some(status) => stmt
+                .query_map(
+                    params![status, query.limit as i64, query.offset as i64],
+                    event_from_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => stmt
+                .query_map(
+                    params![query.limit as i64, query.offset as i64],
+                    event_from_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
+        Ok(EventOutboxPage {
+            rows,
+            total: self.event_outbox_count(query.status)?,
+        })
+    }
+
+    pub fn event_outbox_recent_by_status(
+        &self,
+        status: &str,
+        limit: u32,
+    ) -> Result<Vec<EventOutboxRecord>, ConfigDbError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        validate_status(status)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, bucket, object_key, source, occurred_at,
+                    payload_json, status, attempts, next_attempt_at,
+                    claimed_by, claimed_at, delivered_at, last_error, created_at
+               FROM event_outbox
+              WHERE status = ?
+              ORDER BY occurred_at DESC, id DESC
+              LIMIT ?",
+        )?;
+        let rows = stmt
+            .query_map(params![status, limit as i64], event_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn event_outbox_count(&self, status: Option<&str>) -> Result<i64, ConfigDbError> {
+        if let Some(status) = status {
+            validate_status(status)?;
+            return Ok(self.conn.query_row(
+                "SELECT count(*) FROM event_outbox WHERE status = ?",
+                params![status],
+                |row| row.get(0),
+            )?);
+        }
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM event_outbox", [], |row| row.get(0))?)
+    }
+
+    pub fn event_outbox_status_counts(&self) -> Result<EventOutboxStatusCounts, ConfigDbError> {
+        let mut counts = EventOutboxStatusCounts {
+            pending: 0,
+            in_progress: 0,
+            delivered: 0,
+            failed: 0,
+        };
+        let mut stmt = self
+            .conn
+            .prepare("SELECT status, count(*) FROM event_outbox GROUP BY status")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let status: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            match status.as_str() {
+                STATUS_PENDING => counts.pending = count,
+                STATUS_IN_PROGRESS => counts.in_progress = count,
+                STATUS_DELIVERED => counts.delivered = count,
+                STATUS_FAILED => counts.failed = count,
+                _ => {}
+            }
+        }
+        Ok(counts)
+    }
+
     pub fn event_outbox_claim_due(
         &self,
         claimant: &str,
@@ -201,8 +414,19 @@ impl ConfigDb {
                         claimed_by = ?,
                         claimed_at = ?,
                         last_error = NULL
-                  WHERE id = ?",
-                params![claimant, now, id],
+                  WHERE id = ?
+                    AND (
+                            (
+                                status = 'pending'
+                            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                            )
+                         OR (
+                                status = 'in_progress'
+                            AND claimed_at IS NOT NULL
+                            AND claimed_at <= ?
+                            )
+                    )",
+                params![claimant, now, id, now, stale_claimed_at],
             )?;
             if updated > 0 {
                 if let Some(row) = self.event_outbox_load(id)? {
@@ -252,6 +476,49 @@ impl ConfigDb {
         Ok(updated > 0)
     }
 
+    pub fn event_outbox_requeue_failed(&self, id: i64, now: i64) -> Result<bool, ConfigDbError> {
+        let updated = self.conn.execute(
+            "UPDATE event_outbox
+                SET status = 'pending',
+                    next_attempt_at = ?,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    delivered_at = NULL,
+                    last_error = NULL
+              WHERE id = ?
+                AND status = 'failed'",
+            params![now, id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    pub fn event_outbox_requeue_failed_many(
+        &self,
+        ids: &[i64],
+        now: i64,
+    ) -> Result<usize, ConfigDbError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut updated = 0;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE event_outbox
+                    SET status = 'pending',
+                        next_attempt_at = ?,
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        delivered_at = NULL,
+                        last_error = NULL
+                  WHERE id = ?
+                    AND status = 'failed'",
+            )?;
+            for id in ids {
+                updated += stmt.execute(params![now, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
     pub fn event_outbox_prune_delivered_before(
         &self,
         before: i64,
@@ -272,6 +539,33 @@ impl ConfigDb {
                      LIMIT ?
               )",
             params![before, limit as i64],
+        )?;
+        Ok(deleted)
+    }
+
+    pub fn event_outbox_prune_delivered_over_count(
+        &self,
+        max_delivered_rows: u32,
+        limit: u32,
+    ) -> Result<usize, ConfigDbError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let deleted = self.conn.execute(
+            "DELETE FROM event_outbox
+              WHERE id IN (
+                    SELECT id
+                      FROM (
+                            SELECT id
+                              FROM event_outbox
+                             WHERE status = 'delivered'
+                             ORDER BY COALESCE(delivered_at, occurred_at) DESC, id DESC
+                             LIMIT -1 OFFSET ?
+                      )
+                     ORDER BY id ASC
+                     LIMIT ?
+              )",
+            params![max_delivered_rows as i64, limit as i64],
         )?;
         Ok(deleted)
     }
@@ -316,6 +610,19 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventOutboxRecord
     })
 }
 
+fn validate_status(status: &str) -> Result<(), ConfigDbError> {
+    if matches!(
+        status,
+        STATUS_PENDING | STATUS_IN_PROGRESS | STATUS_DELIVERED | STATUS_FAILED
+    ) {
+        Ok(())
+    } else {
+        Err(ConfigDbError::Other(format!(
+            "invalid event_outbox status: {status}"
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,13 +640,13 @@ mod tests {
     }
 
     #[test]
-    fn migration_creates_v9_outbox() {
+    fn migration_creates_outbox_table() {
         let db = ConfigDb::in_memory("test-pass").unwrap();
         let version: i32 = db
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert!(version >= 9);
 
         let count: i64 = db
             .conn
@@ -410,5 +717,112 @@ mod tests {
         assert!(!ids.contains(&old));
         assert!(ids.contains(&new));
         assert!(ids.contains(&pending));
+    }
+
+    #[test]
+    fn list_supports_status_pagination_and_sorting() {
+        let db = ConfigDb::in_memory("test-pass").unwrap();
+        let first = db.event_outbox_insert(&event_at(10, "a")).unwrap();
+        let second = db.event_outbox_insert(&event_at(30, "b")).unwrap();
+        let third = db.event_outbox_insert(&event_at(20, "c")).unwrap();
+        db.event_outbox_mark_failed(second, "dead", None).unwrap();
+
+        let page = db
+            .event_outbox_list(EventOutboxListQuery {
+                status: None,
+                limit: 2,
+                offset: 1,
+                sort: EventOutboxSort::OccurredAt,
+                order: EventOutboxSortOrder::Desc,
+            })
+            .unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(
+            page.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![third, first]
+        );
+
+        let failed = db
+            .event_outbox_list(EventOutboxListQuery {
+                status: Some(STATUS_FAILED),
+                limit: 10,
+                offset: 0,
+                sort: EventOutboxSort::Id,
+                order: EventOutboxSortOrder::Asc,
+            })
+            .unwrap();
+        assert_eq!(failed.total, 1);
+        assert_eq!(failed.rows[0].id, second);
+    }
+
+    #[test]
+    fn prune_delivered_over_count_keeps_newest_delivered_rows() {
+        let db = ConfigDb::in_memory("test-pass").unwrap();
+        let old = db.event_outbox_insert(&event_at(10, "old")).unwrap();
+        let mid = db.event_outbox_insert(&event_at(20, "mid")).unwrap();
+        let new = db.event_outbox_insert(&event_at(30, "new")).unwrap();
+        let failed = db.event_outbox_insert(&event_at(40, "failed")).unwrap();
+
+        db.event_outbox_mark_delivered(old, 100).unwrap();
+        db.event_outbox_mark_delivered(mid, 200).unwrap();
+        db.event_outbox_mark_delivered(new, 300).unwrap();
+        db.event_outbox_mark_failed(failed, "dead", None).unwrap();
+
+        let deleted = db.event_outbox_prune_delivered_over_count(2, 100).unwrap();
+        assert_eq!(deleted, 1);
+
+        let rows = db.event_outbox_recent(10).unwrap();
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        assert!(!ids.contains(&old));
+        assert!(ids.contains(&mid));
+        assert!(ids.contains(&new));
+        assert!(ids.contains(&failed));
+    }
+
+    #[test]
+    fn requeue_failed_preserves_attempt_count_and_clears_failure_state() {
+        let db = ConfigDb::in_memory("test-pass").unwrap();
+        let id = db.event_outbox_insert(&event_at(10, "dead")).unwrap();
+
+        let claimed = db.event_outbox_claim_due("worker-a", 100, 30, 10).unwrap();
+        assert_eq!(claimed[0].attempts, 1);
+        db.event_outbox_mark_failed(id, "webhook exhausted", None)
+            .unwrap();
+
+        assert!(db.event_outbox_requeue_failed(id, 200).unwrap());
+
+        let row = db.event_outbox_load(id).unwrap().unwrap();
+        assert_eq!(row.status, STATUS_PENDING);
+        assert_eq!(row.attempts, 1);
+        assert_eq!(row.next_attempt_at, Some(200));
+        assert_eq!(row.claimed_by, None);
+        assert_eq!(row.claimed_at, None);
+        assert_eq!(row.delivered_at, None);
+        assert_eq!(row.last_error, None);
+    }
+
+    #[test]
+    fn requeue_failed_many_only_touches_dead_rows() {
+        let db = ConfigDb::in_memory("test-pass").unwrap();
+        let failed = db.event_outbox_insert(&event_at(10, "failed")).unwrap();
+        let pending = db.event_outbox_insert(&event_at(20, "pending")).unwrap();
+        let delivered = db.event_outbox_insert(&event_at(30, "delivered")).unwrap();
+
+        db.event_outbox_mark_failed(failed, "dead", None).unwrap();
+        db.event_outbox_mark_delivered(delivered, 150).unwrap();
+
+        let updated = db
+            .event_outbox_requeue_failed_many(&[failed, pending, delivered, 9999], 250)
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let failed_row = db.event_outbox_load(failed).unwrap().unwrap();
+        let pending_row = db.event_outbox_load(pending).unwrap().unwrap();
+        let delivered_row = db.event_outbox_load(delivered).unwrap().unwrap();
+        assert_eq!(failed_row.status, STATUS_PENDING);
+        assert_eq!(failed_row.next_attempt_at, Some(250));
+        assert_eq!(pending_row.status, STATUS_PENDING);
+        assert_eq!(pending_row.next_attempt_at, None);
+        assert_eq!(delivered_row.status, STATUS_DELIVERED);
     }
 }

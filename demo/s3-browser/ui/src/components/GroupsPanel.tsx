@@ -5,8 +5,8 @@ import type { IamGroup, IamMode, IamUser } from '../adminApi';
 import { getAdminConfig, getGroups, createGroup, updateGroup, deleteGroup, addGroupMember, removeGroupMember, getUsers } from '../adminApi';
 import { useCardStyles } from './shared-styles';
 import { useColors } from '../ThemeContext';
-import PermissionEditor, { permissionsToRows, rowsToPermissions } from './PermissionEditor';
-import type { PermissionRow } from './PermissionEditor';
+import PermissionEditor from './PermissionEditor';
+import { permissionsToRows, rowsToPermissions, type PermissionRow } from './permissionRows';
 import IamSourceBanner from './IamSourceBanner';
 
 const { Text, Title } = Typography;

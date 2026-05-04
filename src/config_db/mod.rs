@@ -23,7 +23,7 @@ pub struct ConfigDb {
 }
 
 /// Schema version — bump when adding migrations.
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 10;
 
 pub(crate) mod auth_providers;
 mod declarative;
@@ -366,6 +366,62 @@ impl ConfigDb {
             )?;
             info!(
                 "Migrated config DB schema from v{} to v9 (added event outbox)",
+                version
+            );
+        }
+
+        if version < 10 {
+            // v10: Lifecycle runtime observability. Rules remain YAML-owned;
+            // the DB stores scheduler state, run history, per-object failures,
+            // and a per-rule lease so multi-instance schedulers do not execute
+            // the same delete rule concurrently.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS lifecycle_state (
+                    rule_name                 TEXT PRIMARY KEY,
+                    last_run_at               INTEGER,
+                    next_due_at               INTEGER NOT NULL,
+                    last_status               TEXT NOT NULL,
+                    objects_expired_lifetime  INTEGER NOT NULL DEFAULT 0,
+                    bytes_expired_lifetime    INTEGER NOT NULL DEFAULT 0,
+                    leader_instance_id        TEXT,
+                    leader_expires_at         INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS lifecycle_run_history (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    rule_name       TEXT NOT NULL,
+                    triggered_by    TEXT NOT NULL DEFAULT 'unknown',
+                    started_at      INTEGER NOT NULL,
+                    finished_at     INTEGER,
+                    objects_scanned INTEGER NOT NULL DEFAULT 0,
+                    objects_expired INTEGER NOT NULL DEFAULT 0,
+                    objects_skipped INTEGER NOT NULL DEFAULT 0,
+                    bytes_expired   INTEGER NOT NULL DEFAULT 0,
+                    errors          INTEGER NOT NULL DEFAULT 0,
+                    status          TEXT NOT NULL,
+                    FOREIGN KEY (rule_name) REFERENCES lifecycle_state(rule_name) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_lifecycle_run_history_rule
+                    ON lifecycle_run_history(rule_name, started_at DESC);
+
+                CREATE TABLE IF NOT EXISTS lifecycle_failures (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    rule_name     TEXT NOT NULL,
+                    run_id        INTEGER,
+                    occurred_at   INTEGER NOT NULL,
+                    bucket        TEXT NOT NULL,
+                    object_key    TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    FOREIGN KEY (rule_name) REFERENCES lifecycle_state(rule_name) ON DELETE CASCADE,
+                    FOREIGN KEY (run_id) REFERENCES lifecycle_run_history(id) ON DELETE SET NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_lifecycle_failures_rule
+                    ON lifecycle_failures(rule_name, occurred_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_lifecycle_failures_run
+                    ON lifecycle_failures(rule_name, run_id, occurred_at DESC);",
+            )?;
+            info!(
+                "Migrated config DB schema from v{} to v10 (added lifecycle runtime tables)",
                 version
             );
         }

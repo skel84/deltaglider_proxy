@@ -459,12 +459,18 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     spawn_cache_monitor(&state, &metrics);
 
     if !config_db_mismatch {
+        deltaglider_proxy::lifecycle::scheduler::spawn_scheduler(
+            shared_config.clone(),
+            config_db.clone(),
+            state.clone(),
+        );
         if let Some(db) = config_db.as_ref() {
             deltaglider_proxy::replication::scheduler::spawn_scheduler(
                 shared_config.clone(),
                 db.clone(),
                 state.clone(),
             );
+            deltaglider_proxy::event_delivery::spawn_dispatcher(shared_config.clone(), db.clone());
         }
     }
 

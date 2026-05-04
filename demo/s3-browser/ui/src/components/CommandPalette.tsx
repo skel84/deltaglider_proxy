@@ -28,7 +28,7 @@ import {
 } from '@ant-design/icons';
 import type { ReactNode } from 'react';
 import { useColors } from '../ThemeContext';
-import { ADMIN_IA } from './AdminSidebar';
+import { ADMIN_IA } from './adminNavigation';
 
 const { Text } = Typography;
 

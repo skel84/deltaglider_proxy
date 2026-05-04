@@ -433,6 +433,17 @@ pub struct Config {
     #[serde(default)]
     pub replication: crate::config_sections::ReplicationConfig,
 
+    /// Delete-only lifecycle expiration rules. Disabled by default and
+    /// engine-routed so DeltaGlider internals stay hidden from deletion
+    /// planning. See [`crate::config_sections::LifecycleConfig`].
+    #[serde(default)]
+    pub lifecycle: crate::config_sections::LifecycleConfig,
+
+    /// Durable event outbox delivery. Disabled by default; when enabled a
+    /// background dispatcher POSTs event rows to a configured webhook.
+    #[serde(default)]
+    pub event_delivery: crate::config_sections::EventDeliveryConfig,
+
     /// Operator-authored admission blocks.
     ///
     /// Parsed from `admission.blocks:` in the sectioned YAML OR from
@@ -906,6 +917,8 @@ impl Default for Config {
             default_backend: None,
             backend_encryption: BackendEncryptionConfig::default(),
             replication: crate::config_sections::ReplicationConfig::default(),
+            lifecycle: crate::config_sections::LifecycleConfig::default(),
+            event_delivery: crate::config_sections::EventDeliveryConfig::default(),
             admission_blocks: Vec::new(),
             iam_mode: crate::config_sections::IamMode::default(),
             iam_users: Vec::new(),
@@ -1048,6 +1061,7 @@ fn classify_shape(doc: &serde_yaml::Value) -> ConfigShape {
         "backend_encryption",
         "tls",
         "buckets",
+        "lifecycle",
         // Phase 3b.2.a: operator-authored admission blocks at the flat
         // root. Both sectioned (`admission:`) and flat (`admission_blocks:`)
         // forms exist for round-trip preservation; mixing them is
@@ -1665,6 +1679,10 @@ impl Config {
         // never has to deal with malformed rules at runtime.
         warnings.extend(crate::config_sections::validate_replication(
             &self.replication,
+        ));
+        warnings.extend(crate::config_sections::validate_lifecycle(&self.lifecycle));
+        warnings.extend(crate::config_sections::validate_event_delivery(
+            &self.event_delivery,
         ));
 
         warnings

@@ -1,10 +1,8 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { ConfigProvider } from 'antd'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import App from './App'
-import { lightTheme, darkTheme } from './theme'
-import { ThemeProvider, useTheme } from './ThemeContext'
+import Root from './Root'
+import ThemeProvider from './ThemeProvider'
 import './theme.css'
 
 // Single process-wide query client. Defaults are tuned for an internal
@@ -26,17 +24,6 @@ const queryClient = new QueryClient({
     },
   },
 });
-
-function Root() {
-  const { isDark } = useTheme();
-  return (
-    <ConfigProvider
-      theme={isDark ? darkTheme : lightTheme}
-    >
-      <App />
-    </ConfigProvider>
-  );
-}
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
