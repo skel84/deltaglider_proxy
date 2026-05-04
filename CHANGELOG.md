@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## v0.9.7 — 2026-05-04
+
+### Lifecycle policies, event outbox, and replication operations
+
+- Added lifecycle v2 support for expiring objects, transitioning objects
+  between storage classes/backends, previewing planned actions, and surfacing
+  lifecycle state through the admin UI/API.
+- Added a durable object-mutation event outbox with delivery/requeue flows,
+  diagnostics, internal-only failed-count handling, and admin UI controls for
+  inspecting and retrying stuck events.
+- Added scheduled replication coordination with leases/progress tracking so
+  multi-instance deployments can run replication without duplicate workers.
+- Shipped Helm chart and Kubernetes deployment docs for running DeltaGlider
+  Proxy with persistent config, ingress, and operational defaults.
+
+### Routing backend and admin UI polish
+
+- Fixed routed-bucket listing semantics so virtual buckets preserve their
+  backend origin and duplicate real bucket names follow request-routing
+  priority: explicit route, default backend, then stable backend order.
+- Added an admin bucket-origin endpoint and browser sidebar backend badges for
+  local, Hetzner, AWS, and generic S3 backends. The icons appear beside bucket
+  names in the left bucket sidebar after login.
+- Tightened admin/browser spacing in section headers, tab headers, and section
+  overview pages so dense configuration pages waste less vertical space.
+
 ## v0.9.6 — 2026-05-01
 
 ## v0.9.5 — 2026-05-01
