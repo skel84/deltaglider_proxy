@@ -18,18 +18,27 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cd demo/s3-browser/ui && npm ci && npm run build
 npm run dev                    # dev server on :5173, proxies /api to :9001
 
-# Tests (MinIO required for S3 integration tests)
+# Tests
+# Merge gate (see `.github/workflows/ci.yml`): `cargo test --lib`, curated
+# integration batches + s3s-adapter job, delta/memory, frontend lint/tsc/knip,
+# Node regression scripts, E2E smoke — not a single `cargo test --all`.
+cargo test --lib --locked
+./scripts/check-integration-tests-in-ci.sh   # every tests/*.rs appears in ci.yml
+cargo test --test delta_test                 # single integration binary
+cargo test --test delta_test test_name       # single test
+cargo test -- --nocapture                    # show println output
+
+# Before a release or when touching integration tests, run the full matrix locally
+# (needs MinIO on localhost:9000 — same as CI):
 cargo test --all --locked
-cargo test --test delta_test              # single test file
-cargo test --test delta_test test_name    # single test
-cargo test -- --nocapture                 # show println output
-cargo test --lib                          # unit tests only, no integration
+
+# Nightly CI also runs `test-all-nightly.yml` (`cargo test --all` default + s3s).
 
 # Docker (multi-stage: UI build → Rust build → slim runtime)
 docker build -t deltaglider-proxy .
 ```
 
-CI runs: `fmt` → `clippy -D warnings` → `test` (with MinIO) → RustSec audit → Cargo deny → Frontend lint → claude-review. All must pass.
+CI merge gate: `verify-integration-test-registry` → `fmt` → `clippy -D warnings` → parallel test jobs (lib, curated integration + extended admin/IAM/replication, s3s adapter, delta) → `e2e-smoke` → RustSec audit → Cargo deny → frontend (lint, tsc, knip, Node scripts) → docs/schema → claude-review. See `ci.yml` for the exact `--test` lists.
 
 ## Architecture
 

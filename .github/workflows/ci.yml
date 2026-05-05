@@ -28,6 +28,16 @@ env:
   AWS_SECRET_ACCESS_KEY: sccache-secret-key
 
 jobs:
+  verify-integration-test-registry:
+    name: Integration test registry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Verify tests/*.rs map to CI --test flags
+        run: ./scripts/check-integration-tests-in-ci.sh
+
   fmt:
     name: Rustfmt
     runs-on: k3s
@@ -152,7 +162,7 @@ jobs:
   test-integration:
     name: Integration Tests
     runs-on: k3s
-    timeout-minutes: 30
+    timeout-minutes: 50
     container:
       image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
       credentials:
@@ -215,6 +225,29 @@ jobs:
           RUST_BACKTRACE: "1"
         run: |
           cargo test --locked --test interop_test -- --include-ignored --nocapture
+      - name: Integration tests (admin, IAM, replication, lifecycle, …)
+        env:
+          RUST_BACKTRACE: "1"
+        run: |
+          cargo test --locked \
+            --test admin_bulk_objects_test \
+            --test admin_config_test \
+            --test admin_login_as_test \
+            --test admin_section_test \
+            --test bucket_existence_test \
+            --test cli_admin_test \
+            --test config_sync_ha_test \
+            --test config_sync_test \
+            --test encryption_test \
+            --test external_auth_test \
+            --test iam_declarative_reconcile_test \
+            --test iam_identity_test \
+            --test iam_mode_test \
+            --test iam_variables_clone_test \
+            --test lifecycle_test \
+            --test quota_test \
+            --test replication_test \
+            -- --nocapture
       - name: Clean up MinIO test data
         if: always()
         run: |
@@ -313,6 +346,32 @@ jobs:
             --test memory_test \
             -- --nocapture
 
+  e2e-smoke:
+    name: E2E smoke (embedded UI)
+    runs-on: k3s
+    timeout-minutes: 35
+    container:
+      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Build demo UI + release binary
+        env:
+          RUSTC_WRAPPER: ""
+        run: |
+          cd demo/s3-browser/ui && npm ci && npm run build
+          cd ../.. && cargo build --locked --release --bin deltaglider_proxy
+      - name: Install Playwright Chromium
+        run: |
+          cd demo/s3-browser/ui
+          npx playwright install chromium --with-deps
+      - name: Smoke test /_/ shell + /_/health
+        env:
+          DELTAGLIDER_PROXY_BIN: ${{ github.workspace }}/target/release/deltaglider_proxy
+        run: ./scripts/e2e-smoke.sh
+
   audit:
     name: RustSec Audit
     runs-on: k3s
@@ -374,6 +433,11 @@ jobs:
       # ── Blocking: Knip detects unused files, deps, and exports. ──
       - name: Knip (dead code / unused deps)
         run: cd demo/s3-browser/ui && npm run knip
+      - name: Node regression scripts (permissions + storage paths)
+        run: |
+          cd demo/s3-browser/ui
+          npm run test:permissions
+          npm run test:storage-path
       - name: npm audit
         run: cd demo/s3-browser/ui && npm audit --audit-level=high || true  # warn-only
 

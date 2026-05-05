@@ -34,22 +34,34 @@ The S3 API and demo UI both start on `http://localhost:9000`. The UI is availabl
 ### Running Tests
 
 ```bash
-# Unit tests (no external services needed)
-cargo test
+# Unit tests (no MinIO)
+cargo test --lib --locked
 
-# Integration tests (needs Docker — MinIO is started automatically via testcontainers)
-cargo test --test s3_integration_test
+# One integration binary (many need MinIO on localhost:9000 — see tests/common/mod.rs)
+cargo test --locked --test s3_integration_test
+
+# Full matrix (run before a release or after changing shared test harness / CI lists)
+cargo test --all --locked
 ```
+
+PR CI does **not** run `cargo test --all` (wall-clock); it runs `cargo test --lib` plus **explicit** integration binaries listed in `.github/workflows/ci.yml`. Every `tests/<name>.rs` must appear there — `./scripts/check-integration-tests-in-ci.sh` enforces it. A **nightly** workflow (`test-all-nightly.yml`) runs `cargo test --all` with MinIO.
 
 ### Code Quality Checks
 
-The CI runs these on every push — make sure they pass before submitting a PR:
+The merge gate matches `.github/workflows/ci.yml` — run these before submitting a PR:
 
 ```bash
-cargo fmt --all -- --check                                          # Formatting
-cargo clippy --locked --all-targets --all-features -- -D warnings   # Lints
-cargo test --all --locked                                           # Tests
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --lib --locked
+./scripts/check-integration-tests-in-ci.sh
+cd demo/s3-browser/ui && npm ci && npm run build && npm run lint && npm run typecheck && npm run knip \
+  && npm run test:permissions && npm run test:storage-path
+# Optional local parity with CI integration batches (needs MinIO):
+cargo test --locked --test s3_integration_test
 ```
+
+Embedded UI smoke (Playwright — same as `e2e-smoke` CI job): from repo root, `cargo build --release --bin deltaglider_proxy` with UI already built, then `cd demo/s3-browser/ui && npx playwright install chromium && cd ../../../.. && ./scripts/e2e-smoke.sh`.
 
 ## Project Structure
 

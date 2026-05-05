@@ -4,6 +4,8 @@
 # Node
 node_modules/
 dist/
+demo/s3-browser/ui/test-results/
+demo/s3-browser/ui/playwright-report/
 
 # Python
 __pycache__/
