@@ -102,6 +102,25 @@ Each permission is an ABAC rule with four fields:
 | `my-bucket/releases/*` | Objects under the `releases/` prefix |
 | `my-bucket/releases/v2.*` | Glob on the object key |
 
+Resource strings and string condition values may use identity templates:
+
+| Template | Expands to |
+|---|---|
+| `${username}` | The authenticated IAM user's `name` |
+| `${access_key_id}` | The authenticated IAM user's access key ID |
+
+Expansion happens when the in-memory IAM index is built, after group permissions are merged into each member user. The DB/YAML keeps the raw template. Values are percent-encoded before substitution, so a username like `alice/team*` becomes `alice%2Fteam%2A` and cannot inject slashes or wildcards. Unknown templates are rejected by user/group API validation and declarative IAM apply.
+
+Example per-user home prefix:
+
+```json
+{
+  "effect": "Allow",
+  "actions": ["read", "write", "list"],
+  "resources": ["my-bucket/home/${username}/*"]
+}
+```
+
 **Effect** — `Allow` (default) or `Deny`. Deny is absolute: if any Deny rule matches, the request fails even if other Allow rules match.
 
 **Conditions** — optional; see [IAM conditions](32-iam-conditions.md).

@@ -14,7 +14,7 @@ use crate::iam::{
     SharedIamState,
 };
 
-use super::{audit_log, trigger_config_sync, AdminState};
+use super::{audit_log, next_copy_name, trigger_config_sync, AdminState};
 
 #[derive(Deserialize)]
 pub struct CreateUserRequest {
@@ -38,6 +38,17 @@ pub struct UpdateUserRequest {
 pub struct RotateKeysRequest {
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
+}
+
+fn default_copy_group_memberships() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+pub struct CloneUserRequest {
+    pub name: Option<String>,
+    #[serde(default = "default_copy_group_memberships")]
+    pub copy_group_memberships: bool,
 }
 
 /// Mask the secret_access_key for API responses (shown only on create/rotate).
@@ -245,6 +256,75 @@ pub async fn create_user(
     tracing::info!("IAM user '{}' created ({})", user.name, user.access_key_id);
     audit_log("create_user", "admin", &user.name, &headers);
     // Return full user including secret (shown only once)
+    Ok((StatusCode::CREATED, Json(user)))
+}
+
+/// POST /api/admin/users/:id/clone — duplicate a user with fresh credentials.
+pub async fn clone_user(
+    State(state): State<Arc<AdminState>>,
+    axum::extract::Path(user_id): axum::extract::Path<i64>,
+    headers: HeaderMap,
+    body: Option<Json<CloneUserRequest>>,
+) -> Result<(StatusCode, Json<IamUser>), StatusCode> {
+    let db = state.config_db.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let db = db.lock().await;
+    let body = body.map(|Json(body)| body);
+    let source = db.get_user_by_id(user_id).map_err(|e| {
+        tracing::warn!("Failed to load source user {} for clone: {}", user_id, e);
+        StatusCode::NOT_FOUND
+    })?;
+
+    let name = body
+        .as_ref()
+        .and_then(|b| b.name.as_ref())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let names = db
+                .load_users()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|u| u.name);
+            next_copy_name(&source.name, names)
+        });
+
+    if name.starts_with('$') {
+        tracing::warn!("User name cannot start with '$': {:?}", name);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let access_key_id = iam::generate_access_key_id();
+    let secret_access_key = iam::generate_secret_access_key();
+    let copy_groups = body.map(|b| b.copy_group_memberships).unwrap_or(true);
+
+    let user = db
+        .clone_user(
+            user_id,
+            &name,
+            &access_key_id,
+            &secret_access_key,
+            copy_groups,
+        )
+        .map_err(|e| {
+            tracing::warn!("Failed to clone user {} as '{}': {}", user_id, name, e);
+            StatusCode::CONFLICT
+        })?;
+
+    rebuild_iam_index(&db, &state.iam_state)?;
+    trigger_config_sync(&state);
+
+    tracing::info!(
+        "IAM user '{}' cloned to '{}' ({})",
+        source.name,
+        user.name,
+        user.access_key_id
+    );
+    audit_log(
+        "clone_user",
+        "admin",
+        &format!("{} -> {}", source.name, user.name),
+        &headers,
+    );
     Ok((StatusCode::CREATED, Json(user)))
 }
 

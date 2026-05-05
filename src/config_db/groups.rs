@@ -124,6 +124,38 @@ impl ConfigDb {
         self.get_group_by_id(group_id)
     }
 
+    /// Clone a group atomically.
+    ///
+    /// Copies description and permissions. Memberships are copied only when
+    /// explicitly requested by the caller.
+    pub fn clone_group(
+        &self,
+        source_group_id: i64,
+        new_name: &str,
+        copy_members: bool,
+    ) -> Result<Group, ConfigDbError> {
+        let source = self.get_group_by_id(source_group_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO groups (name, description) VALUES (?1, ?2)",
+            params![new_name, source.description],
+        )?;
+        let group_id = tx.last_insert_rowid();
+        Self::insert_group_permissions(&tx, group_id, &source.permissions)?;
+
+        if copy_members {
+            for user_id in source.member_ids {
+                tx.execute(
+                    "INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?1, ?2)",
+                    params![group_id, user_id],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        self.get_group_by_id(group_id)
+    }
+
     /// Update an existing group by ID.
     pub fn update_group(
         &self,

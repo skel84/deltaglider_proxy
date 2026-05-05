@@ -52,8 +52,8 @@ pub use event_outbox::{
     RequeueEventOutboxRequest, RequeueEventOutboxResponse,
 };
 pub use groups::{
-    add_group_member, create_group, delete_group, list_groups, remove_group_member, update_group,
-    AddGroupMemberRequest, CreateGroupRequest, UpdateGroupRequest,
+    add_group_member, clone_group, create_group, delete_group, list_groups, remove_group_member,
+    update_group, AddGroupMemberRequest, CloneGroupRequest, CreateGroupRequest, UpdateGroupRequest,
 };
 pub use lifecycle::{
     failures as lifecycle_failures, history as lifecycle_history,
@@ -71,8 +71,9 @@ pub use replication::{
 };
 pub use scanner::{get_usage, migrate_legacy, scan_usage, ScanUsageRequest, UsageQuery};
 pub use users::{
-    create_user, delete_user, get_canned_policies, iam_version, list_users, rotate_user_keys,
-    update_user, CreateUserRequest, RotateKeysRequest, UpdateUserRequest,
+    clone_user, create_user, delete_user, get_canned_policies, iam_version, list_users,
+    rotate_user_keys, update_user, CloneUserRequest, CreateUserRequest, RotateKeysRequest,
+    UpdateUserRequest,
 };
 
 /// Type alias for the tracing reload handle.
@@ -198,6 +199,17 @@ pub(crate) fn audit_log(
     crate::audit::audit_log(action, admin_user, target, headers, "", "");
 }
 
+pub(crate) fn next_copy_name(base: &str, existing: impl IntoIterator<Item = String>) -> String {
+    let existing: std::collections::HashSet<String> = existing.into_iter().collect();
+    for n in 1.. {
+        let candidate = format!("{base} (copy{n})");
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded copy-name search should always return")
+}
+
 /// Common password validation for both admin API and CLI.
 /// Returns `Ok(())` if valid, `Err(message)` if invalid.
 pub fn validate_password(password: &str) -> Result<(), &'static str> {
@@ -238,4 +250,20 @@ pub fn validate_password(password: &str) -> Result<(), &'static str> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_copy_name;
+
+    #[test]
+    fn next_copy_name_skips_existing_suffixes() {
+        let existing = vec![
+            "reader".to_string(),
+            "reader (copy1)".to_string(),
+            "reader (copy2)".to_string(),
+        ];
+
+        assert_eq!(next_copy_name("reader", existing), "reader (copy3)");
+    }
 }

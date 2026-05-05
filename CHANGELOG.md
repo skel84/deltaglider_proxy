@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Admin IAM and storage-path authoring
+
+- Admin UI: grouped autocomplete for IAM resource patterns and LIST condition
+  prefixes (listed prefixes vs per-user placeholders), with clearer section
+  layout and plain-language help.
+- Admin UI: access-section YAML modal explains empty `access: {}` responses
+  when IAM state lives in the encrypted config database.
+- `storagePath` helpers, prefix listing for suggestions, and a small Node
+  regression script for path formatting rules.
+
+### IAM policy variables (proxy)
+
+- Policy variables such as `${username}` and `${access_key_id}` in resource
+  patterns and `s3:prefix` conditions, with safe cloning (no glob corruption).
+- Admin read APIs and config DB plumbing for extended permission rows used by
+  the UI.
+- Documentation updates for SigV4, IAM conditions, and declarative IAM.
+
+### Reliability
+
+- Test harness unsets `DGP_BOOTSTRAP_PASSWORD_HASH` and
+  `DGP_ADMIN_PASSWORD_HASH` in the child process so developer shells cannot
+  override the test config and break admin login tests.
+
 ## v0.9.7 — 2026-05-04
 
 ### Lifecycle policies, event outbox, and replication operations

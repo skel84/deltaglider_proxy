@@ -108,6 +108,16 @@ Conditions:
     s3:prefix: "user-alice/*"
 ```
 
+For reusable per-user rules, `s3:prefix` string values also support `${username}` and `${access_key_id}`. The same expansion rules as resource patterns apply: templates are stored raw, expanded per effective user after group inheritance, and identity values are percent-encoded before substitution.
+
+```json
+{
+  "StringLike": {
+    "s3:prefix": ["home/${username}/*", "keys/${access_key_id}/*"]
+  }
+}
+```
+
 **How it works:**
 
 ```mermaid

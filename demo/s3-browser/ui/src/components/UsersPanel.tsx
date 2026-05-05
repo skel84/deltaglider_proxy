@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Button, Typography, Spin, Alert, Input } from 'antd';
-import { PlusOutlined, SearchOutlined, TeamOutlined, DeleteOutlined } from '@ant-design/icons';
+import { PlusOutlined, SearchOutlined, TeamOutlined, DeleteOutlined, CopyOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
+import { cloneUser } from '../adminApi';
 import type { IamUser } from '../adminApi';
 import { useColors } from '../ThemeContext';
 import { useUsers, useDeleteUser } from '../queries/users';
@@ -105,6 +106,22 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
     setNewCreds({ ak, sk });
   };
 
+  const handleClone = async (user: IamUser) => {
+    onSavingChange?.(true);
+    setNewCreds(null);
+    try {
+      const cloned = await cloneUser(user.id, { copy_group_memberships: true });
+      await qc.invalidateQueries({ queryKey: qk.users.list() });
+      setCreating(false);
+      setSelectedId(cloned.id);
+      setNewCreds({ ak: cloned.access_key_id, sk: cloned.secret_access_key ?? '' });
+    } catch (err) {
+      console.error('Duplicate user failed:', err);
+    } finally {
+      onSavingChange?.(false);
+    }
+  };
+
   const handleDeleted = () => {
     setSelectedId(null);
     setCreating(false);
@@ -189,7 +206,7 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
                 onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = colors.BORDER + '40'; }}
                 onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}
               >
-                {/* Row 1: status dot + name + badges + delete */}
+                {/* Row 1: status dot + name + badges + actions */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <div style={{
                     width: 8, height: 8, borderRadius: '50%',
@@ -207,6 +224,19 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
                       textTransform: 'uppercase', flexShrink: 0,
                     }}>SSO</span>
                   )}
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<CopyOutlined />}
+                    title="Duplicate user with fresh credentials"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleClone(user);
+                    }}
+                    style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0, flexShrink: 0 }}
+                    onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
+                    onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
+                  />
                   <Button
                     type="text"
                     danger

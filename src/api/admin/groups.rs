@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::iam::{normalize_permissions, validate_permissions, Group, Permission};
 
 use super::users::rebuild_iam_index;
-use super::{audit_log, trigger_config_sync, AdminState};
+use super::{audit_log, next_copy_name, trigger_config_sync, AdminState};
 
 #[derive(Deserialize)]
 pub struct CreateGroupRequest {
@@ -28,6 +28,13 @@ pub struct UpdateGroupRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub permissions: Option<Vec<Permission>>,
+}
+
+#[derive(Deserialize)]
+pub struct CloneGroupRequest {
+    pub name: Option<String>,
+    #[serde(default)]
+    pub copy_members: bool,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +121,54 @@ pub async fn create_group(
 
     tracing::info!("IAM group '{}' created (id={})", group.name, group.id);
     audit_log("create_group", "admin", &group.name, &headers);
+    Ok((StatusCode::CREATED, Json(group)))
+}
+
+/// POST /api/admin/groups/:id/clone — duplicate a group.
+pub async fn clone_group(
+    State(state): State<Arc<AdminState>>,
+    axum::extract::Path(group_id): axum::extract::Path<i64>,
+    headers: HeaderMap,
+    body: Option<Json<CloneGroupRequest>>,
+) -> Result<(StatusCode, Json<Group>), StatusCode> {
+    let db = state.config_db.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let db = db.lock().await;
+    let body = body.map(|Json(body)| body);
+    let source = db.get_group_by_id(group_id).map_err(|e| {
+        tracing::warn!("Failed to load source group {} for clone: {}", group_id, e);
+        StatusCode::NOT_FOUND
+    })?;
+
+    let name = body
+        .as_ref()
+        .and_then(|b| b.name.as_ref())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let names = db
+                .load_groups()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|g| g.name);
+            next_copy_name(&source.name, names)
+        });
+    let copy_members = body.map(|b| b.copy_members).unwrap_or(false);
+
+    let group = db.clone_group(group_id, &name, copy_members).map_err(|e| {
+        tracing::warn!("Failed to clone group {} as '{}': {}", group_id, name, e);
+        StatusCode::CONFLICT
+    })?;
+
+    rebuild_iam_index(&db, &state.iam_state)?;
+    trigger_config_sync(&state);
+
+    tracing::info!("IAM group '{}' cloned to '{}'", source.name, group.name);
+    audit_log(
+        "clone_group",
+        "admin",
+        &format!("{} -> {}", source.name, group.name),
+        &headers,
+    );
     Ok((StatusCode::CREATED, Json(group)))
 }
 

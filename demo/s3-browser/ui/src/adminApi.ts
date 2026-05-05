@@ -486,6 +486,18 @@ export async function createUser(req: CreateUserRequest): Promise<IamUser> {
   return safeJson(res);
 }
 
+export async function cloneUser(
+  id: number,
+  req: { name?: string; copy_group_memberships?: boolean } = {},
+): Promise<IamUser> {
+  const res = await adminFetch(`/api/admin/users/${id}/clone`, 'POST', req);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `Failed to duplicate user: ${res.status}`);
+  }
+  return safeJson(res);
+}
+
 export async function updateUser(id: number, req: UpdateUserRequest): Promise<IamUser> {
   const res = await adminFetch(`/api/admin/users/${id}`, 'PUT', req);
   if (!res.ok) throw new Error(`Failed to update user: ${res.status}`);
@@ -548,6 +560,18 @@ export async function createGroup(req: CreateGroupRequest): Promise<IamGroup> {
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(text || `Failed to create group: ${res.status}`);
+  }
+  return safeJson(res);
+}
+
+export async function cloneGroup(
+  id: number,
+  req: { name?: string; copy_members?: boolean } = {},
+): Promise<IamGroup> {
+  const res = await adminFetch(`/api/admin/groups/${id}/clone`, 'POST', req);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `Failed to duplicate group: ${res.status}`);
   }
   return safeJson(res);
 }

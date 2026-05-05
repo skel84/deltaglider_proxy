@@ -42,9 +42,10 @@ import { listBuckets } from '../s3client';
 import { useColors } from '../ThemeContext';
 import { useApplyHandler, useDirtySection } from '../useDirtySection';
 import { formatBytes } from '../utils';
+import { normalizePrefix } from '../storagePath';
 import ApplyDialog from './ApplyDialog';
+import BucketPrefixInput from './BucketPrefixInput';
 import SectionHeader from './SectionHeader';
-import SimpleAutoComplete from './SimpleAutoComplete';
 import SimpleSelect from './SimpleSelect';
 import { useCardStyles } from './shared-styles';
 
@@ -106,11 +107,6 @@ function lineList(value: string): string[] {
 
 function lines(value: string[]): string {
   return value.join('\n');
-}
-
-function normalizePrefix(value: string): string {
-  const parts = value.split('/').map((part) => part.trim()).filter(Boolean);
-  return parts.length === 0 ? '' : `${parts.join('/')}/`;
 }
 
 function actionKind(action: LifecycleRuleConfig['action']): 'delete' | 'transition' {
@@ -787,7 +783,7 @@ function RuleEditor({
         style={{ marginTop: 14 }}
       />
 
-      <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+      <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14 }}>
         <Field label="Rule name">
           <Input
             value={rule.name}
@@ -801,23 +797,14 @@ function RuleEditor({
             Per-rule delete switch. Global scheduler must also be enabled.
           </Text>
         </Field>
-        <Field label="Bucket">
-          <SimpleAutoComplete
-            value={rule.bucket}
-            onChange={(bucket) => onChange({ bucket })}
-            options={buckets}
-            placeholder="prod-artifacts"
+        <Field label="Scope">
+          <BucketPrefixInput
+            value={{ bucket: rule.bucket, prefix: rule.prefix }}
+            onChange={(scope) => onChange({ bucket: scope.bucket, prefix: scope.prefix })}
+            buckets={buckets}
+            bucketPlaceholder="prod-artifacts"
+            prefixPlaceholder="builds/releases/"
           />
-        </Field>
-        <Field label="Prefix">
-          <Input
-            value={rule.prefix}
-            onChange={(e) => onChange({ prefix: e.target.value })}
-            onBlur={(e) => onChange({ prefix: normalizePrefix(e.target.value) })}
-            placeholder="releases/"
-            style={{ ...inputRadius, fontFamily: 'var(--font-mono)' }}
-          />
-          <PrefixHelp value={rule.prefix} />
         </Field>
         <Field label="Expire after">
           <Input
@@ -856,28 +843,17 @@ function RuleEditor({
       </div>
 
       {transitionAction && (
-        <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
-          <Field label="Destination bucket">
-            <SimpleAutoComplete
-              value={transitionAction.destination?.bucket || ''}
-              onChange={(bucket) => updateTransition({
-                destination: { ...transitionAction.destination, bucket },
-              })}
-              options={buckets}
-              placeholder="archive-artifacts"
-            />
-          </Field>
-          <Field label="Destination prefix">
-            <Input
-              value={transitionAction.destination?.prefix || ''}
-              onChange={(e) => updateTransition({
-                destination: { ...transitionAction.destination, prefix: e.target.value },
-              })}
-              onBlur={(e) => updateTransition({
-                destination: { ...transitionAction.destination, prefix: normalizePrefix(e.target.value) },
-              })}
-              placeholder="archive/"
-              style={{ ...inputRadius, fontFamily: 'var(--font-mono)' }}
+        <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14 }}>
+          <Field label="Destination">
+            <BucketPrefixInput
+              value={{
+                bucket: transitionAction.destination?.bucket || '',
+                prefix: transitionAction.destination?.prefix || '',
+              }}
+              onChange={(destination) => updateTransition({ destination })}
+              buckets={buckets}
+              bucketPlaceholder="archive-artifacts"
+              prefixPlaceholder="archive/releases/"
             />
           </Field>
           <Field label="Delete source after copy">
@@ -893,7 +869,7 @@ function RuleEditor({
       )}
 
       <AdvancedDisclosure title="Filters and batch size">
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14 }}>
           <Field label="Include globs">
             <Input.TextArea
               value={lines(rule.include_globs)}
@@ -1213,13 +1189,3 @@ function AdvancedDisclosure({ title, children }: { title: string; children: Reac
   );
 }
 
-function PrefixHelp({ value }: { value: string }) {
-  const normalized = normalizePrefix(value);
-  return (
-    <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
-      {normalized
-        ? <>Canonical path: <Text code>{normalized}</Text></>
-        : 'Leave empty for the whole bucket. Slashes are normalized automatically.'}
-    </Text>
-  );
-}

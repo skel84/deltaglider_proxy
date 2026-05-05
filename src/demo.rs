@@ -49,6 +49,7 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
             "/_/api/admin/users/:id/rotate-keys",
             post(admin::rotate_user_keys),
         )
+        .route("/_/api/admin/users/:id/clone", post(admin::clone_user))
         // IAM group management — POST/PUT/DELETE are gated.
         .route(
             "/_/api/admin/groups",
@@ -58,6 +59,7 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
             "/_/api/admin/groups/:id",
             put(admin::update_group).delete(admin::delete_group),
         )
+        .route("/_/api/admin/groups/:id/clone", post(admin::clone_group))
         .route(
             "/_/api/admin/groups/:id/members",
             post(admin::add_group_member),

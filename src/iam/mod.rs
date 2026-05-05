@@ -114,6 +114,21 @@ impl IamIndex {
                 }
             }
 
+            user.permissions = match permissions::expand_permission_templates(
+                &user.permissions,
+                &user.name,
+                &user.access_key_id,
+            ) {
+                Ok(perms) => perms,
+                Err(e) => {
+                    warn!(
+                        "IAM user '{}' ({}) has invalid permission templates: {} — denying all permissions",
+                        user.name, user.access_key_id, e
+                    );
+                    Vec::new()
+                }
+            };
+
             // Precompute IAM policies from permissions for iam-rs evaluation
             user.iam_policies = user
                 .permissions
@@ -425,6 +440,56 @@ mod tests {
         assert!(auth.can(S3Action::Write, "uploads", "file.bin"));
         assert!(!auth.can(S3Action::Write, "releases", "v1.zip"));
         assert!(!auth.can(S3Action::Delete, "bucket", "key"));
+    }
+
+    #[test]
+    fn test_group_permission_templates_expand_per_member_user() {
+        let users = vec![
+            IamUser {
+                id: 1,
+                name: "alice".into(),
+                access_key_id: "AKALICE".into(),
+                secret_access_key: "s".into(),
+                enabled: true,
+                created_at: String::new(),
+                permissions: vec![],
+                group_ids: vec![10],
+                auth_source: "local".into(),
+                iam_policies: vec![],
+            },
+            IamUser {
+                id: 2,
+                name: "bob".into(),
+                access_key_id: "AKBOB".into(),
+                secret_access_key: "s".into(),
+                enabled: true,
+                created_at: String::new(),
+                permissions: vec![],
+                group_ids: vec![10],
+                auth_source: "local".into(),
+                iam_policies: vec![],
+            },
+        ];
+        let groups = vec![Group {
+            id: 10,
+            name: "home-readers".into(),
+            description: String::new(),
+            permissions: vec![Permission {
+                id: 0,
+                effect: "Allow".into(),
+                actions: vec!["read".into()],
+                resources: vec!["prod/home/${username}/*".into()],
+                conditions: None,
+            }],
+            member_ids: vec![1, 2],
+            created_at: String::new(),
+        }];
+        let index = IamIndex::from_users_and_groups(users, groups);
+        let alice = index.get("AKALICE").unwrap();
+        let bob = index.get("AKBOB").unwrap();
+
+        assert_eq!(alice.permissions[0].resources, vec!["prod/home/alice/*"]);
+        assert_eq!(bob.permissions[0].resources, vec!["prod/home/bob/*"]);
     }
 
     #[test]

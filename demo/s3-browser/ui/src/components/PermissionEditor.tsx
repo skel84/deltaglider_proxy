@@ -1,9 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Input, Button, Typography, Segmented, Checkbox } from 'antd';
 import { PlusOutlined, DeleteOutlined, FilterOutlined } from '@ant-design/icons';
 import { useCardStyles } from './shared-styles';
 import { useColors } from '../ThemeContext';
+import { listBuckets } from '../s3client';
+import { parseResourcePattern } from '../storagePath';
 import type { PermissionRow } from './permissionRows';
+import ResourcePatternInput from './ResourcePatternInput';
+import ConditionPrefixInput from './ConditionPrefixInput';
 
 const { Text } = Typography;
 
@@ -65,6 +69,14 @@ function hasConditions(conditions?: Record<string, Record<string, string | strin
   ));
 }
 
+function firstConcreteResourceBucket(resources: string): string {
+  for (const part of resources.split(',')) {
+    const parsed = parseResourcePattern(part);
+    if (parsed.bucket && !parsed.bucket.includes('${')) return parsed.bucket;
+  }
+  return '';
+}
+
 interface PermissionEditorProps {
   permissions: PermissionRow[];
   onChange: (perms: PermissionRow[]) => void;
@@ -73,12 +85,40 @@ interface PermissionEditorProps {
 export default function PermissionEditor({ permissions, onChange }: PermissionEditorProps) {
   const { inputRadius } = useCardStyles();
   const colors = useColors();
-  const [expandedConditions, setExpandedConditions] = useState<Set<number>>(
-    () => new Set(permissions.map((p, i) => hasConditions(p.conditions) ? i : -1).filter(i => i >= 0))
-  );
+  const [bucketNames, setBucketNames] = useState<string[]>([]);
+  /** Rows where the optional-filters pane was explicitly opened without data yet (adding first condition). */
+  const [expandedConditions, setExpandedConditions] = useState<Set<number>>(() => new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    listBuckets()
+      .then((buckets) => {
+        if (!cancelled) setBucketNames(buckets.map((bucket) => bucket.name).filter(Boolean));
+      })
+      .catch(() => {
+        if (!cancelled) setBucketNames([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    setExpandedConditions((prev) => {
+      const next = new Set<number>();
+      for (const idx of prev) {
+        if (idx >= 0 && idx < permissions.length) next.add(idx);
+      }
+      return next;
+    });
+  }, [permissions.length]);
 
   const toggleConditions = (index: number) => {
-    setExpandedConditions(prev => {
+    if (hasConditions(permissions[index]?.conditions)) {
+      return;
+    }
+    setExpandedConditions((prev) => {
       const next = new Set(prev);
       if (next.has(index)) next.delete(index);
       else next.add(index);
@@ -94,13 +134,39 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
     color: colors.TEXT_MUTED,
     fontFamily: 'var(--font-ui)',
   };
+  const monoTextStyle: React.CSSProperties = {
+    fontFamily: 'var(--font-mono)',
+    color: colors.TEXT_PRIMARY,
+  };
 
   return (
     <>
+      <details style={{ marginBottom: 12, border: `1px solid ${colors.BORDER}`, borderRadius: 8, padding: '8px 10px', background: colors.BG_BASE }}>
+        <summary
+          title="Open permission examples and variable help"
+          style={{
+            cursor: 'pointer',
+            color: colors.TEXT_SECONDARY,
+            fontSize: 12,
+            fontWeight: 600,
+            userSelect: 'none',
+            minHeight: 28,
+            lineHeight: '28px',
+          }}
+        >
+          Examples and variables
+        </summary>
+        <div style={{ marginTop: 6, color: colors.TEXT_MUTED, fontSize: 12, lineHeight: 1.6 }}>
+          Resources match objects: <span style={monoTextStyle}>bucket/*</span>, <span style={monoTextStyle}>bucket/releases/*</span>, or <span style={monoTextStyle}>*</span>. Prefix conditions filter LIST requests only, so pair <span style={monoTextStyle}>bucket/releases/*</span> with <span style={monoTextStyle}>releases/*</span> when users should only list that prefix.
+          <div style={{ marginTop: 6 }}>
+            Variables: <span style={monoTextStyle}>{'${username}'}</span> and <span style={monoTextStyle}>{'${access_key_id}'}</span> expand per authenticated user.
+          </div>
+        </div>
+      </details>
       {permissions.map((row, i) => {
         const isDeny = row.effect === 'Deny';
-        const showCond = expandedConditions.has(i);
         const hasCond = hasConditions(row.conditions);
+        const conditionsVisible = expandedConditions.has(i) || hasCond;
         const prefixVal = getConditionValue(row.conditions, 'StringLike', 's3:prefix');
         const ipVal = getConditionValue(row.conditions, 'IpAddress', 'aws:SourceIp');
 
@@ -109,12 +175,12 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
             border: `1px solid ${isDeny ? `${colors.ACCENT_RED}40` : colors.BORDER}`,
             borderLeft: isDeny ? `3px solid ${colors.ACCENT_RED}` : `1px solid ${colors.BORDER}`,
             borderRadius: 8,
-            padding: 12,
-            marginBottom: 8,
+            padding: 14,
+            marginBottom: 10,
             background: isDeny ? `${colors.ACCENT_RED}08` : colors.BG_BASE,
           }}>
             {/* Header: Allow/Deny + Conditions toggle + Remove */}
-            <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ marginBottom: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span title="Deny rules override Allow rules">
                   <Segmented
@@ -131,36 +197,27 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
                     ]}
                   />
                 </span>
-                {hasCond && !showCond && (
-                  <span style={{
-                    fontSize: 10,
-                    color: colors.ACCENT_PURPLE,
-                    background: 'rgba(167, 139, 250, 0.1)',
-                    border: '1px solid rgba(167, 139, 250, 0.25)',
-                    padding: '1px 6px',
-                    borderRadius: 4,
-                    fontFamily: 'var(--font-mono)',
-                  }}>
-                    {prefixVal && `prefix: ${prefixVal}`}
-                    {prefixVal && ipVal && ' + '}
-                    {ipVal && `ip: ${ipVal}`}
-                  </span>
-                )}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                 <Button
-                  type="text"
+                  type={conditionsVisible ? 'default' : 'text'}
                   size="small"
                   icon={<FilterOutlined />}
-                  title="Add conditions (prefix restriction, IP filtering)"
+                  title={
+                    hasCond
+                      ? 'Conditions are expanded while prefix or IP filters are set — clear those fields below to collapse.'
+                      : 'Show optional conditions: prefix restriction and IP filtering'
+                  }
+                  disabled={hasCond}
                   onClick={() => toggleConditions(i)}
                   style={{
-                    opacity: showCond || hasCond ? 1 : 0.4,
+                    opacity: conditionsVisible ? 1 : 0.75,
                     color: hasCond ? colors.ACCENT_PURPLE : undefined,
-                    padding: '2px 6px',
-                    minWidth: 0,
+                    borderColor: conditionsVisible ? `${colors.ACCENT_PURPLE}66` : undefined,
                   }}
-                />
+                >
+                  Conditions
+                </Button>
                 <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => onChange(permissions.filter((_, j) => j !== i))}>
                   Remove
                 </Button>
@@ -168,7 +225,7 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
             </div>
 
             {/* Actions */}
-            <div style={{ marginBottom: 8 }}>
+            <div style={{ marginBottom: 12 }}>
               <Text type="secondary" style={{ fontSize: 12, fontWeight: 500 }}>Actions</Text>
               <Checkbox.Group
                 value={row.actions}
@@ -177,7 +234,7 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
                   updated[i] = { ...updated[i], actions: v as string[] };
                   onChange(updated);
                 }}
-                style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}
+                style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 10px', marginTop: 6 }}
               >
                 {ACTION_OPTIONS.map(opt => (
                   <Checkbox key={opt.value} value={opt.value} style={{ fontSize: 12 }}>{opt.label}</Checkbox>
@@ -186,74 +243,54 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
             </div>
 
             {/* Resources */}
-            <div style={{ marginBottom: showCond ? 8 : 4 }}>
+            <div style={{ marginBottom: conditionsVisible ? 12 : 4 }}>
               <Text type="secondary" style={{ fontSize: 12, fontWeight: 500 }}>Resources</Text>
-              <Input
+              <ResourcePatternInput
                 value={row.resources}
-                onChange={e => {
+                onChange={value => {
                   const updated = [...permissions];
-                  updated[i] = { ...updated[i], resources: e.target.value };
+                  updated[i] = { ...updated[i], resources: value };
                   onChange(updated);
                 }}
-                placeholder="e.g. my-bucket/*, my-bucket/releases/*"
-                style={{ ...inputRadius, marginTop: 2 }}
+                buckets={bucketNames}
+                style={{ ...inputRadius, marginTop: 4 }}
               />
-              <div style={{ fontSize: 11, color: colors.TEXT_MUTED, marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: '4px 12px' }}>
-                {[
-                  ['*', 'all buckets & keys'],
-                  ['my-bucket/*', 'everything in one bucket'],
-                  ['my-bucket/builds/*', 'one prefix only'],
-                ].map(([pattern, desc]) => (
-                  <span key={pattern} style={{ whiteSpace: 'nowrap' }}>
-                    <code style={{ background: 'var(--input-bg)', border: `1px solid ${colors.BORDER}`, padding: '1px 5px', borderRadius: 3, fontFamily: 'var(--font-mono)', fontSize: 10, color: colors.ACCENT_BLUE }}>{pattern}</code>
-                    <span style={{ margin: '0 3px', opacity: 0.4 }}>{'\u2192'}</span>
-                    <span style={{ fontSize: 10 }}>{desc}</span>
-                  </span>
-                ))}
-              </div>
             </div>
 
-            {/* Conditions — collapsible */}
-            {showCond && (
+            {/* Conditions — collapsible only when empty; persisted rules with data stay open */}
+            {conditionsVisible && (
               <div style={{
                 borderTop: `1px solid ${colors.BORDER}`,
-                paddingTop: 10,
-                marginTop: 4,
+                paddingTop: 12,
+                marginTop: 6,
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                   <FilterOutlined style={{ fontSize: 11, color: colors.ACCENT_PURPLE }} />
-                  <Text style={{ fontSize: 12, fontWeight: 500, color: colors.ACCENT_PURPLE }}>Conditions</Text>
-                  <span style={{ fontSize: 10, color: colors.TEXT_MUTED }}>
-                    {'\u2014'} rule applies only when conditions match
-                  </span>
+                  <Text style={{ fontSize: 12, fontWeight: 500, color: colors.ACCENT_PURPLE }}>Optional filters</Text>
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {/* s3:prefix condition */}
                   <div>
                     <div style={condLabelStyle}>
-                      Prefix restriction
+                      List prefix
                       <span style={{ fontWeight: 400, textTransform: 'none', marginLeft: 6, opacity: 0.6 }}>
-                        StringLike on s3:prefix
+                        s3:prefix StringLike
                       </span>
                     </div>
-                    <Input
+                    <ConditionPrefixInput
                       value={prefixVal}
-                      onChange={e => {
+                      bucket={firstConcreteResourceBucket(row.resources)}
+                      onChange={value => {
                         const updated = [...permissions];
                         updated[i] = {
                           ...updated[i],
-                          conditions: setConditionValue(row.conditions, 'StringLike', 's3:prefix', e.target.value),
+                          conditions: setConditionValue(row.conditions, 'StringLike', 's3:prefix', value),
                         };
                         onChange(updated);
                       }}
-                      placeholder="e.g. .* (dotfiles), uploads/* (one prefix)"
-                      style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                      style={{ ...inputRadius, width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }}
                     />
-                    <div style={{ fontSize: 10, color: colors.TEXT_MUTED, marginTop: 4 }}>
-                      Matches the <code style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }}>prefix=</code> query parameter on LIST requests.
-                      Use <code style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: colors.ACCENT_BLUE }}>.*</code> to match all dotfiles/folders.
-                    </div>
                   </div>
 
                   {/* aws:SourceIp condition */}

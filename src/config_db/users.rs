@@ -48,6 +48,46 @@ impl ConfigDb {
         self.get_user_by_id(user_id)
     }
 
+    /// Clone a user atomically with fresh credentials.
+    ///
+    /// Copies direct permissions and, optionally, group memberships. External
+    /// identities, sessions, and the original secret are intentionally not copied.
+    pub fn clone_user(
+        &self,
+        source_user_id: i64,
+        new_name: &str,
+        new_access_key_id: &str,
+        new_secret_access_key: &str,
+        copy_group_memberships: bool,
+    ) -> Result<IamUser, ConfigDbError> {
+        let source = self.get_user_by_id(source_user_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO users (name, access_key_id, secret_access_key, enabled, auth_source) \
+             VALUES (?1, ?2, ?3, ?4, 'local')",
+            params![
+                new_name,
+                new_access_key_id,
+                new_secret_access_key,
+                source.enabled as i32
+            ],
+        )?;
+        let user_id = tx.last_insert_rowid();
+        Self::insert_permissions(&tx, user_id, &source.permissions)?;
+
+        if copy_group_memberships {
+            for group_id in source.group_ids {
+                tx.execute(
+                    "INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?1, ?2)",
+                    params![group_id, user_id],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        self.get_user_by_id(user_id)
+    }
+
     /// Update an existing user by ID.
     /// Wrapped in a transaction — partial updates are rolled back on failure.
     pub fn update_user(

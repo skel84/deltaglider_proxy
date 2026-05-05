@@ -43,10 +43,11 @@ import { listBuckets } from '../s3client';
 import { useColors } from '../ThemeContext';
 import { useCardStyles } from './shared-styles';
 import SectionHeader from './SectionHeader';
-import SimpleAutoComplete from './SimpleAutoComplete';
+import BucketPrefixInput from './BucketPrefixInput';
 import ApplyDialog from './ApplyDialog';
 import { useApplyHandler, useDirtySection } from '../useDirtySection';
 import { formatBytes } from '../utils';
+import { normalizePrefix } from '../storagePath';
 
 const { Text } = Typography;
 
@@ -111,11 +112,6 @@ function lineList(value: string): string[] {
 
 function lines(value: string[]): string {
   return value.join('\n');
-}
-
-function normalizePrefix(value: string): string {
-  const parts = value.split('/').map((part) => part.trim()).filter(Boolean);
-  return parts.length === 0 ? '' : `${parts.join('/')}/`;
 }
 
 function fmtUnix(ts: number | null | undefined): string {
@@ -643,7 +639,7 @@ function RuleEditor({
         </Tag>
       </div>
 
-      <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+      <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14 }}>
         <Field label="Rule name">
           <Input
             value={rule.name}
@@ -654,46 +650,28 @@ function RuleEditor({
         <Field label="Enabled">
           <Switch checked={rule.enabled} onChange={(enabled) => onChange({ enabled })} />
         </Field>
-        <Field label="Source bucket">
-          <SimpleAutoComplete
-            value={rule.source.bucket}
-            onChange={(bucket) => onChange({ source: { ...rule.source, bucket } })}
-            options={buckets}
-            placeholder="prod-artifacts"
+        <Field label="Source">
+          <BucketPrefixInput
+            value={rule.source}
+            onChange={(source) => onChange({ source })}
+            buckets={buckets}
+            bucketPlaceholder="prod-artifacts"
+            prefixPlaceholder="builds/releases/"
           />
         </Field>
-        <Field label="Source prefix">
-          <Input
-            value={rule.source.prefix}
-            onChange={(e) => onChange({ source: { ...rule.source, prefix: e.target.value } })}
-            onBlur={(e) => onChange({ source: { ...rule.source, prefix: normalizePrefix(e.target.value) } })}
-            placeholder="ror/builds"
-            style={{ ...inputRadius, fontFamily: 'var(--font-mono)' }}
+        <Field label="Destination">
+          <BucketPrefixInput
+            value={rule.destination}
+            onChange={(destination) => onChange({ destination })}
+            buckets={buckets}
+            bucketPlaceholder="backup-artifacts"
+            prefixPlaceholder="mirror/releases/"
           />
-          <PrefixHelp value={rule.source.prefix} />
-        </Field>
-        <Field label="Destination bucket">
-          <SimpleAutoComplete
-            value={rule.destination.bucket}
-            onChange={(bucket) => onChange({ destination: { ...rule.destination, bucket } })}
-            options={buckets}
-            placeholder="backup-artifacts"
-          />
-        </Field>
-        <Field label="Destination prefix">
-          <Input
-            value={rule.destination.prefix}
-            onChange={(e) => onChange({ destination: { ...rule.destination, prefix: e.target.value } })}
-            onBlur={(e) => onChange({ destination: { ...rule.destination, prefix: normalizePrefix(e.target.value) } })}
-            placeholder="lol"
-            style={{ ...inputRadius, fontFamily: 'var(--font-mono)' }}
-          />
-          <PrefixHelp value={rule.destination.prefix} />
         </Field>
       </div>
 
       <AdvancedDisclosure title="Advanced rule behavior">
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14 }}>
           <Field label="Interval">
             <Input
               value={rule.interval}
@@ -800,17 +778,6 @@ function AdvancedDisclosure({ title, children }: { title: string; children: Reac
         {children}
       </div>
     </details>
-  );
-}
-
-function PrefixHelp({ value }: { value: string }) {
-  const normalized = normalizePrefix(value);
-  return (
-    <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
-      {normalized
-        ? <>Canonical path: <Text code>{normalized}</Text></>
-        : 'Leave empty for the whole bucket. Slashes are normalized automatically.'}
-    </Text>
   );
 }
 

@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Button, Typography, Spin, Alert, Input, Divider, Checkbox } from 'antd';
-import { PlusOutlined, SearchOutlined, FolderOutlined, DeleteOutlined } from '@ant-design/icons';
+import { PlusOutlined, SearchOutlined, FolderOutlined, DeleteOutlined, CopyOutlined } from '@ant-design/icons';
 import type { IamGroup, IamMode, IamUser } from '../adminApi';
-import { getAdminConfig, getGroups, createGroup, updateGroup, deleteGroup, addGroupMember, removeGroupMember, getUsers } from '../adminApi';
+import { getAdminConfig, getGroups, createGroup, updateGroup, deleteGroup, addGroupMember, removeGroupMember, getUsers, cloneGroup } from '../adminApi';
 import { useCardStyles } from './shared-styles';
 import { useColors } from '../ThemeContext';
 import PermissionEditor from './PermissionEditor';
@@ -113,6 +113,24 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
     loadData();
   };
 
+  const handleClone = async (group: IamGroup) => {
+    const copyMembers = group.member_ids.length > 0
+      ? window.confirm(`Copy ${group.member_ids.length} member${group.member_ids.length !== 1 ? 's' : ''} into the duplicated group?`)
+      : false;
+    onSavingChange?.(true);
+    try {
+      const cloned = await cloneGroup(group.id, { copy_members: copyMembers });
+      setCreating(false);
+      setSelectedId(cloned.id);
+      await loadData();
+    } catch (err) {
+      console.error('Duplicate group failed:', err);
+      setError(err instanceof Error ? err.message : 'Duplicate group failed');
+    } finally {
+      onSavingChange?.(false);
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       {/* IAM source-of-truth banner — same explainer as UsersPanel. */}
@@ -186,6 +204,19 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
                   <Text strong style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
                     {group.name}
                   </Text>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<CopyOutlined />}
+                    title="Duplicate group"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleClone(group);
+                    }}
+                    style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0 }}
+                    onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
+                    onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
+                  />
                   <Button
                     type="text"
                     danger

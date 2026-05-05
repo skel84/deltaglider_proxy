@@ -1,4 +1,5 @@
 import type { IamPermission } from '../adminApi';
+import { normalizeResourcePattern } from '../storagePath';
 
 export interface PermissionRow {
   effect: string;
@@ -24,7 +25,7 @@ export function rowsToPermissions(rows: PermissionRow[]): IamPermission[] {
         id: 0,
         effect: r.effect || 'Allow',
         actions: r.actions,
-        resources: r.resources.split(',').map(s => s.trim()).filter(Boolean),
+        resources: r.resources.split(',').map(s => normalizeResourcePattern(s)).filter(Boolean),
       };
       // Only include conditions if at least one is non-empty
       if (r.conditions && Object.keys(r.conditions).length > 0) {

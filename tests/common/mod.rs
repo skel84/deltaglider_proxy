@@ -164,7 +164,12 @@ impl TestServer {
         cmd.env("DGP_CONFIG", &config_path)
             .env("RUST_LOG", "deltaglider_proxy=warn")
             .env("DGP_DEBUG_HEADERS", "true")
-            .env("DGP_TRUST_PROXY_HEADERS", "true");
+            .env("DGP_TRUST_PROXY_HEADERS", "true")
+            // Env overrides file config; a developer shell exporting
+            // DGP_BOOTSTRAP_PASSWORD_HASH would otherwise break every
+            // test that logs in with [`TEST_BOOTSTRAP_PASSWORD`].
+            .env_remove("DGP_BOOTSTRAP_PASSWORD_HASH")
+            .env_remove("DGP_ADMIN_PASSWORD_HASH");
         if let Some(ref key) = encryption_key {
             cmd.env("DGP_ENCRYPTION_KEY", key);
         }
@@ -337,7 +342,9 @@ impl TestServer {
             .env("DGP_DEBUG_HEADERS", "true")
             .env("DGP_TRUST_PROXY_HEADERS", "true")
             // Explicitly NOT setting DGP_ENCRYPTION_KEY.
-            .env_remove("DGP_ENCRYPTION_KEY");
+            .env_remove("DGP_ENCRYPTION_KEY")
+            .env_remove("DGP_BOOTSTRAP_PASSWORD_HASH")
+            .env_remove("DGP_ADMIN_PASSWORD_HASH");
         for (key, value) in &self.extra_env {
             cmd.env(key, value);
         }

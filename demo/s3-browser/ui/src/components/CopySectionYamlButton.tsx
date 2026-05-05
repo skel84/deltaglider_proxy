@@ -17,6 +17,40 @@ import type { SectionName } from '../adminApi';
 import { getSectionYaml } from '../adminApi';
 import { useColors } from '../ThemeContext';
 
+/** Strip full-line # comments (API bodies are comment-free; avoids double-detection if we re-fetch). */
+function stripLeadingYamlCommentLines(s: string): string {
+  return s
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n')
+    .trim();
+}
+
+/**
+ * True when the access section response is only an empty mapping.
+ * Happens often: API responses use `redact_all_secrets()` (no SigV4 keys in YAML),
+ * default `iam_mode: gui` is omitted by serde, and IAM directory state is DB-only.
+ */
+function isRedactedEmptyAccessYaml(apiBody: string): boolean {
+  const core = stripLeadingYamlCommentLines(apiBody);
+  if (!core.startsWith('access:')) return false;
+  const rest = core.slice('access:'.length).trim();
+  if (rest === '') return true;
+  if (rest === '{}' || /^\{\s*\}$/.test(rest)) return true;
+  return false;
+}
+
+const ACCESS_EMPTY_YAML_EXPLAINER = `# -----------------------------------------------------------------------------
+# Why this block looks empty (expected)
+# -----------------------------------------------------------------------------
+# • Proxy access_key_id / secret_access_key are redacted in every admin API YAML response.
+# • GUI IAM mode: users, groups, OAuth providers, and mapping rules live in the encrypted
+#   config database only — they are never embedded in section or settings YAML exports.
+# • Need IAM in a file? Avatar menu → Recovery → Download recovery backup (portable bundle).
+# -----------------------------------------------------------------------------
+
+`;
+
 interface SectionYamlModalProps {
   section?: SectionName;
   open: boolean;
@@ -26,6 +60,7 @@ interface SectionYamlModalProps {
 export function SectionYamlModal({ section, open, onClose }: SectionYamlModalProps) {
   const colors = useColors();
   const [yaml, setYaml] = useState('');
+  const [accessEmptyExplainer, setAccessEmptyExplainer] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copying, setCopying] = useState(false);
@@ -45,10 +80,17 @@ export function SectionYamlModal({ section, open, onClose }: SectionYamlModalPro
     setLoading(true);
     setError(null);
     setCopied(false);
+    setAccessEmptyExplainer(false);
     getSectionYaml(section)
       .then((text) => {
         if (cancelled || !mountedRef.current) return;
-        setYaml(text);
+        if (section === 'access' && isRedactedEmptyAccessYaml(text)) {
+          setAccessEmptyExplainer(true);
+          setYaml(`${ACCESS_EMPTY_YAML_EXPLAINER}${text.trim()}\n`);
+        } else {
+          setAccessEmptyExplainer(false);
+          setYaml(text);
+        }
       })
       .catch((e) => {
         if (cancelled || !mountedRef.current) return;
@@ -133,10 +175,24 @@ export function SectionYamlModal({ section, open, onClose }: SectionYamlModalPro
     >
       <Space direction="vertical" size="small" style={{ width: '100%' }}>
         {error && <Alert type="error" message="Section YAML fetch failed" description={error} showIcon />}
+        {accessEmptyExplainer && !error && (
+          <Alert
+            type="info"
+            showIcon
+            message="This preview is intentionally minimal"
+            description={
+              <>
+                SigV4 keys are redacted from API YAML. IAM users and groups in GUI mode live in the encrypted
+                database, not in <code style={{ fontSize: 11 }}>access:</code>. The comment block in the text area
+                below is included when you copy — use Recovery → Download recovery backup for a full IAM bundle.
+              </>
+            }
+          />
+        )}
         <Input.TextArea
           value={yaml}
           readOnly
-          rows={18}
+          rows={accessEmptyExplainer ? 24 : 18}
           placeholder={loading ? 'Loading...' : ''}
           style={{
             fontFamily: 'ui-monospace, Menlo, monospace',

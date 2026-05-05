@@ -16,6 +16,119 @@ use super::types::{Permission, S3Action};
 
 /// Valid action verbs for permissions.
 const VALID_ACTIONS: &[&str] = &["read", "write", "delete", "list", "admin", "*"];
+const ALLOWED_TEMPLATE_VARIABLES: &[&str] = &["username", "access_key_id"];
+
+fn validate_template_vars(value: &str) -> Result<(), String> {
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find('}') else {
+            return Err(format!("unterminated template variable in '{}'", value));
+        };
+        let name = &after_start[..end];
+        if !ALLOWED_TEMPLATE_VARIABLES.contains(&name) {
+            return Err(format!(
+                "unknown template variable '${{{}}}' in '{}' (allowed: ${{username}}, ${{access_key_id}})",
+                name, value
+            ));
+        }
+        rest = &after_start[end + 1..];
+    }
+    Ok(())
+}
+
+fn validate_condition_templates(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(s) => validate_template_vars(s),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                validate_condition_templates(item)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(map) => {
+            for value in map.values() {
+                validate_condition_templates(value)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn encode_template_value(value: &str) -> String {
+    urlencoding::encode(value).into_owned()
+}
+
+fn expand_template_value(
+    value: &str,
+    username: &str,
+    access_key_id: &str,
+) -> Result<String, String> {
+    validate_template_vars(value)?;
+    Ok(value
+        .replace("${username}", &encode_template_value(username))
+        .replace("${access_key_id}", &encode_template_value(access_key_id)))
+}
+
+fn expand_condition_templates(
+    value: serde_json::Value,
+    username: &str,
+    access_key_id: &str,
+) -> Result<serde_json::Value, String> {
+    match value {
+        serde_json::Value::String(s) => Ok(serde_json::Value::String(expand_template_value(
+            &s,
+            username,
+            access_key_id,
+        )?)),
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .map(|item| expand_condition_templates(item, username, access_key_id))
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (key, value) in map {
+                out.insert(
+                    key,
+                    expand_condition_templates(value, username, access_key_id)?,
+                );
+            }
+            Ok(serde_json::Value::Object(out))
+        }
+        other => Ok(other),
+    }
+}
+
+/// Expand identity templates in effective permissions for one authenticated user.
+///
+/// Stored DB/YAML permissions remain raw templates. At index-build time,
+/// `${username}` and `${access_key_id}` are substituted with percent-encoded
+/// identity values so user-controlled names cannot inject `/` or `*`.
+pub fn expand_permission_templates(
+    permissions: &[Permission],
+    username: &str,
+    access_key_id: &str,
+) -> Result<Vec<Permission>, String> {
+    permissions
+        .iter()
+        .map(|perm| {
+            let mut expanded = perm.clone();
+            expanded.resources = perm
+                .resources
+                .iter()
+                .map(|res| expand_template_value(res, username, access_key_id))
+                .collect::<Result<Vec<_>, _>>()?;
+            expanded.conditions = perm
+                .conditions
+                .clone()
+                .map(|conditions| expand_condition_templates(conditions, username, access_key_id))
+                .transpose()?;
+            Ok(expanded)
+        })
+        .collect()
+}
 
 // === IAM-RS Integration ===
 
@@ -237,6 +350,7 @@ pub fn normalize_permissions(permissions: &mut [Permission]) {
 /// - Resources must not be empty
 /// - Resource patterns: only trailing `*` is supported (no mid-pattern wildcards)
 /// - Resource must not contain whitespace or control characters
+/// - `${username}` and `${access_key_id}` may appear in resources or string condition values
 /// - Maximum 100 rules per user/group
 pub fn validate_permissions(permissions: &[Permission]) -> Result<(), String> {
     if permissions.len() > MAX_PERMISSION_RULES {
@@ -288,6 +402,7 @@ pub fn validate_permissions(permissions: &[Permission]) -> Result<(), String> {
                     ctx, res
                 ));
             }
+            validate_template_vars(res).map_err(|e| format!("{}: resource {}", ctx, e))?;
             // Only trailing * is valid. Check for * anywhere except the last character.
             if let Some(pos) = res.find('*') {
                 if pos != res.len() - 1 {
@@ -297,6 +412,11 @@ pub fn validate_permissions(permissions: &[Permission]) -> Result<(), String> {
                     ));
                 }
             }
+        }
+
+        if let Some(conditions) = &perm.conditions {
+            validate_condition_templates(conditions)
+                .map_err(|e| format!("{}: condition {}", ctx, e))?;
         }
     }
     Ok(())
@@ -1602,5 +1722,89 @@ mod tests {
                 pattern
             );
         }
+    }
+
+    #[test]
+    fn test_validate_accepts_known_template_variables() {
+        let perms = vec![Permission {
+            id: 0,
+            effect: "Allow".into(),
+            actions: vec!["read".into(), "list".into()],
+            resources: vec!["bucket/home/${username}/*".into()],
+            conditions: Some(serde_json::json!({
+                "StringLike": {
+                    "s3:prefix": ["home/${username}/*", "keys/${access_key_id}/*"]
+                }
+            })),
+        }];
+
+        assert!(validate_permissions(&perms).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_unknown_template_variables() {
+        let perms = vec![Permission {
+            id: 0,
+            effect: "Allow".into(),
+            actions: vec!["read".into()],
+            resources: vec!["bucket/home/${email}/*".into()],
+            conditions: None,
+        }];
+
+        let err = validate_permissions(&perms).unwrap_err();
+        assert!(err.contains("unknown template variable"), "error: {err}");
+    }
+
+    #[test]
+    fn test_validate_rejects_unknown_template_variables_in_conditions() {
+        let perms = vec![Permission {
+            id: 0,
+            effect: "Allow".into(),
+            actions: vec!["list".into()],
+            resources: vec!["bucket".into()],
+            conditions: Some(serde_json::json!({
+                "StringLike": {
+                    "s3:prefix": ["home/${username}/*", "home/${email}/*"]
+                }
+            })),
+        }];
+
+        let err = validate_permissions(&perms).unwrap_err();
+        assert!(err.contains("unknown template variable"), "error: {err}");
+    }
+
+    #[test]
+    fn test_expand_permission_templates_percent_encodes_identity_values() {
+        let perms = vec![Permission {
+            id: 0,
+            effect: "Allow".into(),
+            actions: vec!["read".into(), "list".into()],
+            resources: vec![
+                "bucket/home/${username}/*".into(),
+                "bucket/keys/${access_key_id}/*".into(),
+            ],
+            conditions: Some(serde_json::json!({
+                "StringLike": {
+                    "s3:prefix": ["home/${username}/*", "keys/${access_key_id}/*"]
+                }
+            })),
+        }];
+
+        let expanded = expand_permission_templates(&perms, "alice/slash*star", "AK/STAR*").unwrap();
+        assert_eq!(
+            expanded[0].resources,
+            vec![
+                "bucket/home/alice%2Fslash%2Astar/*",
+                "bucket/keys/AK%2FSTAR%2A/*"
+            ]
+        );
+        assert_eq!(
+            expanded[0].conditions,
+            Some(serde_json::json!({
+                "StringLike": {
+                    "s3:prefix": ["home/alice%2Fslash%2Astar/*", "keys/AK%2FSTAR%2A/*"]
+                }
+            }))
+        );
     }
 }

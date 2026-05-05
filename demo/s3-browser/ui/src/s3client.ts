@@ -167,6 +167,24 @@ export async function listObjects(prefix = ''): Promise<ListResult> {
   return { objects: allObjects, folders: Array.from(folderSet), isTruncated };
 }
 
+export async function listCommonPrefixes(bucket: string, prefix = ''): Promise<string[]> {
+  const cleanBucket = bucket.trim();
+  if (!cleanBucket) return [];
+
+  const resp = await getClient().send(
+    new ListObjectsV2Command({
+      Bucket: cleanBucket,
+      Prefix: prefix || undefined,
+      Delimiter: '/',
+      MaxKeys: 100,
+    })
+  );
+
+  return (resp.CommonPrefixes || [])
+    .map((cp) => cp.Prefix || '')
+    .filter((p) => p && p !== prefix && !p.endsWith('//'));
+}
+
 /** Fetch HEAD metadata for a single object (called lazily by InspectorPanel). */
 export async function headObject(key: string): Promise<{
   headers: Record<string, string>;
