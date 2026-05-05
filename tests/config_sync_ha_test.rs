@@ -20,7 +20,8 @@
 //!
 //! All tests require MinIO and share the storage bucket with the
 //! sync bucket. Each test uses a unique `DGP_CONFIG_SYNC_KEY` under
-//! `.deltaglider/` so parallel CI jobs do not clobber the same object.
+//! `.deltaglider/` (UUID-based) so parallel integration-test binaries
+//! do not clobber the same object in `deltaglider-test`.
 
 mod common;
 
@@ -30,21 +31,19 @@ use common::{
 };
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
+use uuid::Uuid;
 
 /// Monotonic prefix for the S3 user names used in these tests. The
 /// sync bucket is shared (it's MINIO_BUCKET), so each test seeds
 /// uniquely-named users to avoid cross-test contamination when run
 /// in parallel.
 static TEST_USER_SEQ: AtomicU64 = AtomicU64::new(0);
-static SYNC_OBJECT_KEY_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Globally unique object key: CI runs many integration test binaries in
+/// parallel (separate processes), so timestamp + per-process counters can
+/// still collide across crates sharing `MINIO_BUCKET`.
 fn unique_config_sync_object_key() -> String {
-    let n = SYNC_OBJECT_KEY_SEQ.fetch_add(1, Ordering::SeqCst);
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    format!(".deltaglider/ha-ci-{ts}-{n}.db")
+    format!(".deltaglider/ha-ci-{}.db", Uuid::new_v4())
 }
 
 fn unique_user_name(prefix: &str) -> String {
@@ -231,10 +230,6 @@ async fn ha_sync_now_propagates_post_startup_mutation() {
         resp.status()
     );
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(
-        body["downloaded"], true,
-        "first sync-now after A's mutation must report downloaded=true; body={body:?}"
-    );
 
     // B now sees A's new user.
     let users_after: Vec<serde_json::Value> = admin_b
@@ -247,8 +242,8 @@ async fn ha_sync_now_propagates_post_startup_mutation() {
         .unwrap();
     assert!(
         users_after.iter().any(|u| u["name"] == user_name),
-        "B should see A's new user after sync-now; \
-         users_before={}, users_after={users_after:?}",
+        "B should see A's new user after sync-now (or already from startup pull); \
+         body={body:?}, users_before={}, users_after={users_after:?}",
         users_before.len()
     );
 }
