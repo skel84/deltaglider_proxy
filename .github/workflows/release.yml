@@ -321,8 +321,9 @@ jobs:
         with:
           images: ${{ env.DOCKERHUB_REPO }}
 
-      - name: Build and push by digest
-        id: build
+      - name: Build and push by digest (attempt 1)
+        id: build_a
+        continue-on-error: true
         uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6.16.0
         with:
           context: .
@@ -347,6 +348,29 @@ jobs:
           provenance: false
           sbom: false
 
+      - name: Build and push by digest (attempt 2 after transient failure)
+        id: build_b
+        if: steps.build_a.outcome == 'failure'
+        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6.16.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.DOCKERHUB_REPO }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+          provenance: false
+          sbom: false
+
+      - name: Verify at least one docker push attempt succeeded
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.build_a.outcome }}" = "success" ] || [ "${{ steps.build_b.outcome }}" = "success" ]; then
+            exit 0
+          fi
+          echo "::error::both docker build/push attempts failed for ${{ matrix.platform }}"
+          exit 1
+
       # CRITICAL: write the digest marker into a RUN-SCOPED directory
       # (never `/tmp/digests` — on persistent self-hosted runners that
       # path accumulates markers from every prior release, and the
@@ -366,7 +390,10 @@ jobs:
           digest_dir="${RUNNER_TEMP}/dgp-digest"
           rm -rf "$digest_dir"
           mkdir -p "$digest_dir"
-          digest="${{ steps.build.outputs.digest }}"
+          digest="${{ steps.build_a.outputs.digest }}"
+          if [ -z "$digest" ]; then
+            digest="${{ steps.build_b.outputs.digest }}"
+          fi
           if [ -z "$digest" ]; then
             echo "::error::build step produced no digest output — refusing to upload an empty marker"
             exit 1
