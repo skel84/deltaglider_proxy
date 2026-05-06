@@ -4,6 +4,8 @@
 
 ## v0.9.10 — 2026-05-06
 
+## v0.9.11 — 2026-05-06
+
 ### Browser UI and admin
 
 - Open-access mode: admin bootstrap login now seeds anonymous S3 session credentials so a
