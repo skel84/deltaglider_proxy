@@ -264,7 +264,7 @@ export default function App() {
       identityLabel={identity?.user?.name || currentAccessKey || 'user'}
       canAdmin={canAdmin}
       onBrowserClick={() => navigate('browse')}
-      onSettingsClick={() => navigate('admin')}
+      onSettingsClick={canAdmin ? () => navigate('admin') : undefined}
       onDocsClick={() => navigate('docs')}
       onLogout={handleLogout}
       showHidden={includeBrowserToggles ? s3.showHidden : undefined}
@@ -449,6 +449,7 @@ export default function App() {
             canCreateBucket={canCreateBucket}
             canDeleteBucket={(bucket) => canUse(identity, 'admin', bucket)}
             canUpload={canUploadToActiveBucket}
+            canAdmin={canAdmin}
             open={siderOpen}
             onClose={() => setSiderOpen(false)}
             isMobile={isMobile}

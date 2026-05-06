@@ -37,6 +37,7 @@ interface Props {
   canCreateBucket: boolean;
   canDeleteBucket: (bucket: string) => boolean;
   canUpload: boolean;
+  canAdmin: boolean;
   open: boolean;
   onClose: () => void;
   isMobile: boolean;
@@ -51,6 +52,7 @@ export default function Sidebar({
   canCreateBucket,
   canDeleteBucket,
   canUpload,
+  canAdmin,
   open,
   onClose,
   isMobile,
@@ -262,7 +264,7 @@ export default function Sidebar({
                   }}>
                     {b.name}
                   </span>
-                  <BucketBackendBadge origin={b.backend} />
+                  {canAdmin && <BucketBackendBadge origin={b.backend} />}
                 </span>
               </button>
               {canDeleteBucket(b.name) && (
