@@ -7,6 +7,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { useColors } from '../ThemeContext';
 import type { FolderSizeState } from '../useComputeSize';
 import { getPreviewMode } from './filePreviewMode';
+import { canRequestPrefixUsageScan } from '../permissions';
 
 const { Text } = Typography;
 
@@ -26,6 +27,7 @@ interface Props {
   headCache: Record<string, { storageType?: string; storedSize?: number; error?: boolean }>;
   onEnrichKeys: (keys: string[]) => void;
   folderSizes: Record<string, FolderSizeState>;
+  virtualFolders: string[];
   onComputeSize: (prefix: string) => void;
   onCancelSize: (prefix: string) => void;
   onAutoPopulateSizes?: (currentPrefix: string, folderPrefixes: string[]) => void;
@@ -50,6 +52,7 @@ export default function ObjectTable({
   headCache,
   onEnrichKeys,
   folderSizes,
+  virtualFolders,
   onComputeSize,
   onCancelSize,
   onAutoPopulateSizes,
@@ -180,6 +183,14 @@ export default function ObjectTable({
             >
               <FolderOutlined aria-hidden="true" style={{ color: ACCENT_BLUE, fontSize: 15 }} />
               {record.name}
+              {canRequestPrefixUsageScan(record.key.replace('folder:', ''), virtualFolders) ? null : (
+                <sup
+                  title="Virtual folder from your permissions. It will become a real folder after upload."
+                  style={{ color: TEXT_MUTED, fontSize: 10, fontWeight: 600, lineHeight: 1, marginLeft: 2 }}
+                >
+                  (i)
+                </sup>
+              )}
             </button>
           );
         }
@@ -205,7 +216,18 @@ export default function ObjectTable({
       render: (_: unknown, record: RowData) => {
         if (record._isFolder) {
           const folderPrefix = record.key.replace('folder:', '');
+          const canScanFolder = canRequestPrefixUsageScan(folderPrefix, virtualFolders);
           const sizeState = folderSizes[folderPrefix];
+          if (!canScanFolder) {
+            return (
+              <span
+                title="Virtual folder from your permissions. It will become a real folder after upload."
+                style={{ fontSize: 11, color: TEXT_MUTED }}
+              >
+                Virtual
+              </span>
+            );
+          }
           if (sizeState?.loading) {
             return (
               <Button

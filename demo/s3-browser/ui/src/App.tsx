@@ -21,7 +21,7 @@ import type { WhoamiResponse } from './adminApi';
 import { useColors } from './ThemeContext';
 import useComputeSize from './useComputeSize';
 import { NavigationContext } from './NavigationContext';
-import { canUse, writablePrefixesForBucket } from './permissions';
+import { canRequestPrefixUsageScan, canUse, writablePrefixesForBucket } from './permissions';
 
 const { Content } = Layout;
 const { useBreakpoint } = Grid;
@@ -127,9 +127,14 @@ export default function App() {
   );
   const s3 = useS3Browser({ writablePrefixes });
   const folderSize = useComputeSize();
+  const computeSize = folderSize.compute;
   const reconnectS3 = s3.reconnect;
   const changeS3Bucket = s3.changeBucket;
   const cancelFolderSizes = folderSize.cancelAll;
+  const computeFolderSize = useCallback((folderPrefix: string) => {
+    if (!canRequestPrefixUsageScan(folderPrefix, s3.virtualFolders)) return;
+    computeSize(folderPrefix);
+  }, [computeSize, s3.virtualFolders]);
 
   // Restore credentials from server-side session on mount.
   // Also check for admin session (OAuth sets a session cookie even if S3 creds
@@ -421,7 +426,8 @@ export default function App() {
               headCache={s3.headCache}
               onEnrichKeys={s3.enrichKeys}
               folderSizes={folderSize.sizes}
-              onComputeSize={folderSize.compute}
+              virtualFolders={s3.virtualFolders}
+              onComputeSize={computeFolderSize}
               onCancelSize={folderSize.cancel}
               onAutoPopulateSizes={folderSize.autoPopulate}
               onPreview={setPreviewObject}

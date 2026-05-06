@@ -22,6 +22,7 @@ export default function useS3Browser(options: UseS3BrowserOptions = {}) {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [objects, setObjects] = useState<S3Object[]>([]);
   const [folders, setFolders] = useState<string[]>([]);
+  const [virtualFolders, setVirtualFolders] = useState<string[]>([]);
   const [prefix, setPrefix] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -52,6 +53,7 @@ export default function useS3Browser(options: UseS3BrowserOptions = {}) {
     return name !== '.deltaglider' && name !== '.dg';
   });
   const filteredFolders = query ? visibleFolders.filter((f) => f.toLowerCase().includes(query)) : visibleFolders;
+  const filteredVirtualFolders = filteredFolders.filter((folder) => virtualFolders.includes(folder));
 
   const selection = useSelection(filteredObjects, filteredFolders);
   const { clearSelection, reconcile, selectedKeys } = selection;
@@ -60,6 +62,7 @@ export default function useS3Browser(options: UseS3BrowserOptions = {}) {
   const resetBrowseState = useCallback(() => {
     setObjects([]);
     setFolders([]);
+    setVirtualFolders([]);
     setHeadCache({});
     setError(null);
     headInflight.current.clear();
@@ -111,6 +114,7 @@ export default function useS3Browser(options: UseS3BrowserOptions = {}) {
         const mergedFolders = virtualFolders.length > 0 ? Array.from(new Set([...dirs, ...virtualFolders])) : dirs;
         setObjects(objs);
         setFolders(mergedFolders);
+        setVirtualFolders(virtualFolders);
         setIsTruncated(trunc);
         setConnected(true);
         setError(null);
@@ -121,6 +125,7 @@ export default function useS3Browser(options: UseS3BrowserOptions = {}) {
         // Keep stale data on error instead of clearing
         setError(err instanceof Error ? err.message : 'Failed to load objects');
         setConnected(false);
+        setVirtualFolders([]);
       })
       .finally(() => {
         if (seq !== loadSeq.current) return; // stale settle — newer load owns the spinners
@@ -369,6 +374,7 @@ export default function useS3Browser(options: UseS3BrowserOptions = {}) {
     // Data
     objects: filteredObjects,
     folders: filteredFolders,
+    virtualFolders: filteredVirtualFolders,
     allFolders: folders,
     prefix,
     loading,
