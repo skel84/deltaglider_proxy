@@ -2,6 +2,7 @@ import {
   DashboardOutlined,
   ExperimentOutlined,
   FileTextOutlined,
+  DownloadOutlined,
   SecurityScanOutlined,
   TeamOutlined,
   SafetyOutlined,
@@ -141,6 +142,11 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
           // inside the Backends panel (one subsection per backend
           // card); no longer a top-level sidebar entry.
         ],
+      },
+      {
+        path: 'configuration/recovery',
+        label: 'Recovery',
+        icon: <DownloadOutlined />,
       },
       {
         path: 'configuration/advanced',

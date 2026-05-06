@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import {
   BookOutlined,
   CopyOutlined,
-  DownloadOutlined,
   DownOutlined,
   EyeInvisibleOutlined,
   EyeOutlined,
@@ -13,7 +12,6 @@ import {
   MoonOutlined,
   SettingOutlined,
   SunOutlined,
-  UploadOutlined,
   UpOutlined,
 } from '@ant-design/icons';
 import { useTheme } from '../ThemeContext';
@@ -24,8 +22,6 @@ export interface AccountMenuConfigProps {
   configSection?: SectionName;
   onShowFullConfigYaml?: () => void;
   onImportFullConfigYaml?: () => void;
-  onExportFullBackup?: () => void;
-  onImportFullBackup?: () => void;
 }
 
 interface Props extends AccountMenuConfigProps {
@@ -57,8 +53,6 @@ export default function AccountMenu({
   configSection,
   onShowFullConfigYaml,
   onImportFullConfigYaml,
-  onExportFullBackup,
-  onImportFullBackup,
 }: Props) {
   const { isDark, toggleTheme } = useTheme();
   const [open, setOpen] = useState(false);
@@ -98,12 +92,10 @@ export default function AccountMenu({
   const close = () => setOpen(false);
   const isAdmin = canAdmin === true;
   const hasConfigActions = isAdmin && Boolean(configSection || onShowFullConfigYaml || onImportFullConfigYaml);
-  const hasBackupActions = isAdmin && Boolean(onExportFullBackup || onImportFullBackup);
   const configLabel = configSection
     ? `${configSection.charAt(0).toUpperCase()}${configSection.slice(1)} section YAML`
     : 'Section YAML';
   const settingsHelp = 'Runtime configuration only; excludes the encrypted IAM DB and full recovery material.';
-  const recoveryHelp = 'Restore bundle including IAM/control-plane state and restore metadata.';
   const confirmLogout = () => {
     if (window.confirm('Sign out? This will clear your credentials and return to the login screen.')) {
       onLogout?.();
@@ -209,47 +201,6 @@ export default function AccountMenu({
                 >
                   <ImportOutlined aria-hidden style={iconStyle} />
                   <span>Import settings YAML</span>
-                </button>
-              )}
-            </div>
-          )}
-          {hasBackupActions && (
-            <div
-              className="account-menu-section"
-              role="group"
-              aria-label="Recovery"
-              title={recoveryHelp}
-            >
-              <div className="account-menu-section-label">Recovery</div>
-              <div className="account-menu-section-help">{recoveryHelp}</div>
-              {onExportFullBackup && (
-                <button
-                  type="button"
-                  className="account-menu-item"
-                  role="menuitem"
-                  title={recoveryHelp}
-                  onClick={() => {
-                    close();
-                    onExportFullBackup();
-                  }}
-                >
-                  <DownloadOutlined aria-hidden style={iconStyle} />
-                  <span>Download backup</span>
-                </button>
-              )}
-              {onImportFullBackup && (
-                <button
-                  type="button"
-                  className="account-menu-item"
-                  role="menuitem"
-                  title={recoveryHelp}
-                  onClick={() => {
-                    close();
-                    onImportFullBackup();
-                  }}
-                >
-                  <UploadOutlined aria-hidden style={iconStyle} />
-                  <span>Restore backup</span>
                 </button>
               )}
             </div>

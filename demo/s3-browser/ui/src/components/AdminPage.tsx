@@ -36,6 +36,7 @@ import SetupWizard from './SetupWizard';
 import TracePanel from './TracePanel';
 import AuditLogPanel from './AuditLogPanel';
 import EventOutboxPanel from './EventOutboxPanel';
+import RecoveryPanel from './RecoveryPanel';
 import CommandPalette, {
   FileTextOutlined as PaletteFileTextOutlined,
   ImportOutlined as PaletteImportOutlined,
@@ -221,6 +222,11 @@ const PAGE_HEADERS: Record<string, { icon: React.ReactNode; title: string; descr
     icon: <ClockCircleOutlined />,
     title: 'Object lifecycle',
     description: 'Delete-only object expiration rules with read-only preview, guarded run-now, and scheduler history.',
+  },
+  'configuration/recovery': {
+    icon: <SettingOutlined />,
+    title: 'Recovery',
+    description: 'Download a full backup bundle or restore one to recover IAM and control-plane state.',
   },
   'configuration/advanced/listener': {
     icon: <CloudServerOutlined />,
@@ -771,6 +777,17 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         </>
       );
     }
+    if (adminPath === 'configuration/recovery') {
+      return (
+        <>
+          {header}
+          <RecoveryPanel
+            onExportBackup={handleExportFullBackup}
+            onImportBackup={handleImportFullBackup}
+          />
+        </>
+      );
+    }
     // Encryption config lives on each backend card in BackendsPanel
     // as of v0.9 — per-backend-scoped via `BackendEncryptionEditor`.
     // No top-level "encryption" route.
@@ -900,8 +917,6 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         configSection: activeSection,
         onShowFullConfigYaml: () => setYamlModalMode('export'),
         onImportFullConfigYaml: () => setYamlModalMode('import'),
-        onExportFullBackup: handleExportFullBackup,
-        onImportFullBackup: handleImportFullBackup,
       })
     : accountMenu;
 
@@ -1049,8 +1064,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
           </Drawer>
         )}
         {/* Persistent sidebar. Hidden on narrow viewports (<900px) —
-            replaced with the Drawer above. Full Backup actions live
-            in the avatar menu with the other admin-wide actions. */}
+            replaced with the Drawer above. */}
         <div
           style={{
             display: isNarrow ? 'none' : 'flex',
