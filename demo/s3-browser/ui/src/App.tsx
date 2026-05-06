@@ -21,7 +21,7 @@ import type { WhoamiResponse } from './adminApi';
 import { useColors } from './ThemeContext';
 import useComputeSize from './useComputeSize';
 import { NavigationContext } from './NavigationContext';
-import { canUse } from './permissions';
+import { canUse, writablePrefixesForBucket } from './permissions';
 
 const { Content } = Layout;
 const { useBreakpoint } = Grid;
@@ -55,32 +55,6 @@ function parsePath(): { view: View; subPath: string } {
   return { view, subPath };
 }
 
-
-function actionIncludesWrite(actions: string[] = []): boolean {
-  return actions.some((action) => {
-    const normalized = action.toLowerCase();
-    return normalized === '*' || normalized === 'write' || normalized === 's3:*' || normalized === 's3:putobject';
-  });
-}
-
-function firstWritablePrefix(identity: WhoamiResponse | null, bucket: string): string | null {
-  if (!identity || !bucket) return null;
-  if (identity.mode === 'open' || identity.mode === 'bootstrap' || identity.user?.is_admin) return '';
-
-  const permissions = identity.user?.permissions ?? [];
-  for (const permission of permissions) {
-    if ((permission.effect ?? 'Allow').toLowerCase() === 'deny') continue;
-    if (!actionIncludesWrite(permission.actions)) continue;
-    for (const resource of permission.resources ?? []) {
-      if (resource === bucket || resource === `${bucket}/*`) return '';
-      const prefixRoot = `${bucket}/`;
-      if (!resource.startsWith(prefixRoot) || !resource.endsWith('/*')) continue;
-      return `${resource.slice(prefixRoot.length, -1)}`;
-    }
-  }
-
-  return null;
-}
 
 function usePathRouter() {
   const [state, setState] = useState(parsePath);
@@ -146,7 +120,12 @@ export default function App() {
   const [createBucketFocusSignal, setCreateBucketFocusSignal] = useState(0);
 
   const [hasAdminSession, setHasAdminSession] = useState(false);
-  const s3 = useS3Browser();
+  const activeBucket = getBucket();
+  const writablePrefixes = useMemo(
+    () => writablePrefixesForBucket(identity, activeBucket),
+    [identity, activeBucket],
+  );
+  const s3 = useS3Browser({ writablePrefixes });
   const folderSize = useComputeSize();
   const reconnectS3 = s3.reconnect;
   const changeS3Bucket = s3.changeBucket;
@@ -253,14 +232,13 @@ export default function App() {
   const hasBuckets = (bucketCount ?? 0) > 0;
   const hasNoBuckets = bucketCount === 0;
   const isRootBucketEmpty = hasBuckets && s3.prefix === '' && !s3.searchQuery && isEmpty && !s3.loading;
-  const activeBucket = getBucket();
   const currentAccessKey = getCredentials().accessKeyId || undefined;
   // A session can also belong to a non-admin external SSO user. Only
   // show Settings after whoami resolves admin/open/bootstrap authority.
   const canAdmin = identity?.mode === 'bootstrap' || identity?.mode === 'open' || identity?.user?.is_admin === true;
   const canCreateBucket = canUse(identity, 'admin');
   const canWriteActivePrefix = Boolean(activeBucket) && canUse(identity, 'write', activeBucket, s3.prefix);
-  const uploadFallbackPrefix = firstWritablePrefix(identity, activeBucket);
+  const uploadFallbackPrefix = writablePrefixes[0] ?? null;
   const uploadPrefix = canWriteActivePrefix
     ? s3.prefix
     : (uploadFallbackPrefix ?? s3.prefix);

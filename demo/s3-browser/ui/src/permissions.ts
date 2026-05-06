@@ -34,6 +34,20 @@ function conditionValues(value: string | string[]): string[] {
   return Array.isArray(value) ? value : [value];
 }
 
+function normalizeFolderPrefix(prefix: string): string {
+  const trimmed = prefix.trim().replace(/^\/+/, '').replace(/\/{2,}/g, '/');
+  if (!trimmed) return '';
+  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+}
+
+function writablePrefixFromResource(resource: string, bucket: string): string | null {
+  if (resource === '*' || resource === bucket || resource === `${bucket}/*`) return '';
+  const bucketRoot = `${bucket}/`;
+  if (!resource.startsWith(bucketRoot)) return null;
+  if (!resource.endsWith('/*')) return null;
+  return normalizeFolderPrefix(resource.slice(bucketRoot.length, -1));
+}
+
 function conditionsMatchForUi(
   conditions: IamPermission['conditions'],
   action: UiAction,
@@ -88,5 +102,58 @@ export function canUse(identity: WhoamiResponse | null, action: UiAction, bucket
     actionMatches(p.actions, action) &&
     p.resources.some(r => resourceMatches(r, bucket, key))
   );
+}
+
+/** Derive writable folder roots for this user in a bucket. */
+export function writablePrefixesForBucket(identity: WhoamiResponse | null, bucket: string): string[] {
+  if (!identity || !bucket) return [];
+  if (identity.mode === 'open' || identity.mode === 'bootstrap' || identity.user?.is_admin) return [''];
+
+  const set = new Set<string>();
+  const permissions = identity.user?.permissions ?? [];
+  for (const permission of permissions) {
+    if ((permission.effect ?? 'Allow').toLowerCase() === 'deny') continue;
+    if (!actionMatches(permission.actions ?? [], 'write')) continue;
+    for (const resource of permission.resources ?? []) {
+      const derived = writablePrefixFromResource(resource, bucket);
+      if (derived === null) continue;
+      // Filter through the effective policy evaluator so deny rules still win.
+      if (canUse(identity, 'write', bucket, derived)) {
+        set.add(derived);
+      }
+    }
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * At a given location, expose immediate child folders implied by writable prefixes.
+ * Example: current "team/" + writable "team/a/builds/" => virtual child "team/a/".
+ */
+export function virtualWritableChildren(
+  currentPrefix: string,
+  realFolders: string[],
+  writablePrefixes: string[],
+): string[] {
+  const current = normalizeFolderPrefix(currentPrefix);
+  const realSet = new Set(realFolders.map(normalizeFolderPrefix));
+  const out = new Set<string>();
+
+  for (const writablePrefix of writablePrefixes) {
+    const writable = normalizeFolderPrefix(writablePrefix);
+    if (!writable || writable === current) continue;
+    if (current && !writable.startsWith(current)) continue;
+    if (!current && writable === '') continue;
+
+    const suffix = current ? writable.slice(current.length) : writable;
+    if (!suffix) continue;
+    const childName = suffix.split('/')[0];
+    if (!childName) continue;
+    const child = current ? `${current}${childName}/` : `${childName}/`;
+    if (realSet.has(child)) continue;
+    out.add(child);
+  }
+
+  return Array.from(out).sort((a, b) => a.localeCompare(b));
 }
 

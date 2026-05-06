@@ -8,11 +8,17 @@ import {
   listAllUnderPrefix,
 } from './adminApi';
 import useSelection from './useSelection';
+import { virtualWritableChildren } from './permissions';
 import type { S3Object } from './types';
 
 const MAX_HEAD_CACHE_SIZE = 5000;
 
-export default function useS3Browser() {
+interface UseS3BrowserOptions {
+  writablePrefixes?: string[];
+}
+
+export default function useS3Browser(options: UseS3BrowserOptions = {}) {
+  const { writablePrefixes = [] } = options;
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [objects, setObjects] = useState<S3Object[]>([]);
   const [folders, setFolders] = useState<string[]>([]);
@@ -101,12 +107,14 @@ export default function useS3Browser() {
     listObjects(prefix)
       .then(({ objects: objs, folders: dirs, isTruncated: trunc }) => {
         if (seq !== loadSeq.current) return; // stale response — newer load in flight
+        const virtualFolders = virtualWritableChildren(prefix, dirs, writablePrefixes);
+        const mergedFolders = virtualFolders.length > 0 ? Array.from(new Set([...dirs, ...virtualFolders])) : dirs;
         setObjects(objs);
-        setFolders(dirs);
+        setFolders(mergedFolders);
         setIsTruncated(trunc);
         setConnected(true);
         setError(null);
-        reconcile(objs, dirs);
+        reconcile(objs, mergedFolders);
       })
       .catch((err) => {
         if (seq !== loadSeq.current) return; // stale error — drop silently
@@ -120,7 +128,7 @@ export default function useS3Browser() {
         setLoading(false);
         setRefreshing(false);
       });
-  }, [prefix, reconcile]);
+  }, [prefix, reconcile, writablePrefixes]);
 
   useEffect(load, [load, refreshTrigger]);
 
