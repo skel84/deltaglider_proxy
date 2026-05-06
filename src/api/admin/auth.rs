@@ -264,9 +264,28 @@ pub async fn login(
             .access_key_id
             .clone()
             .zip(config.secret_access_key.clone());
+        let auth_on = config.auth_enabled();
+        let region = match &config.backend {
+            crate::config::BackendConfig::S3 { region, .. } => region.clone(),
+            _ => "us-east-1".to_string(),
+        };
         drop(config);
         if let Some((ak, sk)) = creds {
             auto_populate_s3_creds(&state, &token, ak, sk).await;
+        } else if !auth_on {
+            // Open-access deployments: no proxy SigV4 keys. Without session S3 creds,
+            // a hard refresh clears the in-memory SDK and the file browser stops listing
+            // (PUT/GET would fail). Mirror `open_browser_connect` anonymous pair.
+            state.sessions.set_s3_creds(
+                &token,
+                S3SessionCredentials {
+                    endpoint: String::new(),
+                    region,
+                    bucket: String::new(),
+                    access_key_id: "anonymous".to_string(),
+                    secret_access_key: "anonymous".to_string(),
+                },
+            );
         }
     }
 

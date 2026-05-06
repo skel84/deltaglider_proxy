@@ -13,10 +13,11 @@ import UploadPage from './components/UploadPage';
 import ConnectPage from './components/ConnectPage';
 import MetricsPage from './components/MetricsPage';
 import DocsPage from './components/DocsPage';
-import BrowserLiftBanner from './components/BrowserLiftBanner';
+import FileBrowserSessionTip from './components/FileBrowserSessionTip';
 import AccountMenu from './components/AccountMenu';
 import DemoDataGenerator from './components/DemoDataGenerator';
 import { getBucket, hasCredentials, disconnect, initFromSession, getCredentials } from './s3client';
+import { clearSessionCredentials } from './sessionApi';
 import { adminLogout, whoami, checkSession, resolveIamIdentity } from './adminApi';
 import type { WhoamiResponse } from './adminApi';
 import { deriveSessionCapabilities } from './sessionCapabilities';
@@ -121,7 +122,7 @@ export default function App() {
   const [bucketCount, setBucketCount] = useState<number | null>(null);
   const [createBucketFocusSignal, setCreateBucketFocusSignal] = useState(0);
 
-  /** Any valid `dgp_session` cookie (admin GUI or S3 browser-lift). */
+  /** Any valid session cookie (administrator sign-in or access-key file browser). */
   const [sessionValid, setSessionValid] = useState(false);
   const [sessionCaps, setSessionCaps] = useState(() =>
     deriveSessionCapabilities({ valid: false, admin_gui: false }),
@@ -156,6 +157,10 @@ export default function App() {
       setNeedsConnect(!restored);
     }
   }, []);
+
+  const onConnectComplete = useCallback(() => {
+    void refreshSessionGate();
+  }, [refreshSessionGate]);
 
   const pollSession = useCallback(async () => {
     try {
@@ -238,7 +243,7 @@ export default function App() {
   }, [view]);
 
   // One-time stale-credential check after first load.
-  // If we have a valid session cookie (admin or browser-lift), don't bounce to ConnectPage
+  // If we have a valid session cookie, don't bounce to ConnectPage
   // when S3 calls fail — the user may lack S3 permissions or have a transient error.
   useEffect(() => {
     if (!s3.loading && !firstLoadDone) {
@@ -249,9 +254,19 @@ export default function App() {
     }
   }, [s3.loading, s3.connected, firstLoadDone, sessionValid]);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await clearSessionCredentials();
+      await adminLogout();
+    } catch {
+      /* still leave the app shell */
+    }
     disconnect();
-    adminLogout().catch(() => {});
+    try {
+      sessionStorage.setItem('dg-session-user-signed-out', '1');
+    } catch {
+      /* private mode */
+    }
     setFirstLoadDone(false);
     setNeedsConnect(true);
     setIdentity(null);
@@ -301,7 +316,7 @@ export default function App() {
       identityLabel={identity?.user?.name || currentAccessKey || 'user'}
       canAdmin={canAdmin}
       onBrowserClick={() => navigate('browse')}
-      onSettingsClick={canAdmin ? () => navigate('admin') : undefined}
+      onSettingsClick={() => navigate('admin')}
       onDocsClick={() => navigate('docs')}
       onLogout={handleLogout}
       showHidden={includeBrowserToggles ? s3.showHidden : undefined}
@@ -347,7 +362,7 @@ export default function App() {
   if (needsConnect) {
     return (
       <ConnectPage
-        onConnect={() => { void refreshSessionGate(); }}
+        onConnect={onConnectComplete}
         showError={hasCredentials()}
       />
     );
@@ -371,7 +386,7 @@ export default function App() {
         return (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 48 }}>
             <Empty
-              description="Metrics and analytics require a full admin session (bootstrap password or IAM admin via login-as). Browser-only sessions cannot read /_/stats or admin config."
+              description="Sign in through Settings to view metrics and analytics. You are currently signed in for browsing files only (for example after using an access key on the sign-in screen)."
             >
               <Button type="primary" onClick={navigateToBrowse}>Back to Browser</Button>
             </Empty>
@@ -416,7 +431,7 @@ export default function App() {
             hint={
               hasAdminSession
                 ? undefined
-                : 'Bulk copy, move, ZIP, and delete use server-side admin APIs and need a full admin session (not a browser-only lift).'
+                : 'Bulk copy, move, ZIP, and delete are available after you open Settings and sign in as an administrator. Access-key sign-in is for browsing files only.'
             }
           />
         )}
@@ -532,7 +547,7 @@ export default function App() {
 
           <main id="main-content" ref={mainRef} tabIndex={-1} style={{ outline: 'none', flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
             <Content style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-              <BrowserLiftBanner visible={view === 'browser' && sessionCaps.browserLiftOnly} />
+              <FileBrowserSessionTip visible={view === 'browser' && sessionCaps.signedInForFilesOnly} />
               {renderContent()}
             </Content>
           </main>

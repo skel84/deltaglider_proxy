@@ -145,7 +145,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
       },
       {
         path: 'configuration/recovery',
-        label: 'Recovery',
+        label: 'Backup',
         icon: <DownloadOutlined />,
       },
       {

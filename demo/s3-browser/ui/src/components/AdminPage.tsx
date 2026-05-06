@@ -1,7 +1,7 @@
 import { cloneElement, isValidElement, useState, useEffect, useCallback, useMemo } from 'react';
 import { Typography, Button, Input, Alert, Space, Spin, Drawer, message, Modal } from 'antd';
 import { checkSession, adminLogin, whoami, loginAs, exportBackup, importBackup, ImportBackupError, type ExternalProviderInfo, type ImportBackupMode } from '../adminApi';
-import { getCredentials } from '../s3client';
+import { getCredentials, initFromSession } from '../s3client';
 import {
   CloudOutlined,
   CloudServerOutlined,
@@ -17,6 +17,7 @@ import {
   MenuOutlined,
   SyncOutlined,
   ClockCircleOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import FullScreenHeader from './FullScreenHeader';
@@ -224,9 +225,9 @@ const PAGE_HEADERS: Record<string, { icon: React.ReactNode; title: string; descr
     description: 'Delete-only object expiration rules with read-only preview, guarded run-now, and scheduler history.',
   },
   'configuration/recovery': {
-    icon: <SettingOutlined />,
-    title: 'Recovery',
-    description: 'Download a full backup bundle or restore one to recover IAM and control-plane state.',
+    icon: <DownloadOutlined />,
+    title: 'Backup',
+    description: 'Download a full backup bundle or restore one (IAM and control-plane state).',
   },
   'configuration/advanced/listener': {
     icon: <CloudServerOutlined />,
@@ -323,7 +324,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
   const [checkingSession, setCheckingSession] = useState(true);
   const [externalProviders, setExternalProviders] = useState<ExternalProviderInfo[]>([]);
   const [accessDenied, setAccessDenied] = useState(false);
-  /** Valid `dgp_session` but S3BrowserLift / open-lift only — not full admin GUI. */
+  /** Valid session from access-key / open connect — file browser only, not Settings sign-in. */
   const [s3BrowserSessionOnly, setS3BrowserSessionOnly] = useState(false);
   const [password, setPassword] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
@@ -448,16 +449,18 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
 
       const session = await checkSession();
       if (session.valid) {
-        if (!session.admin_gui) {
-          setS3BrowserSessionOnly(true);
+        if (session.admin_gui) {
+          if (info.user?.is_admin) {
+            setAuthed(true);
+          } else {
+            setAccessDenied(true);
+          }
           setCheckingSession(false);
           return;
         }
-        if (info.user?.is_admin) {
-          setAuthed(true);
-        } else {
-          setAccessDenied(true);
-        }
+        // Valid browser S3 session but no admin GUI cookie yet — still allow bootstrap / OAuth
+        // login here (open-access and access-key connects both land here).
+        setS3BrowserSessionOnly(true);
         setCheckingSession(false);
         return;
       }
@@ -490,6 +493,8 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
       if (res.ok) {
         setAuthed(true);
         setPassword('');
+        // Bootstrap session may attach S3 creds (legacy keys or anonymous open-access).
+        await initFromSession().catch(() => {});
       } else {
         setLoginError(res.error || 'Login failed');
         setPassword('');
@@ -852,22 +857,6 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
     );
   };
 
-  // S3 browser cookie only (IAM browser-lift or open-mode lift)
-  if (!authed && !checkingSession && s3BrowserSessionOnly) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, background: colors.BG_BASE }}>
-        <div style={{ width: 420, padding: 40, textAlign: 'center' }}>
-          <LockOutlined style={{ fontSize: 32, color: colors.ACCENT_BLUE, marginBottom: 12 }} />
-          <div><Text strong style={{ fontSize: 18, fontFamily: 'var(--font-ui)' }}>S3 browser session</Text></div>
-          <Text type="secondary" style={{ fontSize: 13, display: 'block', marginTop: 8, marginBottom: 24 }}>
-            You are signed in for the file browser only. Open Admin with the bootstrap password or an IAM admin account (Sign in as admin from the connect screen).
-          </Text>
-          <Button type="primary" onClick={onBack} style={{ borderRadius: 10 }}>Back to Browser</Button>
-        </div>
-      </div>
-    );
-  }
-
   // Access denied (IAM user without admin permissions)
   if (!authed && !checkingSession && accessDenied) {
     return (
@@ -896,6 +885,15 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
               {externalProviders.length > 0 ? 'Sign in to continue.' : 'Enter the bootstrap password to continue.'}
             </Text>
           </div>
+          {s3BrowserSessionOnly && (
+            <Alert
+              type="info"
+              showIcon
+              message="File browser session active"
+              description="You are signed in for S3 browsing only. Use the bootstrap password (or OAuth if configured) below to open a full administrator session."
+              style={{ marginBottom: 16, borderRadius: 8 }}
+            />
+          )}
           {/* OAuth provider buttons */}
           {externalProviders.length > 0 && (
             <div style={{ marginBottom: 16 }}>

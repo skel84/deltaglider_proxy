@@ -304,7 +304,7 @@ export async function testConnection(
 
 type ListBucketsOptions = {
   /**
-   * When false, skips `GET /api/admin/buckets` merge (returns 403 for browser-lift sessions).
+   * When false, skips loading extra bucket details from Settings (403 without administrator sign-in).
    * @default true
    */
   includeOrigins?: boolean;

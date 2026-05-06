@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Button, Input, Typography, Space, Alert, Spin, message } from 'antd';
 import { WarningOutlined, CheckCircleOutlined, CopyOutlined, SunOutlined, MoonOutlined } from '@ant-design/icons';
 import { testConnection, setEndpoint, setCredentials, setBucket, initFromSession, getBucket } from '../s3client';
@@ -9,6 +9,22 @@ import { detectDefaultEndpoint } from '../utils';
 import { useColors, useTheme } from '../ThemeContext';
 
 const { Text } = Typography;
+
+/** Set on sign-out so open-access mode does not immediately auto-reconnect. */
+const SESSION_USER_SIGNED_OUT = 'dg-session-user-signed-out';
+
+function clearSignedOutFlag() {
+  try {
+    sessionStorage.removeItem(SESSION_USER_SIGNED_OUT);
+  } catch {
+    /* private mode */
+  }
+}
+
+function finishConnect(onConnect: () => void) {
+  clearSignedOutFlag();
+  onConnect();
+}
 
 interface Props {
   onConnect: () => void;
@@ -27,6 +43,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
   const [externalProviders, setExternalProviders] = useState<ExternalProviderInfo[]>([]);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [detecting, setDetecting] = useState(true);
+  const [openSignedOut, setOpenSignedOut] = useState(false);
   // Recovery wizard state — persist success in sessionStorage so refresh doesn't reset
   const [showRecovery, setShowRecovery] = useState(false);
   const [recoveryPassword, setRecoveryPassword] = useState('');
@@ -39,6 +56,27 @@ export default function ConnectPage({ onConnect, showError }: Props) {
     } catch { return null; }
   });
   const [messageApi, contextHolder] = message.useMessage();
+
+  const runOpenModeConnect = useCallback(async (): Promise<{ ok: true } | { ok: false; error: string }> => {
+    const endpoint = detectDefaultEndpoint().replace(/\/+$/, '');
+    setEndpoint(endpoint);
+    const result = await testConnection(endpoint, 'anonymous', 'anonymous').catch(() => ({ ok: false } as const));
+    if (!result.ok) {
+      return { ok: false, error: 'Open access mode but S3 backend is unreachable. Check server configuration.' };
+    }
+    if (result.buckets && result.buckets.length > 0) {
+      setBucket(result.buckets[0]);
+    }
+    const ob = await openBrowserConnect({ endpoint, bucket: getBucket() });
+    if (!ob.ok) {
+      return { ok: false, error: ob.error || 'Could not connect. Try again.' };
+    }
+    const restored = await initFromSession();
+    if (!restored) {
+      return { ok: false, error: 'Open session created but credentials could not be restored.' };
+    }
+    return { ok: true };
+  }, []);
 
   // Detect auth mode on mount — auto-connect in open mode, show recovery wizard if mismatch
   useEffect(() => {
@@ -53,37 +91,30 @@ export default function ConnectPage({ onConnect, showError }: Props) {
         }
         // In open access mode, auto-connect with the proxy's own endpoint (no credentials needed)
         if (info.mode === 'open') {
-          const endpoint = detectDefaultEndpoint().replace(/\/+$/, '');
-          setEndpoint(endpoint);
-          const result = await testConnection(endpoint, 'anonymous', 'anonymous').catch(() => ({ ok: false } as const));
-          if (!result.ok) {
+          let signedOut = false;
+          try {
+            signedOut = sessionStorage.getItem(SESSION_USER_SIGNED_OUT) === '1';
+          } catch {
+            /* private mode */
+          }
+          if (signedOut) {
+            setOpenSignedOut(true);
             setDetecting(false);
-            setError('Open access mode but S3 backend is unreachable. Check server configuration.');
             return;
           }
-          if (result.buckets && result.buckets.length > 0) {
-            setBucket(result.buckets[0]);
-          }
-          const ob = await openBrowserConnect({ endpoint, bucket: getBucket() });
-          if (!ob.ok) {
+          const r = await runOpenModeConnect();
+          if (!r.ok) {
             setDetecting(false);
-            setError(ob.error || 'Could not start open browser session');
+            setError(r.error);
             return;
           }
-          const restored = await initFromSession();
-          if (!restored) {
-            setDetecting(false);
-            setError('Open session created but credentials could not be restored.');
-            return;
-          }
-          onConnect();
+          finishConnect(onConnect);
           return;
         }
         setDetecting(false);
       })
       .catch(() => setDetecting(false));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [onConnect, runOpenModeConnect]);
 
   const handleConnect = async () => {
     setLoading(true);
@@ -113,7 +144,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
 
         const restored = await initFromSession();
         if (restored) {
-          onConnect();
+          finishConnect(onConnect);
           return;
         }
         // Session didn't provide creds — shouldn't happen in bootstrap, but fall through
@@ -156,7 +187,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
           bucket: getBucket(),
         });
         if (!bc.ok) {
-          setError(bc.error || 'Could not start browser session');
+          setError(bc.error || 'Could not connect. Try again.');
           setLoading(false);
           return;
         }
@@ -168,9 +199,27 @@ export default function ConnectPage({ onConnect, showError }: Props) {
         }
       }
 
-      onConnect();
+      finishConnect(onConnect);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Connection failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOpenReconnect = async () => {
+    setError('');
+    setLoading(true);
+    try {
+      clearSignedOutFlag();
+      setOpenSignedOut(false);
+      const r = await runOpenModeConnect();
+      if (!r.ok) {
+        setError(r.error);
+        setOpenSignedOut(true);
+        return;
+      }
+      finishConnect(onConnect);
     } finally {
       setLoading(false);
     }
@@ -206,6 +255,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
   };
 
   const isBootstrap = authMode === 'bootstrap';
+  const isOpenSignedOutReconnect = authMode === 'open' && openSignedOut;
   const canSubmit = isBootstrap ? adminPassword.trim() : (accessKey.trim() && secretKey.trim());
 
   const inputStyle = {
@@ -353,6 +403,28 @@ export default function ConnectPage({ onConnect, showError }: Props) {
             <div className="dg-login-product">Proxy</div>
           </div>
 
+          {isOpenSignedOutReconnect ? (
+            <>
+              {error && <Alert type="error" message={error} showIcon />}
+              <Alert
+                type="info"
+                showIcon
+                message="You signed out"
+                description="This server uses open access. Connect again to return to the file browser, or open Settings from the menu after connecting if you need administrator tools."
+              />
+              <Button
+                type="primary"
+                block
+                size="large"
+                loading={loading}
+                onClick={handleOpenReconnect}
+                className="dg-login-submit"
+              >
+                Connect again
+              </Button>
+            </>
+          ) : (
+            <>
           {showError && !error && (
             <Alert type="warning" message="Stored credentials are invalid or the endpoint is unreachable." showIcon />
           )}
@@ -448,6 +520,8 @@ export default function ConnectPage({ onConnect, showError }: Props) {
               >
                 Sign in
               </Button>
+            </>
+          )}
             </>
           )}
         </Space>

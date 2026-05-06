@@ -1,15 +1,15 @@
 /**
- * Single place for “what can this HTTP session do?” — keeps UI, s3client, and
- * docs aligned with `session_light` vs `require_admin_gui_session` on the server.
+ * What this browser session is allowed to do (UI + s3client), aligned with the server’s
+ * session checks (file-browser vs full administrator sign-in).
  */
 
 type SessionCheck = { valid: boolean; admin_gui: boolean };
 
 type SessionCapabilities = {
-  /** Full admin GUI cookie (bootstrap / login-as / OAuth admin) — not browser-lift. */
+  /** Signed in through Admin (bootstrap, OAuth, or admin IAM login-as). */
   adminGui: boolean;
-  /** Valid `dgp_session` but only S3 browser lift (IAM secret connect / open-mode). */
-  browserLiftOnly: boolean;
+  /** Signed in with an access key on the connect screen — files only until Admin is opened. */
+  signedInForFilesOnly: boolean;
   /** `GET /_/stats`, analytics buckets view, `useAdminConfig`, etc. */
   canReadStats: boolean;
   /** `/api/admin/objects/*` bulk copy/move/delete/zip/list. */
@@ -24,7 +24,7 @@ type SessionCapabilities = {
 
 const NONE: SessionCapabilities = {
   adminGui: false,
-  browserLiftOnly: false,
+  signedInForFilesOnly: false,
   canReadStats: false,
   canBulkOps: false,
   canFolderScan: false,
@@ -35,10 +35,10 @@ const NONE: SessionCapabilities = {
 export function deriveSessionCapabilities(s: SessionCheck): SessionCapabilities {
   if (!s.valid) return { ...NONE };
   const adminGui = s.admin_gui === true;
-  const browserLiftOnly = !adminGui;
+  const signedInForFilesOnly = s.valid && !adminGui;
   return {
     adminGui,
-    browserLiftOnly,
+    signedInForFilesOnly,
     canReadStats: adminGui,
     canBulkOps: adminGui,
     canFolderScan: adminGui,

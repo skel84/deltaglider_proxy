@@ -233,7 +233,7 @@ export default function ObjectTable({
           }
           if (!canScanFolder) {
             return (
-              <span style={{ fontSize: 12, color: TEXT_MUTED }} title="Folder size requires an admin session">
+              <span style={{ fontSize: 12, color: TEXT_MUTED }} title="Open Settings and sign in as an administrator to show folder size">
                 —
               </span>
             );

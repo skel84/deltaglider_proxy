@@ -4,6 +4,21 @@
 
 ## v0.9.10 — 2026-05-06
 
+### Browser UI and admin
+
+- Open-access mode: admin bootstrap login now seeds anonymous S3 session credentials so a
+  hard refresh does not strand the embedded file browser without a working SDK client.
+- Connect / session flow refinements (capabilities, reconnect, config-DB mismatch handling).
+- Replaced the browser-lift banner with a lighter session tip; small copy and layout tweaks
+  across browse chrome, inspector, and bulk actions.
+- Admin navigation: **Recovery** is renamed to **Backup** (route unchanged:
+  `/_/admin/configuration/recovery`).
+
+### Testing
+
+- Added Playwright **full-flow** E2E (bucket create, upload, admin login, sign-out, reconnect,
+  object still visible); `e2e-smoke.sh` runs the full `e2e/` suite.
+
 ## v0.9.9 — 2026-05-05
 
 ## v0.9.8 — 2026-05-05

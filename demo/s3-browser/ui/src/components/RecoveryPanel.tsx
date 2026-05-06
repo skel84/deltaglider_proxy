@@ -13,7 +13,7 @@ export default function RecoveryPanel({ onExportBackup, onImportBackup }: Recove
     <Card style={{ margin: 16, borderRadius: 12 }}>
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Text type="secondary">
-          Download a full recovery bundle (config + IAM/control-plane data), or restore from a previous backup.
+          Download a full backup bundle (config + IAM/control-plane data), or restore from a previous export.
         </Text>
         <Space wrap>
           <Button type="primary" icon={<DownloadOutlined />} onClick={onExportBackup}>

@@ -38,6 +38,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Deterministic admin password for Playwright (same as tests/common/mod.rs).
+export DGP_BOOTSTRAP_PASSWORD_HASH='$2b$04$s7/yy6Z363jZoQodArpuDeP00U.zE1QPi0bxM/o9BOZDs6tDbss5q'
+
+cd "$ROOT"
 DGP_CONFIG="$CONFIG" "$BIN" &
 PID=$!
 

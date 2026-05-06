@@ -95,7 +95,7 @@ export default function AccountMenu({
   const configLabel = configSection
     ? `${configSection.charAt(0).toUpperCase()}${configSection.slice(1)} section YAML`
     : 'Section YAML';
-  const settingsHelp = 'Runtime configuration only; excludes the encrypted IAM DB and full recovery material.';
+  const settingsHelp = 'Runtime configuration only; excludes the encrypted IAM DB and full backup bundles.';
   const confirmLogout = () => {
     if (window.confirm('Sign out? This will clear your credentials and return to the login screen.')) {
       onLogout?.();
@@ -127,14 +127,14 @@ export default function AccountMenu({
               <HomeOutlined aria-hidden style={iconStyle} />
               <span>Browser</span>
             </button>
-            {isAdmin && onSettingsClick && (
+            {onSettingsClick && (
               <button
                 type="button"
                 className="account-menu-item"
                 role="menuitem"
                 onClick={() => {
                   close();
-                  onSettingsClick?.();
+                  onSettingsClick();
                 }}
               >
                 <SettingOutlined aria-hidden style={iconStyle} />

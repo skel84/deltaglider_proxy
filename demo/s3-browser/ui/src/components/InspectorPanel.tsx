@@ -30,7 +30,7 @@ interface Props {
   headCache?: Record<string, { storageType?: string; storedSize?: number; error?: boolean }>;
   canDelete?: boolean;
   canRead?: boolean;
-  /** When false, skip `GET /api/admin/config` (403 for browser-lift); public-prefix badge stays hidden. */
+  /** When false, skip loading full bucket policy from Settings; public-prefix hint stays hidden. */
   hasAdminSession?: boolean;
 }
 
@@ -237,8 +237,8 @@ export default function InspectorPanel({
   const objectKey = object?.key;
   const cachedHead = objectKey ? headCache?.[objectKey] : undefined;
 
-  // Fetch bucket policy (compression + public prefixes) once per bucket — admin config is
-  // `require_admin_gui_session`; browser-lift sessions must not spam 403s.
+  // Fetch bucket policy (compression + public prefixes) once per bucket — skip when the user
+  // has not signed in through Settings (would 403).
   const lastBucketRef = useRef<string>('');
   useEffect(() => {
     const bucket = getBucket();
@@ -337,7 +337,7 @@ export default function InspectorPanel({
   const storageTypeLabel = storageType || 'Original';
   const storageTypeColor = STORAGE_TYPE_COLORS[storageType || 'passthrough'] || STORAGE_TYPE_DEFAULT;
   const compressionEnabled = bucketPolicy?.compressionEnabled ?? true;
-  /** When policy is still loading or unavailable (e.g. browser-lift), never show a false "public" badge. */
+  /** When policy is still loading or unavailable, never show a false "public" badge. */
   const isPublic =
     hasAdminSession &&
     !bucketPolicyLoading &&

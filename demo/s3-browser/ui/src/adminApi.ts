@@ -1473,8 +1473,8 @@ export async function requeueEventOutboxMany(ids: number[]): Promise<EventOutbox
 // Server-side bulk object operations (Phase B of the SDK-removal migration).
 //
 // Routes: `POST|GET /_/api/admin/objects/{copy,move,delete,zip,list}`.
-// **Trust model:** `require_admin_gui_session` only (full admin cookie — not
-// browser-lift). Handlers call the engine directly; there is no per-key IAM
+// **Trust model:** `require_admin_gui_session` only (not access-key file-browser
+// sign-in). Handlers call the engine directly; there is no per-key IAM
 // inside these endpoints. See `deriveSessionCapabilities` / `canBulkOps` in
 // the UI — never call these without a full admin session.
 //
@@ -1517,7 +1517,7 @@ interface BulkMoveResponse extends BulkCopyResponse {
   deleted: number;
 }
 
-/** Admin GUI session required (`403 admin_session_required` for browser-lift). */
+/** Requires administrator sign-in in Settings (`403 admin_session_required` otherwise). */
 export async function bulkCopyObjects(req: BulkCopyRequest): Promise<BulkCopyResponse> {
   const res = await adminFetch('/api/admin/objects/copy', 'POST', req);
   if (!res.ok) throw new Error(`Copy failed: ${await res.text()}`);

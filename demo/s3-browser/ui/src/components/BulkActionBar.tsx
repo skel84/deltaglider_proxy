@@ -11,7 +11,7 @@ interface Props {
   onMove?: (destBucket: string, destPrefix: string) => Promise<{ succeeded: number; failed: number }>;
   onDownloadZip?: () => Promise<void>;
   deleting: boolean;
-  /** Shown when bulk handlers are omitted (e.g. browser-only session). */
+  /** Shown when bulk handlers are omitted (user signed in for files only). */
   hint?: string;
 }
 

@@ -38,7 +38,7 @@ interface Props {
   canDeleteBucket: (bucket: string) => boolean;
   canUpload: boolean;
   canAdmin: boolean;
-  /** When false, `listBuckets` skips admin bucket-origins (browser-lift). @default true */
+  /** When false, skip loading extra bucket details from Settings (access-key-only sign-in). @default true */
   includeBucketOrigins?: boolean;
   open: boolean;
   onClose: () => void;
