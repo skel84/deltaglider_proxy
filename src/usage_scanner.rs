@@ -60,6 +60,22 @@ impl Default for UsageScanner {
     }
 }
 
+/// RAII guard that removes a (bucket, prefix) key from
+/// `UsageScanner.scanning` on drop, including drop on panic unwind.
+/// Pre-fix the cleanup was an explicit `.remove()` at the end of the
+/// scan future — unreachable on panic, leaving the dedup key stuck
+/// permanently (E-P1-2).
+struct ScanInProgressGuard {
+    scanner: Arc<UsageScanner>,
+    key: String,
+}
+
+impl Drop for ScanInProgressGuard {
+    fn drop(&mut self) {
+        self.scanner.scanning.write().remove(&self.key);
+    }
+}
+
 impl UsageScanner {
     pub fn new() -> Self {
         Self {
@@ -169,6 +185,24 @@ impl UsageScanner {
         let scanner = Arc::clone(self);
         tokio::spawn(async move {
             debug!(bucket = %bucket, prefix = %prefix, "Starting usage scan");
+
+            // E-P1-2: ensure the dedup key is removed from
+            // `scanning` even if `do_scan` panics. Pre-fix the
+            // cleanup at the bottom of this block was unreachable on
+            // a panic unwind, so ANY panic anywhere in the scan
+            // pipeline (storage backend, future poll, allocation
+            // failure) left the (bucket, prefix) tuple permanently
+            // marked as "in progress" until process restart. Future
+            // calls returned None and never re-tried.
+            //
+            // The RAII guard runs `remove` on drop regardless of
+            // whether the future completed normally, returned an
+            // error, or unwound from a panic.
+            let _scan_guard = ScanInProgressGuard {
+                scanner: scanner.clone(),
+                key: key.clone(),
+            };
+
             let result = Self::do_scan(&s3_state, &bucket, &prefix).await;
             match result {
                 Ok(entry) => {
@@ -192,7 +226,9 @@ impl UsageScanner {
                     );
                 }
             }
-            scanner.scanning.write().remove(&key);
+            // _scan_guard drops here, removing the dedup key. Same
+            // semantics as the pre-fix explicit `remove` call but
+            // panic-safe.
         });
 
         true
@@ -368,5 +404,48 @@ mod tests {
             "Stale entry should be cleaned"
         );
         assert!(cache.get("fresh/").is_some(), "Fresh entry should exist");
+    }
+
+    /// E-P1-2 regression: even when the scan future panics, the
+    /// dedup key must be removed from `scanning`. Pre-fix the
+    /// cleanup line at the bottom of the spawned future was
+    /// unreachable on panic; the (bucket, prefix) tuple stayed
+    /// permanently marked as "in progress" and ALL subsequent
+    /// scans of that prefix returned `false` from `enqueue_scan`
+    /// until process restart.
+    ///
+    /// The fix is the `ScanInProgressGuard` Drop impl. Test it by
+    /// constructing the guard, simulating a panic via
+    /// `std::panic::catch_unwind`, and verifying the key is gone
+    /// after the unwind.
+    #[test]
+    fn scan_in_progress_guard_clears_dedup_key_on_panic() {
+        let scanner = Arc::new(UsageScanner::new());
+        let key = "bucket/prefix/".to_string();
+
+        // Seed the scanning set as enqueue_scan would have.
+        scanner.scanning.write().insert(key.clone());
+        assert!(scanner.scanning.read().contains(&key));
+
+        // Now simulate the panic-unwind path. The guard owns the
+        // arc + key; when the closure panics, Rust unwinds and
+        // drops the guard, which calls `remove`.
+        let scanner_for_panic = Arc::clone(&scanner);
+        let key_for_panic = key.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = ScanInProgressGuard {
+                scanner: scanner_for_panic,
+                key: key_for_panic,
+            };
+            panic!("simulated do_scan panic — Drop must still run");
+        }));
+        assert!(result.is_err(), "panic must propagate (caught here)");
+
+        // Post-condition: the dedup key is gone, so a future
+        // enqueue_scan of the same (bucket, prefix) would proceed.
+        assert!(
+            !scanner.scanning.read().contains(&key),
+            "ScanInProgressGuard must clear dedup key on panic unwind"
+        );
     }
 }
