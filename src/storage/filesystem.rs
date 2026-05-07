@@ -92,6 +92,42 @@ async fn atomic_copy_with_metadata(
 
 /// Filesystem storage backend
 ///
+/// Synthetic ETag for unmanaged files (no DG xattr).
+///
+/// Produces a stable hex-32 string derived from `(size, mtime_nanos)`.
+/// Empty files (size=0) return the canonical empty-content MD5 so
+/// they look consistent with managed empty objects and with the S3
+/// backend's empty-object handling.
+///
+/// Property: the same (size, mtime) input always produces the same
+/// output; ANY change to either invalidates the etag, which is the
+/// only contract a client's `If-Match` / `If-None-Match` actually
+/// relies on. Not the real body MD5 — clients that need that should
+/// PUT the file through the proxy so DG xattr metadata is written.
+pub(crate) fn synthesise_unmanaged_etag(
+    size: u64,
+    modified: &chrono::DateTime<chrono::Utc>,
+) -> String {
+    if size == 0 {
+        return "d41d8cd98f00b204e9800998ecf8427e".to_string();
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"dg-unmanaged-etag-v1\0");
+    hasher.update(size.to_le_bytes());
+    hasher.update(modified.timestamp().to_le_bytes());
+    hasher.update(modified.timestamp_subsec_nanos().to_le_bytes());
+    let digest = hasher.finalize();
+    // Take first 16 bytes → hex32, the same shape an MD5 ETag has
+    // on the wire. Clients that parse "looks like 32-hex" still work.
+    let mut hex = String::with_capacity(32);
+    for byte in digest.iter().take(16) {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", byte);
+    }
+    hex
+}
+
 /// Storage layout:
 /// ```text
 /// {root}/{bucket}/deltaspaces/{prefix}/
@@ -155,6 +191,26 @@ impl FilesystemBackend {
 
     /// Build a best-effort FileMetadata from filesystem stats alone (no xattr).
     /// Used when a file exists but has no DeltaGlider metadata (unmanaged file).
+    ///
+    /// S-P1-3: pre-fix this passed `String::new()` as the md5, so the
+    /// resulting `etag()` was the literal `"\""` — an empty quoted
+    /// string. SDKs comparing via `If-Match` / `If-None-Match`
+    /// mis-evaluated; round-trip migrations that preserved bytes but
+    /// stripped xattrs (tar, rsync without `-X`, copy across
+    /// filesystems) broke client compare-and-swap loops. The S3
+    /// backend's fallback path (`s3.rs::fallback_metadata_from_listing`)
+    /// returns the real ETag from the listing, so the two backends
+    /// disagreed.
+    ///
+    /// Post-fix: emit a deterministic synthetic ETag derived from
+    /// `(size, mtime)`. Clients use ETag for change-detection — any
+    /// modification to the file changes either size or mtime, which
+    /// invalidates the synthetic. The ETag is NOT a real MD5 (we
+    /// can't know it without reading the body) but it is a valid
+    /// strong ETag per the S3 wire contract (which doesn't promise
+    /// ETag is the body MD5 in the multipart case anyway). Empty
+    /// files get the canonical empty-content MD5 so they look
+    /// consistent across backends and tooling.
     async fn fallback_metadata_from_path(
         path: &Path,
         filename: &str,
@@ -173,10 +229,13 @@ impl FilesystemBackend {
             .modified()
             .map(DateTime::<Utc>::from)
             .unwrap_or_else(|_| Utc::now());
+
+        let synthetic_etag = synthesise_unmanaged_etag(stat.len(), &modified);
+
         Ok(FileMetadata::fallback(
             filename.to_string(),
             stat.len(),
-            String::new(),
+            synthetic_etag,
             modified,
             None,
             StorageInfo::Passthrough,
@@ -1781,6 +1840,58 @@ mod tests {
             .await
             .expect("delete bucket");
         assert!(!tmp.path().join("bucket").exists());
+    }
+
+    /// S-P1-3 regression: zero-byte unmanaged files get the canonical
+    /// empty-content MD5, NOT an empty string.
+    #[test]
+    fn unmanaged_etag_zero_size_is_canonical_empty_md5() {
+        let mtime = chrono::Utc::now();
+        assert_eq!(
+            synthesise_unmanaged_etag(0, &mtime),
+            "d41d8cd98f00b204e9800998ecf8427e",
+            "empty unmanaged files must map to the canonical empty MD5"
+        );
+    }
+
+    /// Pre-fix this test would have asserted `etag() == "\""` because
+    /// `md5 = String::new()` rendered as a quoted empty string.
+    /// Post-fix: stable, non-empty, hex-32 — looks like a real ETag
+    /// to SDK consumers.
+    #[test]
+    fn unmanaged_etag_nonempty_is_stable_hex32() {
+        let mtime = chrono::Utc::now();
+        let a = synthesise_unmanaged_etag(1024, &mtime);
+        let b = synthesise_unmanaged_etag(1024, &mtime);
+        assert_eq!(a, b, "same (size, mtime) must produce same etag");
+        assert_eq!(a.len(), 32, "must be hex-32 like a real MD5");
+        assert!(
+            a.chars().all(|c| c.is_ascii_hexdigit()),
+            "must be valid hex"
+        );
+        assert_ne!(
+            a, "d41d8cd98f00b204e9800998ecf8427e",
+            "non-empty file must NOT collide with the empty-MD5 sentinel"
+        );
+    }
+
+    /// Any change to size or mtime invalidates the etag — that's the
+    /// property change-detection clients rely on.
+    #[test]
+    fn unmanaged_etag_size_change_invalidates() {
+        let mtime = chrono::Utc::now();
+        let a = synthesise_unmanaged_etag(1024, &mtime);
+        let b = synthesise_unmanaged_etag(1025, &mtime);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn unmanaged_etag_mtime_change_invalidates() {
+        let now = chrono::Utc::now();
+        let later = now + chrono::Duration::seconds(1);
+        let a = synthesise_unmanaged_etag(1024, &now);
+        let b = synthesise_unmanaged_etag(1024, &later);
+        assert_ne!(a, b);
     }
 
     #[tokio::test]
