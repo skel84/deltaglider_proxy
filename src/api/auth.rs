@@ -547,6 +547,27 @@ fn has_presigned_query_params(query: &str) -> bool {
     })
 }
 
+/// Bucket-level HTML form upload candidates (`POST /bucket` with multipart form-data)
+/// are authenticated via SigV4 POST policy fields in the body, not via the
+/// Authorization header or presigned query params.
+fn is_form_post_policy_candidate(request: &Request<Body>) -> bool {
+    if request.method() != axum::http::Method::POST {
+        return false;
+    }
+    if request.uri().query().is_some() {
+        return false;
+    }
+    if request.uri().path().trim_matches('/').split('/').count() != 1 {
+        return false;
+    }
+    request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.to_ascii_lowercase().starts_with("multipart/form-data"))
+        .unwrap_or(false)
+}
+
 /// Axum middleware that verifies SigV4 signatures when auth is configured.
 ///
 /// Inserted as a layer around the router. If `auth` is `None` (no credentials
@@ -713,6 +734,13 @@ pub async fn sigv4_auth_middleware(
         }
     }
     let query_string = request.uri().query().unwrap_or("");
+    if !request.headers().contains_key("authorization")
+        && !has_presigned_query_params(query_string)
+        && is_form_post_policy_candidate(&request)
+    {
+        debug!("SigV4: deferring POST form policy auth to object handler");
+        return Ok(next.run(request).await);
+    }
     let is_presigned = has_presigned_query_params(query_string);
     let params = if is_presigned {
         SigV4Params::from_query(&request).inspect_err(|_| {

@@ -201,6 +201,24 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Server",
     },
     EnvVarEntry {
+        name: "DGP_MULTIPART_SWEEP_INTERVAL_SECS",
+        description: "Multipart sweeper interval in seconds (default: 300)",
+        example: "300",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_MULTIPART_SWEEP_MAX_AGE_SECS",
+        description: "Multipart max age cutoff for Open uploads in seconds (default: 3600)",
+        example: "3600",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_MULTIPART_COMPLETING_TIMEOUT_SECS",
+        description: "Multipart Completing-state timeout in seconds (default: sweep max age)",
+        example: "3600",
+        category: "Server",
+    },
+    EnvVarEntry {
         name: "DGP_CLOCK_SKEW_SECONDS",
         description: "SigV4 clock skew tolerance in seconds (default: 300)",
         example: "300",
@@ -2301,21 +2319,24 @@ mod tests {
         // Every registry entry must be referenced somewhere in the codebase.
         // Vars not in from_env() are read at other call sites (startup, session, etc.).
         let used_outside_from_env: &[&str] = &[
-            "DGP_CONFIG",                  // config::load()
-            "DGP_DEBUG_HEADERS",           // api::handlers::debug_headers_enabled()
-            "DGP_TRUST_PROXY_HEADERS",     // rate_limiter::trust_proxy_headers()
-            "DGP_SESSION_TTL_HOURS",       // session::default_session_ttl()
-            "DGP_MAX_MULTIPART_UPLOADS",   // multipart::default_max_uploads()
-            "DGP_CLOCK_SKEW_SECONDS",      // api::auth + startup replay cache
-            "DGP_MAX_CONCURRENT_REQUESTS", // startup::build_s3_router()
-            "DGP_CORS_PERMISSIVE",         // demo::ui_router()
-            "DGP_REQUEST_TIMEOUT_SECS",    // startup::build_s3_router()
-            "DGP_CODEC_TIMEOUT_SECS",      // deltaglider::codec::codec_timeout()
-            "DGP_RATE_LIMIT_MAX_ATTEMPTS", // rate_limiter::default_auth()
-            "DGP_RATE_LIMIT_WINDOW_SECS",  // rate_limiter::default_auth()
-            "DGP_RATE_LIMIT_LOCKOUT_SECS", // rate_limiter::default_auth()
-            "DGP_REPLAY_WINDOW_SECS",      // api::auth replay detection
-            "DGP_SECURE_COOKIES",          // api::admin::auth::secure_cookies()
+            "DGP_CONFIG",                            // config::load()
+            "DGP_DEBUG_HEADERS",                     // api::handlers::debug_headers_enabled()
+            "DGP_TRUST_PROXY_HEADERS",               // rate_limiter::trust_proxy_headers()
+            "DGP_SESSION_TTL_HOURS",                 // session::default_session_ttl()
+            "DGP_MAX_MULTIPART_UPLOADS",             // multipart::default_max_uploads()
+            "DGP_MULTIPART_SWEEP_INTERVAL_SECS",     // main multipart sweeper cadence
+            "DGP_MULTIPART_SWEEP_MAX_AGE_SECS",      // main multipart sweeper max-age cutoff
+            "DGP_MULTIPART_COMPLETING_TIMEOUT_SECS", // main multipart Completing timeout
+            "DGP_CLOCK_SKEW_SECONDS",                // api::auth + startup replay cache
+            "DGP_MAX_CONCURRENT_REQUESTS",           // startup::build_s3_router()
+            "DGP_CORS_PERMISSIVE",                   // demo::ui_router()
+            "DGP_REQUEST_TIMEOUT_SECS",              // startup::build_s3_router()
+            "DGP_CODEC_TIMEOUT_SECS",                // deltaglider::codec::codec_timeout()
+            "DGP_RATE_LIMIT_MAX_ATTEMPTS",           // rate_limiter::default_auth()
+            "DGP_RATE_LIMIT_WINDOW_SECS",            // rate_limiter::default_auth()
+            "DGP_RATE_LIMIT_LOCKOUT_SECS",           // rate_limiter::default_auth()
+            "DGP_REPLAY_WINDOW_SECS",                // api::auth replay detection
+            "DGP_SECURE_COOKIES",                    // api::admin::auth::secure_cookies()
         ];
         for name in &registry_names {
             if used_outside_from_env.contains(name) {

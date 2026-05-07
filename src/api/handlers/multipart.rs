@@ -13,7 +13,20 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, instrument, warn};
+
+/// Upper bound for MPU payloads that we still send through the delta-eligible
+/// complete path (`MultipartStore::complete` + `engine.store_with_multipart_etag`).
+///
+/// Larger payloads are forced onto the chunked passthrough complete path to
+/// avoid long finalize latencies and large contiguous allocations during
+/// `CompleteMultipartUpload`.
+///
+/// Override via `DGP_MPU_DELTA_RECONSTRUCT_MAX_BYTES`.
+fn mpu_delta_reconstruct_max_bytes() -> u64 {
+    crate::config::env_parse_with_default("DGP_MPU_DELTA_RECONSTRUCT_MAX_BYTES", 64 * 1024 * 1024)
+}
 
 /// POST object handler — dispatches multipart upload operations by query param.
 #[instrument(skip(state, body))]
@@ -53,9 +66,21 @@ fn initiate_multipart_upload(
 
     let content_type = extract_content_type(headers);
     let user_metadata = extract_user_metadata(headers);
-    let upload_id = state
-        .multipart
-        .create(bucket, key, content_type, user_metadata)?;
+    let engine = state.engine.load();
+    let delta_limit = mpu_delta_reconstruct_max_bytes();
+    let is_delta_eligible = engine.is_delta_eligible(key);
+    let upload_id = state.multipart.create_with_relay_policy(
+        bucket,
+        key,
+        content_type,
+        user_metadata,
+        if is_delta_eligible {
+            Some(delta_limit)
+        } else {
+            None
+        },
+        !is_delta_eligible,
+    )?;
 
     let xml = InitiateMultipartUploadResult {
         bucket: bucket.to_string(),
@@ -74,6 +99,7 @@ async fn complete_multipart_upload(
     upload_id: &str,
     body: Bytes,
 ) -> Result<Response, S3Error> {
+    let started = Instant::now();
     info!(
         "CompleteMultipartUpload {}/{} uploadId={}",
         bucket, key, upload_id
@@ -98,13 +124,11 @@ async fn complete_multipart_upload(
         .collect();
 
     // Quota check before storing — estimate size from parts
-    {
-        let total_parts_size: u64 = requested_parts
-            .iter()
-            .filter_map(|(num, _)| state.multipart.get_part_size(upload_id, *num))
-            .sum();
-        super::object_helpers::check_quota(state, bucket, total_parts_size)?;
-    }
+    let total_parts_size: u64 = requested_parts
+        .iter()
+        .filter_map(|(num, _)| state.multipart.get_part_size(upload_id, *num))
+        .sum();
+    super::object_helpers::check_quota(state, bucket, total_parts_size)?;
 
     // Bifurcate: non-delta-eligible files use the chunked path to avoid
     // assembling all parts into a single contiguous buffer (~2x memory savings).
@@ -123,23 +147,52 @@ async fn complete_multipart_upload(
     // a plain full-body MD5 and clients encountered two different ETags
     // for the same object.
     let engine = state.engine.load();
-    let (multipart_etag, store_result) = if !engine.is_delta_eligible(key) {
-        let completed = state
-            .multipart
-            .complete_parts(upload_id, bucket, key, &requested_parts)?;
+    let delta_reconstruct_limit = mpu_delta_reconstruct_max_bytes();
+    let force_chunked_passthrough =
+        !engine.is_delta_eligible(key) || total_parts_size > delta_reconstruct_limit;
+    if engine.is_delta_eligible(key) && total_parts_size > delta_reconstruct_limit {
+        info!(
+            "CompleteMultipartUpload {}/{}: forcing chunked passthrough for {} bytes (delta reconstruct limit {} bytes)",
+            bucket, key, total_parts_size, delta_reconstruct_limit
+        );
+    }
+    let (multipart_etag, store_result) = if force_chunked_passthrough {
+        let completed =
+            state
+                .multipart
+                .complete_passthrough(upload_id, bucket, key, &requested_parts)?;
         let etag = completed.etag.clone();
-        match engine
-            .store_passthrough_chunked_with_multipart_etag(
-                bucket,
-                key,
-                &completed.parts,
-                completed.total_size,
-                completed.content_type,
-                completed.user_metadata,
-                etag.clone(),
-            )
-            .await
-        {
+        let store_outcome = match completed.payload {
+            crate::multipart::PassthroughPayload::Chunks(parts) => {
+                engine
+                    .store_passthrough_chunked_with_multipart_etag(
+                        bucket,
+                        key,
+                        &parts,
+                        completed.total_size,
+                        completed.content_type,
+                        completed.user_metadata,
+                        etag.clone(),
+                    )
+                    .await
+            }
+            crate::multipart::PassthroughPayload::RelayedFile(path) => {
+                let result = engine
+                    .store_passthrough_file_with_multipart_etag(
+                        bucket,
+                        key,
+                        &path,
+                        completed.total_size,
+                        completed.content_type,
+                        completed.user_metadata,
+                        etag.clone(),
+                    )
+                    .await;
+                let _ = std::fs::remove_file(&path);
+                result
+            }
+        };
+        match store_outcome {
             Ok(result) => (etag, result),
             Err(e) => {
                 // Engine failure: return upload to Open so the client
@@ -178,10 +231,11 @@ async fn complete_multipart_upload(
     state.multipart.finish_upload(upload_id);
 
     debug!(
-        "CompleteMultipartUpload {}/{} stored as {}",
+        "CompleteMultipartUpload {}/{} stored as {} in {} ms",
         bucket,
         key,
         store_result.metadata.storage_info.label(),
+        started.elapsed().as_millis(),
     );
 
     let xml = CompleteMultipartUploadResult {

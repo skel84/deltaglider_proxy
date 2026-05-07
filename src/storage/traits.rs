@@ -4,6 +4,7 @@ use crate::types::FileMetadata;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
+use std::path::Path;
 use thiserror::Error;
 
 /// Bucket listing entry with optional routing-origin metadata.
@@ -195,6 +196,21 @@ pub trait StorageBackend: Send + Sync {
         data: &[u8],
         metadata: &FileMetadata,
     ) -> Result<(), StorageError>;
+
+    /// Store a passthrough file from an on-disk source path.
+    /// Default implementation reads the full file and delegates to `put_passthrough`.
+    async fn put_passthrough_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        source_path: &Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        let data = tokio::fs::read(source_path).await?;
+        self.put_passthrough(bucket, prefix, filename, &data, metadata)
+            .await
+    }
 
     /// Get passthrough file metadata
     async fn get_passthrough_metadata(
@@ -473,6 +489,18 @@ macro_rules! impl_storage_backend_for_box {
             ) -> Result<(), StorageError> {
                 (**self)
                     .put_passthrough(bucket, prefix, filename, data, metadata)
+                    .await
+            }
+            async fn put_passthrough_file(
+                &self,
+                bucket: &str,
+                prefix: &str,
+                filename: &str,
+                source_path: &Path,
+                metadata: &FileMetadata,
+            ) -> Result<(), StorageError> {
+                (**self)
+                    .put_passthrough_file(bucket, prefix, filename, source_path, metadata)
                     .await
             }
             async fn get_passthrough_metadata(

@@ -55,6 +55,17 @@ pub struct Metrics {
     // -- Auth --
     pub auth_attempts_total: IntCounterVec,
     pub auth_failures_total: IntCounterVec,
+
+    // -- Multipart Sweep --
+    pub multipart_sweep_runs_total: IntCounterVec,
+    pub multipart_sweep_duration_seconds: HistogramVec,
+    pub multipart_swept_uploads_total: IntCounterVec,
+    pub multipart_sweep_reclaimed_bytes_total: IntCounter,
+    pub multipart_sweep_orphan_relay_dirs_total: IntCounter,
+    pub multipart_sweep_orphan_relay_files_total: IntCounter,
+    pub multipart_sweep_last_uploads_reclaimed: Gauge,
+    pub multipart_sweep_last_reclaimed_bytes: Gauge,
+    pub multipart_uploads_inflight: Gauge,
 }
 
 impl Default for Metrics {
@@ -297,6 +308,88 @@ impl Metrics {
             )
             .unwrap()
         );
+        // -- Multipart Sweep --
+        let multipart_sweep_runs_total = register!(
+            registry,
+            IntCounterVec::new(
+                Opts::new(
+                    "deltaglider_multipart_sweep_runs_total",
+                    "Multipart sweeper runs by phase",
+                ),
+                &["phase"],
+            )
+            .unwrap()
+        );
+        let multipart_sweep_duration_seconds = register!(
+            registry,
+            HistogramVec::new(
+                HistogramOpts::new(
+                    "deltaglider_multipart_sweep_duration_seconds",
+                    "Multipart sweeper run duration in seconds",
+                ),
+                &["phase"],
+            )
+            .unwrap()
+        );
+        let multipart_swept_uploads_total = register!(
+            registry,
+            IntCounterVec::new(
+                Opts::new(
+                    "deltaglider_multipart_swept_uploads_total",
+                    "Multipart uploads reclaimed by sweeper state",
+                ),
+                &["state"],
+            )
+            .unwrap()
+        );
+        let multipart_sweep_reclaimed_bytes_total = register!(
+            registry,
+            IntCounter::new(
+                "deltaglider_multipart_sweep_reclaimed_bytes_total",
+                "Total bytes reclaimed by multipart sweeper",
+            )
+            .unwrap()
+        );
+        let multipart_sweep_orphan_relay_dirs_total = register!(
+            registry,
+            IntCounter::new(
+                "deltaglider_multipart_sweep_orphan_relay_dirs_total",
+                "Total orphan multipart relay directories removed",
+            )
+            .unwrap()
+        );
+        let multipart_sweep_orphan_relay_files_total = register!(
+            registry,
+            IntCounter::new(
+                "deltaglider_multipart_sweep_orphan_relay_files_total",
+                "Total orphan multipart relay files removed",
+            )
+            .unwrap()
+        );
+        let multipart_sweep_last_uploads_reclaimed = register!(
+            registry,
+            Gauge::new(
+                "deltaglider_multipart_sweep_last_uploads_reclaimed",
+                "Uploads reclaimed in the latest multipart sweep run",
+            )
+            .unwrap()
+        );
+        let multipart_sweep_last_reclaimed_bytes = register!(
+            registry,
+            Gauge::new(
+                "deltaglider_multipart_sweep_last_reclaimed_bytes",
+                "Bytes reclaimed in the latest multipart sweep run",
+            )
+            .unwrap()
+        );
+        let multipart_uploads_inflight = register!(
+            registry,
+            Gauge::new(
+                "deltaglider_multipart_uploads_inflight",
+                "Current in-flight multipart upload count",
+            )
+            .unwrap()
+        );
 
         Metrics {
             registry,
@@ -322,6 +415,15 @@ impl Metrics {
             codec_semaphore_available,
             auth_attempts_total,
             auth_failures_total,
+            multipart_sweep_runs_total,
+            multipart_sweep_duration_seconds,
+            multipart_swept_uploads_total,
+            multipart_sweep_reclaimed_bytes_total,
+            multipart_sweep_orphan_relay_dirs_total,
+            multipart_sweep_orphan_relay_files_total,
+            multipart_sweep_last_uploads_reclaimed,
+            multipart_sweep_last_reclaimed_bytes,
+            multipart_uploads_inflight,
         }
     }
 }
@@ -444,6 +546,9 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
     metrics
         .codec_semaphore_available
         .set(engine.codec_available_permits() as f64);
+    metrics
+        .multipart_uploads_inflight
+        .set(state.multipart.count_uploads() as f64);
 
     let encoder = TextEncoder::new();
     let metric_families = metrics.registry.gather();

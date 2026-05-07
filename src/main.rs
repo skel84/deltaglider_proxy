@@ -9,14 +9,14 @@ use axum::middleware;
 use clap::{Parser, Subcommand};
 use deltaglider_proxy::api::admin::AdminState;
 use deltaglider_proxy::api::handlers::{debug_headers_enabled, AppState};
-use deltaglider_proxy::config::Config;
+use deltaglider_proxy::config::{env_parse_with_default, Config};
 use deltaglider_proxy::deltaglider::DynEngine;
 use deltaglider_proxy::multipart::MultipartStore;
 use deltaglider_proxy::rate_limiter::RateLimiter;
 use deltaglider_proxy::session::SessionStore;
 use deltaglider_proxy::usage_scanner::UsageScanner;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -400,9 +400,80 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Multipart uploads ---
     let multipart = Arc::new(MultipartStore::new(config.max_object_size));
-    spawn_periodic(Duration::from_secs(300), {
+    let multipart_sweep_interval_secs: u64 =
+        env_parse_with_default("DGP_MULTIPART_SWEEP_INTERVAL_SECS", 300);
+    let multipart_sweep_max_age_secs: u64 =
+        env_parse_with_default("DGP_MULTIPART_SWEEP_MAX_AGE_SECS", 3600);
+    let multipart_completing_timeout_secs: u64 = env_parse_with_default(
+        "DGP_MULTIPART_COMPLETING_TIMEOUT_SECS",
+        multipart_sweep_max_age_secs,
+    );
+    let multipart_sweep_interval = Duration::from_secs(multipart_sweep_interval_secs.max(1));
+    let multipart_sweep_max_age = Duration::from_secs(multipart_sweep_max_age_secs.max(1));
+    let multipart_completing_timeout =
+        Duration::from_secs(multipart_completing_timeout_secs.max(1));
+    let startup_sweep_begin = Instant::now();
+    let startup_sweep = multipart.sweep_orphan_relay_artifacts();
+    metrics
+        .multipart_sweep_runs_total
+        .with_label_values(&["startup"])
+        .inc();
+    metrics
+        .multipart_sweep_duration_seconds
+        .with_label_values(&["startup"])
+        .observe(startup_sweep_begin.elapsed().as_secs_f64());
+    metrics
+        .multipart_sweep_orphan_relay_dirs_total
+        .inc_by(startup_sweep.orphan_relay_dirs_removed);
+    metrics
+        .multipart_sweep_orphan_relay_files_total
+        .inc_by(startup_sweep.orphan_relay_files_removed);
+    if startup_sweep.orphan_relay_dirs_removed > 0 || startup_sweep.orphan_relay_files_removed > 0 {
+        info!(
+            "multipart startup sweep removed {} orphan relay dirs and {} orphan relay files",
+            startup_sweep.orphan_relay_dirs_removed, startup_sweep.orphan_relay_files_removed
+        );
+    }
+
+    spawn_periodic(multipart_sweep_interval, {
         let mp = multipart.clone();
-        move || mp.cleanup_expired(Duration::from_secs(3600))
+        let metrics = metrics.clone();
+        move || {
+            let begin = Instant::now();
+            let report = mp.cleanup_expired(multipart_sweep_max_age, multipart_completing_timeout);
+            let orphan_report = mp.sweep_orphan_relay_artifacts();
+            metrics
+                .multipart_sweep_runs_total
+                .with_label_values(&["periodic"])
+                .inc();
+            metrics
+                .multipart_sweep_duration_seconds
+                .with_label_values(&["periodic"])
+                .observe(begin.elapsed().as_secs_f64());
+            metrics
+                .multipart_swept_uploads_total
+                .with_label_values(&["open"])
+                .inc_by(report.swept_open_uploads);
+            metrics
+                .multipart_swept_uploads_total
+                .with_label_values(&["completing"])
+                .inc_by(report.swept_completing_uploads);
+            metrics
+                .multipart_sweep_reclaimed_bytes_total
+                .inc_by(report.reclaimed_bytes);
+            metrics
+                .multipart_sweep_orphan_relay_dirs_total
+                .inc_by(orphan_report.orphan_relay_dirs_removed);
+            metrics
+                .multipart_sweep_orphan_relay_files_total
+                .inc_by(orphan_report.orphan_relay_files_removed);
+            metrics
+                .multipart_sweep_last_uploads_reclaimed
+                .set(report.total_uploads_swept() as f64);
+            metrics
+                .multipart_sweep_last_reclaimed_bytes
+                .set(report.reclaimed_bytes as f64);
+        }
     });
 
     // --- Rate limiter & replay cache ---

@@ -11,12 +11,17 @@
 
 mod common;
 
+use bytes::Bytes;
 use common::{
     generate_binary, get_bytes, head_headers, list_objects_raw, mutate_binary,
     put_and_get_storage_type, TestServer, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
 };
+use deltaglider_proxy::multipart::MultipartStore;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::ContainerAsync;
@@ -1411,6 +1416,142 @@ async fn test_multipart_delta_compression() {
     // Verify data integrity
     let retrieved = get_bytes(&http, &server.endpoint(), server.bucket(), &variant_key).await;
     assert_eq!(retrieved, variant);
+}
+
+#[tokio::test]
+async fn test_multipart_large_zip_forces_passthrough_on_s3_backend() {
+    skip_unless_docker!();
+    let endpoint = minio_endpoint().await;
+    ensure_bucket(&endpoint).await;
+    let server = TestServer::builder()
+        .s3_endpoint(&endpoint)
+        .bucket(TEST_BUCKET)
+        .env("DGP_MPU_DELTA_RECONSTRUCT_MAX_BYTES", "1024")
+        .build()
+        .await;
+    let http = reqwest::Client::new();
+    let prefix = unique_prefix();
+
+    // Seed a baseline so the .zip key family is delta-eligible.
+    let base = generate_binary(64 * 1024, 4242);
+    let _ = put_and_get_storage_type(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        &format!("{}/base.zip", prefix),
+        base.clone(),
+        "application/zip",
+    )
+    .await;
+
+    let variant = mutate_binary(&base, 0.04);
+    let key = format!("{}/large-variant.zip", prefix);
+    let upload_id = create_multipart_upload(&http, &server.endpoint(), server.bucket(), &key).await;
+    let mid = variant.len() / 2;
+    let e1 = upload_part(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        &key,
+        &upload_id,
+        1,
+        variant[..mid].to_vec(),
+    )
+    .await;
+    let e2 = upload_part(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        &key,
+        &upload_id,
+        2,
+        variant[mid..].to_vec(),
+    )
+    .await;
+
+    let complete = complete_multipart_upload(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        &key,
+        &upload_id,
+        &[(1, &e1), (2, &e2)],
+    )
+    .await;
+    assert!(
+        complete.status().is_success(),
+        "CompleteMultipartUpload failed: {}",
+        complete.status()
+    );
+    let storage_type = complete
+        .headers()
+        .get("x-amz-storage-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    assert_eq!(
+        storage_type, "passthrough",
+        "Expected forced passthrough for large MPU complete, got {}",
+        storage_type
+    );
+    let roundtrip = get_bytes(&http, &server.endpoint(), server.bucket(), &key).await;
+    assert_eq!(roundtrip, variant);
+}
+
+#[tokio::test]
+async fn test_startup_sweeps_orphan_relay_artifacts() {
+    let relay_root = std::env::temp_dir().join("deltaglider-mpu-relay");
+    let orphan_dir = relay_root.join(format!("orphan-dir-{}", unique_prefix()));
+    let orphan_file = relay_root.join(format!("orphan-file-{}.tmp", unique_prefix()));
+    fs::create_dir_all(&orphan_dir).expect("create orphan relay dir");
+    fs::write(orphan_dir.join("part-00001.bin"), b"orphan").expect("write orphan relay part");
+    fs::write(&orphan_file, b"orphan").expect("write orphan relay file");
+
+    let _server = TestServer::filesystem().await;
+
+    for _ in 0..40 {
+        if !orphan_dir.exists() && !orphan_file.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !orphan_dir.exists(),
+        "startup sweep should remove orphan relay directory {:?}",
+        orphan_dir
+    );
+    assert!(
+        !orphan_file.exists(),
+        "startup sweep should remove orphan relay file {:?}",
+        orphan_file
+    );
+}
+
+#[test]
+fn test_completing_timeout_reclaims_stuck_upload() {
+    let store = MultipartStore::new(10 * 1024 * 1024);
+    let id = store
+        .create_with_relay_policy("b", "large.zip", None, HashMap::new(), Some(1024), false)
+        .expect("create upload");
+    let etag = store
+        .upload_part(&id, "b", "large.zip", 1, Bytes::from(vec![0u8; 2048]))
+        .expect("upload part");
+    let _ = store
+        .complete(&id, "b", "large.zip", &[(1, etag)])
+        .expect("complete to completing state");
+    assert_eq!(
+        store.count_uploads(),
+        1,
+        "upload should be tracked before sweep"
+    );
+    std::thread::sleep(Duration::from_millis(5));
+
+    let report = store.cleanup_expired(Duration::from_secs(3600), Duration::from_millis(1));
+    assert_eq!(
+        report.swept_completing_uploads, 1,
+        "sweep should reclaim stuck completing upload"
+    );
+    assert!(report.reclaimed_bytes >= 2048);
+    assert_eq!(store.count_uploads(), 0, "upload should be removed");
 }
 
 #[tokio::test]

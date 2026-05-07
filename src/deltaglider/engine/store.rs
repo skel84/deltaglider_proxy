@@ -4,7 +4,9 @@ use super::*;
 use crate::storage::StorageBackend;
 use md5::{Digest, Md5};
 use sha2::Sha256;
+use std::path::Path;
 use std::time::Instant;
+use tokio::io::AsyncReadExt;
 
 /// Store an object with automatic delta compression
 impl<S: StorageBackend> DeltaGliderEngine<S> {
@@ -455,6 +457,94 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         {
             warn!(
                 "Failed to clean up old delta after chunked passthrough write: {}",
+                e
+            );
+        }
+
+        let result = StoreResult {
+            metadata,
+            stored_size: total_size,
+        };
+        self.metadata_cache
+            .insert(bucket, key, result.metadata.clone());
+        Ok(result)
+    }
+
+    /// Store a passthrough object from a local file path, computing hashes
+    /// incrementally to avoid reconstructing large multipart payloads in memory.
+    #[instrument(skip(self, user_metadata, multipart_etag))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn store_passthrough_file_with_multipart_etag(
+        &self,
+        bucket: &str,
+        key: &str,
+        source_path: &Path,
+        total_size: u64,
+        content_type: Option<String>,
+        user_metadata: HashMap<String, String>,
+        multipart_etag: String,
+    ) -> Result<StoreResult, EngineError> {
+        if total_size > self.max_object_size {
+            return Err(EngineError::TooLarge {
+                size: total_size,
+                max: self.max_object_size,
+            });
+        }
+
+        self.metadata_cache.invalidate(bucket, key);
+        let (obj_key, deltaspace_id) = Self::validated_key(bucket, key)?;
+
+        let mut file = tokio::fs::File::open(source_path)
+            .await
+            .map_err(StorageError::from)?;
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut sha256_hasher = Sha256::new();
+        let mut md5_hasher = Md5::new();
+        let mut observed = 0u64;
+        loop {
+            let n = file.read(&mut buf).await.map_err(StorageError::from)?;
+            if n == 0 {
+                break;
+            }
+            observed = observed.saturating_add(n as u64);
+            sha256_hasher.update(&buf[..n]);
+            md5_hasher.update(&buf[..n]);
+        }
+        if observed != total_size {
+            return Err(EngineError::Storage(StorageError::Other(format!(
+                "Multipart relay size mismatch: expected {}, observed {}",
+                total_size, observed
+            ))));
+        }
+        let sha256 = hex::encode(sha256_hasher.finalize());
+        let md5 = hex::encode(md5_hasher.finalize());
+        let _guard = self.acquire_prefix_lock(&deltaspace_id).await;
+
+        let mut metadata = FileMetadata::new_passthrough(
+            obj_key.filename.clone(),
+            sha256,
+            md5,
+            total_size,
+            content_type,
+        );
+        metadata.user_metadata = user_metadata;
+        metadata.multipart_etag = Some(multipart_etag);
+
+        self.storage
+            .put_passthrough_file(
+                bucket,
+                &deltaspace_id,
+                &obj_key.filename,
+                source_path,
+                &metadata,
+            )
+            .await?;
+        if let Err(e) = self
+            .delete_delta_idempotent(bucket, &deltaspace_id, &obj_key.filename)
+            .await
+        {
+            warn!(
+                "Failed to clean up old delta after relay passthrough write: {}",
                 e
             );
         }

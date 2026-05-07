@@ -11,6 +11,9 @@ import {
   type ListBucketsCommandOutput,
   CreateBucketCommand,
   DeleteBucketCommand,
+  ListMultipartUploadsCommand,
+  type ListMultipartUploadsCommandOutput,
+  AbortMultipartUploadCommand,
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -18,6 +21,18 @@ import type { S3Object, ListResult, BucketInfo } from './types';
 import { detectDefaultEndpoint } from './utils';
 import { createBucketOnBackend, getBucketOrigins } from './adminApi';
 import { normalizeS3Error } from './errorHandling';
+import {
+  appendThroughputSample,
+  clampPercent,
+  DEFAULT_UPLOAD_PART_SIZE,
+  DEFAULT_UPLOAD_QUEUE_SIZE,
+  estimateCompletedParts,
+  estimateInFlightParts,
+  estimateTotalParts,
+  movingAverageSpeedBps,
+  type ThroughputSample,
+  type UploadStatus,
+} from './uploadTelemetry';
 import {
   fetchSessionCredentials,
   storeSessionCredentials,
@@ -239,10 +254,85 @@ export async function headObject(key: string): Promise<{
   return { headers, storageType, storedSize };
 }
 
-export async function uploadObject(key: string, data: Blob | ArrayBuffer): Promise<void> {
+export interface UploadTelemetry {
+  key: string;
+  status: UploadStatus;
+  loadedBytes: number;
+  totalBytes: number;
+  percent: number;
+  speedBytesPerSec: number;
+  partSize: number;
+  queueSize: number;
+  totalParts: number;
+  completedParts: number;
+  inFlightParts: number;
+  activeConnections: number;
+  currentPart: number | null;
+  elapsedMs: number;
+  updatedAtMs: number;
+}
+
+interface UploadProgressEvent {
+  loaded?: number;
+  total?: number;
+  part?: number;
+}
+
+interface UploadObjectOptions {
+  onTelemetry?: (telemetry: UploadTelemetry) => void;
+  signal?: AbortSignal;
+  partSize?: number;
+  queueSize?: number;
+}
+
+function emitTelemetry(
+  cb: ((telemetry: UploadTelemetry) => void) | undefined,
+  telemetry: UploadTelemetry,
+): UploadTelemetry {
+  if (cb) cb(telemetry);
+  return telemetry;
+}
+
+function nowMs(): number {
+  // Keep telemetry on wall clock so UI elapsed-time math remains stable
+  // across refreshes and browser timing-source differences.
+  return Date.now();
+}
+
+export async function uploadObject(
+  key: string,
+  data: Blob | ArrayBuffer,
+  options: UploadObjectOptions = {},
+): Promise<void> {
   const body = data instanceof Blob ? data : new Uint8Array(data);
   const contentType = data instanceof Blob && data.type ? data.type : 'application/octet-stream';
+  const totalBytes = data instanceof Blob ? data.size : data.byteLength;
+  const partSize = options.partSize ?? DEFAULT_UPLOAD_PART_SIZE;
+  const queueSize = options.queueSize ?? DEFAULT_UPLOAD_QUEUE_SIZE;
+  const totalParts = estimateTotalParts(totalBytes, partSize);
+  const startedAtMs = nowMs();
+  let lastCurrentPart: number | null = null;
+  let samples: ThroughputSample[] = [{ atMs: startedAtMs, loadedBytes: 0 }];
+  let lastTelemetry: UploadTelemetry = {
+    key,
+    status: 'queued',
+    loadedBytes: 0,
+    totalBytes,
+    percent: 0,
+    speedBytesPerSec: 0,
+    partSize,
+    queueSize,
+    totalParts,
+    completedParts: 0,
+    inFlightParts: 0,
+    activeConnections: 0,
+    currentPart: null,
+    elapsedMs: 0,
+    updatedAtMs: startedAtMs,
+  };
+
   try {
+    emitTelemetry(options.onTelemetry, lastTelemetry);
     // Managed upload uses multipart automatically for large payloads and
     // retries failed parts individually (critical for long uploads through
     // flaky gateways/proxies).
@@ -254,12 +344,89 @@ export async function uploadObject(key: string, data: Blob | ArrayBuffer): Promi
         Body: body,
         ContentType: contentType,
       },
-      partSize: 16 * 1024 * 1024, // 16 MiB parts
-      queueSize: 4, // bounded browser/network concurrency
+      partSize,
+      queueSize,
       leavePartsOnError: false,
     });
+    if (options.signal) {
+      options.signal.addEventListener('abort', () => {
+        void upload.abort();
+      }, { once: true });
+    }
+    upload.on('httpUploadProgress', (progress: UploadProgressEvent) => {
+      const atMs = nowMs();
+      const loadedBytes = Math.max(0, progress.loaded ?? 0);
+      const resolvedTotalBytes = Math.max(totalBytes, progress.total ?? 0);
+      if (typeof progress.part === 'number') {
+        lastCurrentPart = progress.part;
+      }
+      samples = appendThroughputSample(samples, { atMs, loadedBytes });
+      const speedBytesPerSec = movingAverageSpeedBps(samples);
+      const completedParts = estimateCompletedParts(loadedBytes, resolvedTotalBytes, partSize);
+      const status: UploadStatus = loadedBytes >= resolvedTotalBytes && resolvedTotalBytes > 0
+        ? 'completing'
+        : 'uploading';
+      const inFlightParts = estimateInFlightParts(status, totalParts, completedParts, queueSize);
+      lastTelemetry = emitTelemetry(options.onTelemetry, {
+        key,
+        status,
+        loadedBytes,
+        totalBytes: resolvedTotalBytes,
+        percent: clampPercent(
+          resolvedTotalBytes > 0 ? (loadedBytes / resolvedTotalBytes) * 100 : 0,
+        ),
+        speedBytesPerSec,
+        partSize,
+        queueSize,
+        totalParts,
+        completedParts,
+        inFlightParts,
+        activeConnections: inFlightParts,
+        currentPart: lastCurrentPart,
+        elapsedMs: Math.max(0, atMs - startedAtMs),
+        updatedAtMs: atMs,
+      });
+    });
+
     await upload.done();
+    const atMs = nowMs();
+    lastTelemetry = emitTelemetry(options.onTelemetry, {
+      ...lastTelemetry,
+      status: 'success',
+      loadedBytes: totalBytes,
+      totalBytes,
+      percent: 100,
+      completedParts: totalParts,
+      inFlightParts: 0,
+      activeConnections: 0,
+      speedBytesPerSec: Math.max(
+        lastTelemetry.speedBytesPerSec,
+        movingAverageSpeedBps(appendThroughputSample(samples, { atMs, loadedBytes: totalBytes })),
+      ),
+      elapsedMs: Math.max(0, atMs - startedAtMs),
+      updatedAtMs: atMs,
+    });
   } catch (err) {
+    const atMs = nowMs();
+    if (options.signal?.aborted) {
+      emitTelemetry(options.onTelemetry, {
+        ...lastTelemetry,
+        status: 'cancelled',
+        inFlightParts: 0,
+        activeConnections: 0,
+        elapsedMs: Math.max(0, atMs - startedAtMs),
+        updatedAtMs: atMs,
+      });
+      return;
+    }
+    emitTelemetry(options.onTelemetry, {
+      ...lastTelemetry,
+      status: 'error',
+      inFlightParts: 0,
+      activeConnections: 0,
+      elapsedMs: Math.max(0, atMs - startedAtMs),
+      updatedAtMs: atMs,
+    });
     throw normalizeS3Error(err, `Upload object ${key}`);
   }
 }
@@ -384,5 +551,97 @@ export async function deleteBucket(name: string): Promise<void> {
     new DeleteBucketCommand({ Bucket: name }),
     `Delete bucket ${name}`,
   );
+}
+
+type MultipartUploadRef = {
+  key: string;
+  uploadId: string;
+};
+
+async function listMultipartUploadsPage(
+  bucket: string,
+  keyMarker?: string,
+  uploadIdMarker?: string,
+): Promise<{ uploads: MultipartUploadRef[]; isTruncated: boolean; nextKeyMarker?: string; nextUploadIdMarker?: string }> {
+  const resp = await sendCommand<ListMultipartUploadsCommandOutput>(
+    new ListMultipartUploadsCommand({
+      Bucket: bucket,
+      KeyMarker: keyMarker,
+      UploadIdMarker: uploadIdMarker,
+      MaxUploads: 1000,
+    }),
+    `List multipart uploads in bucket ${bucket}`,
+  );
+  const uploads = (resp.Uploads || [])
+    .map((upload) => ({
+      key: upload.Key || '',
+      uploadId: upload.UploadId || '',
+    }))
+    .filter((upload) => Boolean(upload.key) && Boolean(upload.uploadId));
+  return {
+    uploads,
+    isTruncated: Boolean(resp.IsTruncated),
+    nextKeyMarker: resp.NextKeyMarker,
+    nextUploadIdMarker: resp.NextUploadIdMarker,
+  };
+}
+
+export async function countMultipartUploads(bucket: string): Promise<number> {
+  let count = 0;
+  let keyMarker: string | undefined;
+  let uploadIdMarker: string | undefined;
+  for (;;) {
+    const page = await listMultipartUploadsPage(bucket, keyMarker, uploadIdMarker);
+    count += page.uploads.length;
+    if (!page.isTruncated) break;
+    keyMarker = page.nextKeyMarker;
+    uploadIdMarker = page.nextUploadIdMarker;
+    if (!keyMarker && !uploadIdMarker) break;
+  }
+  return count;
+}
+
+export async function abortAllMultipartUploads(bucket: string): Promise<{ aborted: number; remaining: number }> {
+  let totalAborted = 0;
+  // Retry in rounds so pagination remains stable while we mutate upload state.
+  // If a round makes no progress, remaining uploads are likely in transient
+  // states (or concurrently recreated), so we stop deterministically.
+  for (let round = 0; round < 8; round++) {
+    const pending: MultipartUploadRef[] = [];
+    let keyMarker: string | undefined;
+    let uploadIdMarker: string | undefined;
+    for (;;) {
+      const page = await listMultipartUploadsPage(bucket, keyMarker, uploadIdMarker);
+      pending.push(...page.uploads);
+      if (!page.isTruncated) break;
+      keyMarker = page.nextKeyMarker;
+      uploadIdMarker = page.nextUploadIdMarker;
+      if (!keyMarker && !uploadIdMarker) break;
+    }
+    if (pending.length === 0) {
+      return { aborted: totalAborted, remaining: 0 };
+    }
+    let abortedThisRound = 0;
+    for (const upload of pending) {
+      try {
+        await sendCommand(
+          new AbortMultipartUploadCommand({
+            Bucket: bucket,
+            Key: upload.key,
+            UploadId: upload.uploadId,
+          }),
+          `Abort multipart upload ${upload.uploadId}`,
+        );
+        abortedThisRound += 1;
+      } catch {
+        // Best effort: the upload may have already completed/aborted concurrently.
+      }
+    }
+    totalAborted += abortedThisRound;
+    if (abortedThisRound === 0) {
+      return { aborted: totalAborted, remaining: pending.length };
+    }
+  }
+  return { aborted: totalAborted, remaining: await countMultipartUploads(bucket) };
 }
 

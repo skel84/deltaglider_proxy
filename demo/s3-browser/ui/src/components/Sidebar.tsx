@@ -7,7 +7,15 @@ import {
   UploadOutlined,
   ExclamationCircleOutlined,
 } from '@ant-design/icons';
-import { listBuckets, createBucket, deleteBucket, getBucket, setBucket } from '../s3client';
+import {
+  abortAllMultipartUploads,
+  countMultipartUploads,
+  createBucket,
+  deleteBucket,
+  getBucket,
+  listBuckets,
+  setBucket,
+} from '../s3client';
 import type { BucketInfo } from '../types';
 import { useColors } from '../ThemeContext';
 import BucketBackendBadge from './BucketBackendBadge';
@@ -171,25 +179,83 @@ export default function Sidebar({
     return typeof e === 'string' ? e : 'Unknown error';
   };
 
+  const isBucketNotEmptyError = (messageText: string): boolean => /BucketNotEmpty/i.test(messageText);
+
+  const parseMultipartCountFromError = (messageText: string): number | null => {
+    const match = messageText.match(/multipart_uploads=(\d+)/i);
+    if (!match) return null;
+    const count = Number.parseInt(match[1], 10);
+    return Number.isFinite(count) ? count : null;
+  };
+
+  const refreshBucketsAfterDelete = async (name: string) => {
+    const updated = await listBuckets({ includeOrigins: includeBucketOrigins });
+    setBuckets(updated);
+    onBucketsChanged?.(updated.length);
+    if (getBucket() === name && updated.length > 0) {
+      setBucket(updated[0].name);
+      onBucketChange(updated[0].name);
+    } else if (getBucket() === name) {
+      setBucket('');
+      onBucketChange('');
+    }
+  };
+
+  const abortMultipartUploadsAndRetryDelete = async (name: string, knownCount: number) => {
+    setDeletingBucketName(name);
+    try {
+      const cleanup = await abortAllMultipartUploads(name);
+      await deleteBucket(name);
+      await refreshBucketsAfterDelete(name);
+      messageApi.success(
+        `Bucket "${name}" deleted after aborting ${cleanup.aborted || knownCount} multipart upload(s)`,
+      );
+      if (cleanup.remaining > 0) {
+        messageApi.info(
+          `${cleanup.remaining} upload(s) were still in-flight during cleanup and may need another attempt.`,
+        );
+      }
+    } catch (e: unknown) {
+      const msg = formatError(e);
+      messageApi.error(`Cleanup + delete failed: ${msg}`);
+    } finally {
+      setDeletingBucketName(null);
+    }
+  };
+
   const handleDeleteBucket = async (name: string) => {
     setDeletingBucketName(name);
     try {
       await deleteBucket(name);
       messageApi.success(`Bucket "${name}" deleted`);
-      const updated = await listBuckets({ includeOrigins: includeBucketOrigins });
-      setBuckets(updated);
-      onBucketsChanged?.(updated.length);
-      if (getBucket() === name && updated.length > 0) {
-        setBucket(updated[0].name);
-        onBucketChange(updated[0].name);
-      } else if (getBucket() === name) {
-        setBucket('');
-        onBucketChange('');
-      }
+      await refreshBucketsAfterDelete(name);
     } catch (e: unknown) {
       const msg = formatError(e);
+      if (isBucketNotEmptyError(msg)) {
+        // Prefer blocker count from server error; if absent, derive via ListMultipartUploads.
+        let mpuCount = parseMultipartCountFromError(msg) ?? 0;
+        if (mpuCount <= 0) {
+          try {
+            mpuCount = await countMultipartUploads(name);
+          } catch {
+            mpuCount = 0;
+          }
+        }
+        if (mpuCount > 0) {
+          Modal.confirm({
+            title: `Delete blocked by ${mpuCount} multipart upload(s)`,
+            icon: <ExclamationCircleOutlined />,
+            content:
+              'This bucket looks empty but still has pending multipart uploads. Abort them and retry delete?',
+            okText: 'Abort uploads and delete',
+            okButtonProps: { danger: true },
+            cancelText: 'Cancel',
+            onOk: () => abortMultipartUploadsAndRetryDelete(name, mpuCount),
+          });
+          return;
+        }
+      }
       messageApi.error(`Failed to delete bucket: ${msg}`);
-      throw e;
     }
     finally {
       setDeletingBucketName(null);

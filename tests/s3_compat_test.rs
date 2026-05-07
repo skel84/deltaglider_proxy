@@ -8,10 +8,13 @@
 
 mod common;
 
+use base64::Engine;
 use common::{
     admin_http_client, generate_binary, mutate_binary, put_and_get_storage_type, put_object,
     test_setup, upload_test_data, TestServer,
 };
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 // ============================================================================
 // 1.5 Per-Request UUID + Accept-Ranges
@@ -2267,6 +2270,152 @@ async fn test_upload_part_copy_with_range() {
         result_data.as_ref(),
         b"FGHIJKLMNO",
         "Ranged copy should contain bytes 5-14 of source"
+    );
+}
+
+// ============================================================================
+// Form POST upload compatibility (create_presigned_post)
+// ============================================================================
+
+type HmacSha256 = Hmac<Sha256>;
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key init");
+    mac.update(data);
+    let out = mac.finalize().into_bytes();
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&out);
+    arr
+}
+
+fn derive_post_signing_key(secret: &str, date: &str, region: &str) -> [u8; 32] {
+    let k_date = hmac_sha256(format!("AWS4{}", secret).as_bytes(), date.as_bytes());
+    let k_region = hmac_sha256(&k_date, region.as_bytes());
+    let k_service = hmac_sha256(&k_region, b"s3");
+    hmac_sha256(&k_service, b"aws4_request")
+}
+
+#[tokio::test]
+async fn test_form_post_upload_succeeds_with_presigned_policy() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let client = reqwest::Client::new();
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+    let key = "post/uploads/hello.txt";
+    let amz_date = "20260507T120000Z";
+    let credential = "POSTACCESSKEY/20260507/us-east-1/s3/aws4_request";
+    let policy = serde_json::json!({
+        "expiration": "2099-01-01T00:00:00.000Z",
+        "conditions": [
+            { "bucket": bucket },
+            ["starts-with", "$key", "post/uploads/"],
+            { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+            { "x-amz-credential": credential },
+            { "x-amz-date": amz_date },
+            ["content-length-range", 1, 1048576]
+        ]
+    });
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy.to_string());
+    let signing_key = derive_post_signing_key("POSTSECRETKEY123", "20260507", "us-east-1");
+    let signature = hex::encode(hmac_sha256(&signing_key, policy_b64.as_bytes()));
+    let form = reqwest::multipart::Form::new()
+        .text("key", key)
+        .text("policy", policy_b64)
+        .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+        .text("x-amz-credential", credential)
+        .text("x-amz-date", amz_date)
+        .text("x-amz-signature", signature)
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"hello-form-post".to_vec())
+                .file_name("hello.txt")
+                .mime_str("text/plain")
+                .unwrap(),
+        );
+    let resp = client
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "POST form upload should return 204, got {}",
+        resp.status()
+    );
+
+    let s3 = server.s3_client().await;
+    let got = s3
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .expect("GET uploaded object");
+    let body = got.body.collect().await.expect("collect body").into_bytes();
+    assert_eq!(body.as_ref(), b"hello-form-post");
+}
+
+#[tokio::test]
+async fn test_form_post_upload_rejects_unsupported_success_status() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let client = reqwest::Client::new();
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+    let amz_date = "20260507T120000Z";
+    let credential = "POSTACCESSKEY/20260507/us-east-1/s3/aws4_request";
+    let policy = serde_json::json!({
+        "expiration": "2099-01-01T00:00:00.000Z",
+        "conditions": [
+            { "bucket": bucket },
+            ["starts-with", "$key", "post/uploads/"],
+            { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+            { "x-amz-credential": credential },
+            { "x-amz-date": amz_date },
+            ["content-length-range", 1, 1048576]
+        ]
+    });
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy.to_string());
+    let signing_key = derive_post_signing_key("POSTSECRETKEY123", "20260507", "us-east-1");
+    let signature = hex::encode(hmac_sha256(&signing_key, policy_b64.as_bytes()));
+    let form = reqwest::multipart::Form::new()
+        .text("key", "post/uploads/reject.txt")
+        .text("policy", policy_b64)
+        .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+        .text("x-amz-credential", credential)
+        .text("x-amz-date", amz_date)
+        .text("x-amz-signature", signature)
+        .text("success_action_status", "201")
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"body".to_vec())
+                .file_name("reject.txt")
+                .mime_str("text/plain")
+                .unwrap(),
+        );
+    let resp = client
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        501,
+        "Unsupported success_action_status should return 501"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("NotImplemented"),
+        "Unsupported form option should return NotImplemented XML, got: {}",
+        body
     );
 }
 

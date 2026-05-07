@@ -1,6 +1,6 @@
 [package]
 name = "deltaglider_proxy"
-version = "0.9.12"
+version = "0.9.13"
 description = "S3-compatible proxy with transparent delta compression"
 license = "GPL-2.0-only"
 readme = "README.md"
@@ -75,6 +75,7 @@ moka = { version = "0.12", features = ["sync"] }
 itoa = "1"
 bytes = "1"
 futures = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+multer = "3"
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "timeout"] }
 arc-swap = "1"
@@ -108,7 +109,7 @@ s3s = { version = "0.13.0", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
-reqwest = { version = "0.12", features = ["json", "cookies"] }
+reqwest = { version = "0.12", features = ["json", "cookies", "multipart"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["minio"] }
 walkdir = "2"

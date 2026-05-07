@@ -275,6 +275,13 @@ export default function ConnectPage({ onConnect, showError }: Props) {
     fontSize: 14,
     boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.04)',
   };
+  const recoveryInputStyle = {
+    ...inputStyle,
+    background: 'color-mix(in srgb, var(--input-bg) 62%, var(--login-panel-bg) 38%)',
+    borderColor: 'color-mix(in srgb, var(--login-card-border) 86%, var(--focus-ring) 14%)',
+    color: TEXT_PRIMARY,
+    borderRadius: 12,
+  };
 
   if (detecting) {
     return (
@@ -289,7 +296,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', padding: 24 }}>
         {contextHolder}
-        <div className="glass-card animate-fade-in" style={{ borderRadius: 14, padding: 'clamp(28px, 4vw, 40px)', width: '100%', maxWidth: 520 }}>
+        <div className="dg-login-card animate-fade-in" style={{ borderRadius: 14, padding: 'clamp(28px, 4vw, 40px)', width: '100%', maxWidth: 520 }}>
           <Space direction="vertical" size="large" style={{ width: '100%' }}>
             {recoveredHash ? (
               <>
@@ -304,18 +311,18 @@ export default function ConnectPage({ onConnect, showError }: Props) {
                     Update your configuration with the hash below, then restart the server.
                   </div>
                 </div>
-                <div style={{ background: 'var(--input-bg)', borderRadius: 10, padding: 16 }}>
+                <div style={{ background: 'color-mix(in srgb, var(--input-bg) 78%, var(--glass-bg) 22%)', borderRadius: 12, padding: 16 }}>
                   <div style={{ marginBottom: 12 }}>
                     <label style={{ fontSize: 11, fontWeight: 600, color: TEXT_MUTED, fontFamily: "var(--font-ui)" }}>Hash</label>
                     <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                      <Input value={recoveredHash.hash} readOnly style={{ ...inputStyle, flex: 1, fontSize: 11 }} />
+                      <Input value={recoveredHash.hash} readOnly style={{ ...recoveryInputStyle, flex: 1, fontSize: 11 }} />
                       <Button icon={<CopyOutlined />} onClick={() => copyToClipboard(recoveredHash.hash, 'Hash')} />
                     </div>
                   </div>
                   <div>
                     <label style={{ fontSize: 11, fontWeight: 600, color: TEXT_MUTED, fontFamily: "var(--font-ui)" }}>Base64 (for Docker / env vars)</label>
                     <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                      <Input value={recoveredHash.base64} readOnly style={{ ...inputStyle, flex: 1, fontSize: 11 }} />
+                      <Input value={recoveredHash.base64} readOnly style={{ ...recoveryInputStyle, flex: 1, fontSize: 11 }} />
                       <Button icon={<CopyOutlined />} onClick={() => copyToClipboard(recoveredHash.base64, 'Base64 hash')} />
                     </div>
                   </div>
@@ -340,7 +347,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
                     The bootstrap password hash in your configuration does not match the
                     encryption key of the existing IAM database. S3 API access is blocked until resolved.
                   </div>
-                  <div style={{ color: TEXT_MUTED, fontSize: 13, marginTop: 12, lineHeight: 1.7, fontFamily: "var(--font-ui)" }}>
+                  <div style={{ color: TEXT_SECONDARY, fontSize: 13, marginTop: 12, lineHeight: 1.7, fontFamily: "var(--font-ui)" }}>
                     Paste the original <code style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: ACCENT_BLUE }}>DGP_BOOTSTRAP_PASSWORD_HASH</code> value
                     below. Check your previous deployment config, environment variables,
                     or <code style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: ACCENT_BLUE }}>.deltaglider_bootstrap_hash</code> file.
@@ -357,7 +364,8 @@ export default function ConnectPage({ onConnect, showError }: Props) {
                     placeholder="$2b$12$... or base64-encoded hash"
                     autoFocus
                     rows={2}
-                    style={{ ...inputStyle, height: 'auto', fontSize: 13 }}
+                    className="dg-recovery-hash-input"
+                    style={{ ...recoveryInputStyle, height: 'auto', fontSize: 13, fontFamily: "var(--font-mono)" }}
                   />
                 </div>
                 <Button

@@ -50,8 +50,10 @@ async fn test_delete_bucket_refuses_with_active_multipart_uploads() {
     assert_eq!(raw.status().as_u16(), 409);
     let body = raw.text().await.unwrap();
     assert!(
-        body.contains("BucketNotEmpty") && body.contains("multipart"),
-        "expected BucketNotEmpty + multipart in body, got: {}",
+        body.contains("BucketNotEmpty")
+            && body.contains("objects_present=false")
+            && body.contains("multipart_uploads=1"),
+        "expected explicit MPU blocker details, got: {}",
         body
     );
 
@@ -70,6 +72,59 @@ async fn test_delete_bucket_refuses_with_active_multipart_uploads() {
         .send()
         .await
         .expect("delete now ok");
+}
+
+#[tokio::test]
+async fn test_delete_bucket_error_reports_object_and_mpu_blockers() {
+    let server = TestServer::filesystem().await;
+    let client = server.s3_client().await;
+    let bucket = "h2-blockers-bucket";
+
+    client
+        .create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("create bucket");
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("keep.bin")
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .expect("seed object");
+    let create = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("pending.bin")
+        .send()
+        .await
+        .expect("initiate mpu");
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    let http = reqwest::Client::new();
+    let raw = http
+        .delete(format!("{}/{}", server.endpoint(), bucket))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status().as_u16(), 409);
+    let body = raw.text().await.unwrap();
+    assert!(
+        body.contains("objects_present=true") && body.contains("multipart_uploads=1"),
+        "expected object+mpu blockers in body, got: {}",
+        body
+    );
+
+    client
+        .abort_multipart_upload()
+        .bucket(bucket)
+        .key("pending.bin")
+        .upload_id(&upload_id)
+        .send()
+        .await
+        .expect("abort");
 }
 
 // ────────────────────────────────────────────────────────────────────────

@@ -435,10 +435,14 @@ impl s3s::S3 for DeltaGliderS3Service {
             .list_objects(&bucket, "", None, 1, None, false)
             .await
             .map_err(engine_error_to_s3s)?;
-        if !page.objects.is_empty() || self.state.multipart.count_uploads_for_bucket(&bucket) > 0 {
+        let has_objects = !page.objects.is_empty();
+        let mpu_count = self.state.multipart.count_uploads_for_bucket(&bucket);
+        if has_objects || mpu_count > 0 {
             return Err(s3s::s3_error!(
                 BucketNotEmpty,
-                "Bucket is not empty (objects or active multipart uploads exist)"
+                "Bucket delete blocked: objects_present={}, multipart_uploads={}",
+                has_objects,
+                mpu_count
             ));
         }
         engine
@@ -650,14 +654,26 @@ impl s3s::S3 for DeltaGliderS3Service {
     ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CreateMultipartUploadOutput>> {
         let input = req.input;
         ensure_bucket_exists_s3s(&self.state, &input.bucket).await?;
+        let engine = self.state.engine.load();
+        let delta_limit = crate::config::env_parse_with_default(
+            "DGP_MPU_DELTA_RECONSTRUCT_MAX_BYTES",
+            64 * 1024 * 1024,
+        );
+        let is_delta_eligible = engine.is_delta_eligible(&input.key);
         let upload_id = self
             .state
             .multipart
-            .create(
+            .create_with_relay_policy(
                 &input.bucket,
                 &input.key,
                 input.content_type.clone(),
                 input.metadata.unwrap_or_default(),
+                if is_delta_eligible {
+                    Some(delta_limit)
+                } else {
+                    None
+                },
+                !is_delta_eligible,
             )
             .map_err(engine_error_to_s3s)?;
         Ok(s3s::S3Response::new(
@@ -764,11 +780,21 @@ impl s3s::S3 for DeltaGliderS3Service {
         ensure_bucket_exists_s3s(&self.state, &input.bucket).await?;
         let requested_parts = completed_parts_to_request(input.multipart_upload.as_ref())?;
         let engine = self.state.engine.load();
-        let multipart_etag = if !engine.is_delta_eligible(&input.key) {
+        let delta_limit = crate::config::env_parse_with_default(
+            "DGP_MPU_DELTA_RECONSTRUCT_MAX_BYTES",
+            64 * 1024 * 1024,
+        );
+        let total_parts_size: u64 = requested_parts
+            .iter()
+            .filter_map(|(num, _)| self.state.multipart.get_part_size(&input.upload_id, *num))
+            .sum();
+        let force_chunked_passthrough =
+            !engine.is_delta_eligible(&input.key) || total_parts_size > delta_limit;
+        let multipart_etag = if force_chunked_passthrough {
             let completed = self
                 .state
                 .multipart
-                .complete_parts(
+                .complete_passthrough(
                     &input.upload_id,
                     &input.bucket,
                     &input.key,
@@ -776,18 +802,37 @@ impl s3s::S3 for DeltaGliderS3Service {
                 )
                 .map_err(engine_error_to_s3s)?;
             let etag = completed.etag.clone();
-            match engine
-                .store_passthrough_chunked_with_multipart_etag(
-                    &input.bucket,
-                    &input.key,
-                    &completed.parts,
-                    completed.total_size,
-                    completed.content_type,
-                    completed.user_metadata,
-                    etag.clone(),
-                )
-                .await
-            {
+            let store_result = match completed.payload {
+                crate::multipart::PassthroughPayload::Chunks(parts) => {
+                    engine
+                        .store_passthrough_chunked_with_multipart_etag(
+                            &input.bucket,
+                            &input.key,
+                            &parts,
+                            completed.total_size,
+                            completed.content_type,
+                            completed.user_metadata,
+                            etag.clone(),
+                        )
+                        .await
+                }
+                crate::multipart::PassthroughPayload::RelayedFile(path) => {
+                    let result = engine
+                        .store_passthrough_file_with_multipart_etag(
+                            &input.bucket,
+                            &input.key,
+                            &path,
+                            completed.total_size,
+                            completed.content_type,
+                            completed.user_metadata,
+                            etag.clone(),
+                        )
+                        .await;
+                    let _ = std::fs::remove_file(&path);
+                    result
+                }
+            };
+            match store_result {
                 Ok(_) => etag,
                 Err(e) => {
                     self.state.multipart.rollback_upload(&input.upload_id);

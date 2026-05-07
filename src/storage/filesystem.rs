@@ -62,6 +62,34 @@ async fn atomic_write_with_metadata(
     .map_err(super::join_error)?
 }
 
+/// Atomically copy file data + metadata to destination using temp + rename.
+async fn atomic_copy_with_metadata(
+    source_path: &Path,
+    target_path: &Path,
+    metadata: &FileMetadata,
+) -> Result<(), StorageError> {
+    let parent = target_path
+        .parent()
+        .ok_or_else(|| StorageError::Other("Cannot copy to a path with no parent".into()))?
+        .to_path_buf();
+    let source = source_path.to_path_buf();
+    let target = target_path.to_path_buf();
+    let meta_json = serde_json::to_vec(metadata)?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut src = std::fs::File::open(&source).map_err(io_to_storage_error)?;
+        let mut tmp = NamedTempFile::new_in(&parent).map_err(io_to_storage_error)?;
+        std::io::copy(&mut src, &mut tmp).map_err(io_to_storage_error)?;
+        xattr::set(tmp.path(), xattr_meta::XATTR_NAME, &meta_json).map_err(io_to_storage_error)?;
+        tmp.as_file().sync_all().map_err(io_to_storage_error)?;
+        tmp.persist(&target)
+            .map_err(|e| io_to_storage_error(e.error))?;
+        Ok(())
+    })
+    .await
+    .map_err(super::join_error)?
+}
+
 /// Filesystem storage backend
 ///
 /// Storage layout:
@@ -786,6 +814,26 @@ impl StorageBackend for FilesystemBackend {
             filename,
         )
         .await
+    }
+
+    #[instrument(skip(self, metadata))]
+    async fn put_passthrough_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        source_path: &Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        self.require_bucket_exists(bucket).await?;
+        let data_path = self.passthrough_path(bucket, prefix, filename);
+        self.ensure_dir(&data_path).await?;
+        atomic_copy_with_metadata(source_path, &data_path, metadata).await?;
+        debug!(
+            "Copied passthrough file {:?} -> {:?} for {}/{}",
+            source_path, data_path, prefix, filename
+        );
+        Ok(())
     }
 
     #[instrument(skip(self))]

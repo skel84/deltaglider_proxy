@@ -4,15 +4,13 @@ import {
   CloudUploadOutlined,
   FolderAddOutlined,
   ArrowLeftOutlined,
-  CheckCircleFilled,
-  CloseCircleFilled,
-  LoadingOutlined,
   DeleteOutlined,
 } from '@ant-design/icons';
 import { getBucket } from '../s3client';
 import { formatBytes } from '../utils';
 import useUploadQueue from '../useUploadQueue';
 import { useColors } from '../ThemeContext';
+import UploadProgressList from './UploadProgressList';
 
 const { Text, Title } = Typography;
 
@@ -36,7 +34,17 @@ export default function UploadPage({ prefix, onBack, onDone }: Props) {
   const dropRef = useRef<HTMLDivElement>(null);
 
   const bucket = getBucket();
-  const { queue, stats, savings, pendingCount, addFiles, clearCompleted } = useUploadQueue(destination);
+  const {
+    queue,
+    stats,
+    savings,
+    pendingCount,
+    activeCount,
+    addFiles,
+    clearCompleted,
+    cancelUpload,
+    retryUpload,
+  } = useUploadQueue(destination);
 
   useEffect(() => {
     const el = dropRef.current;
@@ -183,6 +191,7 @@ export default function UploadPage({ prefix, onBack, onDone }: Props) {
             { label: 'Original size', value: formatBytes(stats.originalSize), color: ACCENT_PURPLE },
             { label: 'Stored', value: formatBytes(stats.storedSize), color: ACCENT_GREEN },
             { label: 'Space saved', value: `${savings.toFixed(1)}%`, color: savings > 0 ? ACCENT_GREEN : TEXT_MUTED },
+            { label: 'Active uploads', value: String(activeCount), color: activeCount > 0 ? ACCENT_BLUE : TEXT_MUTED },
           ].map((stat) => (
             <div
               key={stat.label}
@@ -293,79 +302,17 @@ export default function UploadPage({ prefix, onBack, onDone }: Props) {
             </Button>
           </div>
 
-          <div
-            role="list"
-            aria-label="Upload queue"
-            className="glass-card"
-            style={{
-              borderRadius: 10,
-              overflow: 'hidden',
-            }}
-          >
-            {queue.map((item) => (
-              <div
-                key={item.id}
-                role="listitem"
-                aria-label={`${item.file.name} — ${item.status}`}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 12,
-                  padding: '10px 16px',
-                  borderBottom: `1px solid ${BORDER}`,
-                }}
-              >
-                {item.status === 'done' && <CheckCircleFilled aria-label="Upload complete" style={{ color: ACCENT_GREEN, fontSize: 16 }} />}
-                {item.status === 'error' && <CloseCircleFilled aria-label="Upload failed" style={{ color: ACCENT_RED, fontSize: 16 }} />}
-                {item.status === 'uploading' && <LoadingOutlined aria-label="Uploading" style={{ color: ACCENT_BLUE, fontSize: 16 }} />}
-                {item.status === 'pending' && <div role="img" aria-label="Pending" style={{ width: 16, height: 16, borderRadius: '50%', border: `2px solid ${BORDER}` }} />}
-
-                <Text
-                  style={{
-                    flex: 1,
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 13,
-                    color: item.status === 'error' ? ACCENT_RED : TEXT_PRIMARY,
-                  }}
-                  ellipsis
-                >
-                  {item.file.name}
-                </Text>
-
-                {item.error && (
-                  <Text role="alert" style={{ fontSize: 11, color: ACCENT_RED }}>{item.error}</Text>
-                )}
-
-                <Text style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: TEXT_MUTED, whiteSpace: 'nowrap' }}>
-                  {formatBytes(item.originalSize)}
-                </Text>
-
-                {item.status === 'uploading' && (
-                  <div
-                    aria-label="Uploading"
-                    style={{
-                      width: 48,
-                      height: 4,
-                      borderRadius: 2,
-                      background: `${ACCENT_BLUE}22`,
-                      overflow: 'hidden',
-                      flexShrink: 0,
-                    }}
-                  >
-                    <div style={{
-                      width: '40%',
-                      height: '100%',
-                      borderRadius: 2,
-                      background: ACCENT_BLUE,
-                      animation: 'shimmer 1.2s ease-in-out infinite',
-                      backgroundSize: '200% 100%',
-                      backgroundImage: `linear-gradient(90deg, ${ACCENT_BLUE}, ${ACCENT_BLUE}66, ${ACCENT_BLUE})`,
-                    }} />
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
+          <UploadProgressList
+            queue={queue}
+            borderColor={BORDER}
+            textPrimary={TEXT_PRIMARY}
+            textMuted={TEXT_MUTED}
+            accentBlue={ACCENT_BLUE}
+            accentGreen={ACCENT_GREEN}
+            accentRed={ACCENT_RED}
+            onCancelUpload={cancelUpload}
+            onRetryUpload={retryUpload}
+          />
         </div>
       )}
 

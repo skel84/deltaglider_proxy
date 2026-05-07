@@ -567,15 +567,15 @@ pub async fn delete_bucket(
 ) -> Result<Response, S3Error> {
     info!("DELETE bucket {}", bucket);
 
-    // Check if bucket is empty (S3 requires buckets to be empty before deletion)
+    // Check if bucket is empty (S3 requires buckets to be empty before deletion).
+    // We compute both object and MPU blockers up front so the error is explicit
+    // and deterministic for UIs that want to offer actionable remediation.
     let page = state
         .engine
         .load()
         .list_objects(&bucket, "", None, 1, None, false)
         .await?;
-    if !page.objects.is_empty() {
-        return Err(S3Error::BucketNotEmpty(bucket.to_string()));
-    }
+    let has_objects = !page.objects.is_empty();
 
     // H2 security fix: also refuse if there are active multipart uploads
     // targeting this bucket. Pre-fix, DeleteBucket returned 204 while
@@ -584,10 +584,10 @@ pub async fn delete_bucket(
     // uploads on a ghost bucket, and CompleteMultipartUpload would 404
     // via ensure_bucket_exists but leave the MPU state stuck.
     let mpu_count = state.multipart.count_uploads_for_bucket(&bucket);
-    if mpu_count > 0 {
+    if has_objects || mpu_count > 0 {
         return Err(S3Error::BucketNotEmpty(format!(
-            "{} ({} multipart upload(s) in progress; abort them first)",
-            bucket, mpu_count
+            "{} (delete blockers: objects_present={}, multipart_uploads={})",
+            bucket, has_objects, mpu_count
         )));
     }
 

@@ -568,6 +568,69 @@ impl S3Backend {
         unreachable!("retry loop must return on every path")
     }
 
+    /// Put an object to S3 from a source file path with metadata headers.
+    /// Uses ByteStream::from_path to avoid buffering the full payload in memory.
+    async fn put_object_file_with_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+        source_path: &std::path::Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        let mut headers = self.metadata_to_headers(metadata);
+        if let Some(marker) = self.native_encryption.marker() {
+            headers.insert("dg-encrypted-native".to_string(), marker.to_string());
+        }
+        let total_meta_size: usize = headers.iter().map(|(k, v)| k.len() + v.len()).sum();
+        if total_meta_size > 2048 {
+            return Err(StorageError::Other(format!(
+                "DG metadata exceeds S3's 2KB limit ({} bytes) for {}/{}",
+                total_meta_size, bucket, key
+            )));
+        }
+
+        let backoff_ms = [100, 200, 400];
+        for attempt in 0..=backoff_ms.len() {
+            let body = ByteStream::from_path(source_path.to_path_buf())
+                .await
+                .map_err(|e| {
+                    StorageError::S3(format!("Failed to open source file stream: {}", e))
+                })?;
+            let mut request = self
+                .client
+                .put_object()
+                .bucket(bucket)
+                .key(key)
+                .body(body)
+                .content_type("application/octet-stream");
+            for (k, v) in &headers {
+                request = request.metadata(k.clone(), v.clone());
+            }
+            request = apply_native_encryption(request, &self.native_encryption);
+
+            match request.send().await {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    let is_retryable = if let SdkError::ServiceError(ref svc) = e {
+                        let status = svc.raw().status().as_u16();
+                        status == 400 || status == 503
+                    } else {
+                        matches!(e, SdkError::DispatchFailure(_) | SdkError::TimeoutError(_))
+                    };
+                    if is_retryable && attempt < backoff_ms.len() {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            backoff_ms[attempt] as u64,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(Self::classify_s3_error(bucket, &e, S3Op::PutObject));
+                }
+            }
+        }
+        unreachable!("retry loop must return on every path")
+    }
+
     /// Classify a GetObject SDK error, mapping NoSuchKey to NotFound.
     fn classify_get_error(
         bucket: &str,
@@ -1163,6 +1226,25 @@ impl StorageBackend for S3Backend {
             prefix,
             filename,
             data.len()
+        );
+        Ok(())
+    }
+
+    #[instrument(skip(self, metadata))]
+    async fn put_passthrough_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        source_path: &std::path::Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        let key = self.passthrough_key(prefix, filename);
+        self.put_object_file_with_metadata(bucket, &key, source_path, metadata)
+            .await?;
+        debug!(
+            "Stored passthrough from file for {}/{}/{} ({:?})",
+            bucket, prefix, filename, source_path
         );
         Ok(())
     }

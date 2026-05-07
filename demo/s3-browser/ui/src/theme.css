@@ -841,6 +841,15 @@ body {
   font: 500 12px/1.4 var(--font-ui);
 }
 
+.dg-recovery-hash-input,
+.dg-recovery-hash-input .ant-input {
+  color: var(--login-hero-text) !important;
+}
+
+.dg-recovery-hash-input .ant-input::placeholder {
+  color: color-mix(in srgb, var(--login-hero-text) 52%, transparent) !important;
+}
+
 .dg-login-fields {
   display: grid;
   gap: 18px;

@@ -10,11 +10,33 @@ use chrono::{DateTime, Duration, Utc};
 use md5::{Digest, Md5};
 use parking_lot::RwLock;
 use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
+
+const RELAY_ROOT_DIR: &str = "deltaglider-mpu-relay";
 
 /// Data for a single uploaded part
+enum PartPayload {
+    InMemory(Bytes),
+    RelayedFile(PathBuf),
+}
+
+impl PartPayload {
+    fn load_bytes(&self) -> Result<Bytes, S3Error> {
+        match self {
+            Self::InMemory(bytes) => Ok(bytes.clone()),
+            Self::RelayedFile(path) => fs::read(path)
+                .map(Bytes::from)
+                .map_err(|e| S3Error::InternalError(format!("Failed to read relayed part: {}", e))),
+        }
+    }
+}
+
 struct PartData {
-    data: Bytes,
+    payload: PartPayload,
     md5_hex: String,
     md5_raw: [u8; 16],
     size: u64,
@@ -70,6 +92,12 @@ struct MultipartUpload {
     user_metadata: HashMap<String, String>,
     parts: HashMap<u32, PartData>,
     state: MultipartState,
+    relay_strategy: RelayStrategy,
+}
+
+enum RelayStrategy {
+    InMemory { relay_threshold_bytes: Option<u64> },
+    Relayed { relay_dir: PathBuf },
 }
 
 /// Result of assembling a completed multipart upload
@@ -89,6 +117,35 @@ pub struct CompletedParts {
     pub total_size: u64,
     pub content_type: Option<String>,
     pub user_metadata: HashMap<String, String>,
+}
+
+pub enum PassthroughPayload {
+    Chunks(Vec<Bytes>),
+    RelayedFile(PathBuf),
+}
+
+pub struct CompletedPassthrough {
+    pub payload: PassthroughPayload,
+    pub etag: String,
+    pub total_size: u64,
+    pub content_type: Option<String>,
+    pub user_metadata: HashMap<String, String>,
+}
+
+/// Summary of one multipart sweeper run.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MultipartSweepReport {
+    pub swept_open_uploads: u64,
+    pub swept_completing_uploads: u64,
+    pub reclaimed_bytes: u64,
+    pub orphan_relay_dirs_removed: u64,
+    pub orphan_relay_files_removed: u64,
+}
+
+impl MultipartSweepReport {
+    pub fn total_uploads_swept(self) -> u64 {
+        self.swept_open_uploads + self.swept_completing_uploads
+    }
 }
 
 /// Internal: validated parts from the shared validation step.
@@ -197,6 +254,23 @@ impl MultipartStore {
         content_type: Option<String>,
         user_metadata: HashMap<String, String>,
     ) -> Result<String, S3Error> {
+        self.create_with_relay_policy(bucket, key, content_type, user_metadata, None, false)
+    }
+
+    /// Create a new multipart upload with optional relay policy.
+    /// - `relay_threshold_bytes`: when set, promote in-memory parts to relayed
+    ///   files once cumulative uploaded bytes exceed this threshold.
+    /// - `always_relay_passthrough`: start directly in relay mode.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_relay_policy(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: Option<String>,
+        user_metadata: HashMap<String, String>,
+        relay_threshold_bytes: Option<u64>,
+        always_relay_passthrough: bool,
+    ) -> Result<String, S3Error> {
         let now = Utc::now();
 
         // Cryptographically random upload ID (matches AWS S3 behavior).
@@ -224,6 +298,15 @@ impl MultipartStore {
             user_metadata,
             parts: HashMap::new(),
             state: MultipartState::Open,
+            relay_strategy: if always_relay_passthrough {
+                RelayStrategy::Relayed {
+                    relay_dir: relay_dir_for_upload(&upload_id),
+                }
+            } else {
+                RelayStrategy::InMemory {
+                    relay_threshold_bytes,
+                }
+            },
         };
 
         uploads.insert(upload_id.clone(), upload);
@@ -314,11 +397,33 @@ impl MultipartStore {
             }
         }
 
-        // Overwrite semantics: re-uploading same part_number replaces previous data
+        let should_promote_to_relay = match &upload.relay_strategy {
+            RelayStrategy::InMemory {
+                relay_threshold_bytes: Some(threshold),
+            } => cumulative_after > *threshold,
+            RelayStrategy::InMemory {
+                relay_threshold_bytes: None,
+            } => false,
+            RelayStrategy::Relayed { .. } => false,
+        };
+        if should_promote_to_relay {
+            Self::promote_upload_to_relay(upload)?;
+        }
+
+        let payload = match &upload.relay_strategy {
+            RelayStrategy::InMemory { .. } => PartPayload::InMemory(data),
+            RelayStrategy::Relayed { relay_dir } => {
+                let path = part_path(relay_dir, part_number);
+                write_part_file(&path, &data)?;
+                PartPayload::RelayedFile(path)
+            }
+        };
+
+        // Overwrite semantics: re-uploading same part_number replaces previous data.
         upload.parts.insert(
             part_number,
             PartData {
-                data,
+                payload,
                 md5_hex,
                 md5_raw,
                 size,
@@ -346,7 +451,7 @@ impl MultipartStore {
         uploads
             .get(upload_id)
             .and_then(|u| u.parts.get(&part_number))
-            .map(|p| p.data.len() as u64)
+            .map(|p| p.size)
     }
 
     /// Begin completion: validate parts, atomically transition to
@@ -396,6 +501,7 @@ impl MultipartStore {
         // validation — atomic with respect to `abort` and `upload_part`.
         if let Some(u) = uploads.get_mut(upload_id) {
             u.state = MultipartState::Completing;
+            u.last_activity = Utc::now();
         }
 
         Ok(result)
@@ -435,6 +541,55 @@ impl MultipartStore {
 
         if let Some(u) = uploads.get_mut(upload_id) {
             u.state = MultipartState::Completing;
+            u.last_activity = Utc::now();
+        }
+
+        Ok(result)
+    }
+
+    /// Begin-complete variant optimized for passthrough storage.
+    ///
+    /// In relay mode this assembles a temporary file under the upload's relay
+    /// directory, allowing callers to stream the final payload into storage.
+    pub fn complete_passthrough(
+        &self,
+        upload_id: &str,
+        bucket: &str,
+        key: &str,
+        requested_parts: &[(u32, String)],
+    ) -> Result<CompletedPassthrough, S3Error> {
+        let mut uploads = self.uploads.write();
+
+        if let Some(u) = uploads.get(upload_id) {
+            if u.state == MultipartState::Completing {
+                return Err(S3Error::InvalidRequest(
+                    "Upload is already being completed".to_string(),
+                ));
+            }
+        }
+
+        let (validated, upload) =
+            self.validate_parts(&uploads, upload_id, bucket, key, requested_parts)?;
+
+        let payload = match &upload.relay_strategy {
+            RelayStrategy::InMemory { .. } => PassthroughPayload::Chunks(validated.part_data),
+            RelayStrategy::Relayed { relay_dir } => {
+                let assembled_path = assemble_relayed_parts(relay_dir, requested_parts, upload)?;
+                PassthroughPayload::RelayedFile(assembled_path)
+            }
+        };
+
+        let result = CompletedPassthrough {
+            payload,
+            etag: validated.etag,
+            total_size: validated.total_size,
+            content_type: upload.content_type.clone(),
+            user_metadata: upload.user_metadata.clone(),
+        };
+
+        if let Some(u) = uploads.get_mut(upload_id) {
+            u.state = MultipartState::Completing;
+            u.last_activity = Utc::now();
         }
 
         Ok(result)
@@ -461,18 +616,20 @@ impl MultipartStore {
     /// so new uploads can reclaim headroom (C3 DoS fix).
     pub fn finish_upload(&self, upload_id: &str) {
         if let Some(u) = self.uploads.write().remove(upload_id) {
-            self.release_bytes(&u);
+            let _ = self.release_bytes(&u);
+            cleanup_relay_dir_for_upload(&u);
         }
     }
 
     /// Return the sum of all part sizes for this upload — used by the
     /// in-flight counter on release paths.
-    fn release_bytes(&self, upload: &MultipartUpload) {
+    fn release_bytes(&self, upload: &MultipartUpload) -> u64 {
         let freed: u64 = upload.parts.values().map(|p| p.size).sum();
         if freed > 0 {
             self.in_flight_bytes
                 .fetch_sub(freed, std::sync::atomic::Ordering::Relaxed);
         }
+        freed
     }
 
     /// Shared validation for `complete()` and `complete_parts()`.
@@ -536,7 +693,7 @@ impl MultipartStore {
             }
 
             md5_concat.extend_from_slice(&part.md5_raw);
-            part_data.push(part.data.clone());
+            part_data.push(part.payload.load_bytes()?);
         }
 
         // S3-compatible multipart ETag: MD5(concat of part MD5 raw bytes)-N
@@ -579,7 +736,8 @@ impl MultipartStore {
         // Release this upload's bytes from the global counter (C3 DoS fix).
         if let Some(removed) = uploads.remove(upload_id) {
             drop(uploads); // release write lock before touching atomic
-            self.release_bytes(&removed);
+            let _ = self.release_bytes(&removed);
+            cleanup_relay_dir_for_upload(&removed);
         }
         Ok(())
     }
@@ -728,12 +886,20 @@ impl MultipartStore {
     ///
     /// C3 DoS fix: sweeps uploads opened by an attacker who never
     /// completes. Also decrements the global in-flight byte counter so
-    /// legitimate callers can reclaim headroom. Called periodically from
-    /// `main.rs` (default every hour with max_age=1h).
-    pub fn cleanup_expired(&self, max_age: std::time::Duration) {
+    /// legitimate callers can reclaim headroom.
+    ///
+    /// Uploads that are stuck in `Completing` are also swept once
+    /// `completing_timeout` elapses from their last activity.
+    pub fn cleanup_expired(
+        &self,
+        max_age: std::time::Duration,
+        completing_timeout: std::time::Duration,
+    ) -> MultipartSweepReport {
         let now = Utc::now();
         let max_age_cutoff = now - Duration::from_std(max_age).unwrap_or(Duration::hours(1));
         let idle_cutoff = now - self.idle_ttl;
+        let completing_cutoff =
+            now - Duration::from_std(completing_timeout).unwrap_or(Duration::hours(1));
         // Take stricter of the two cutoffs (newer / later = stricter).
         let cutoff = if idle_cutoff > max_age_cutoff {
             idle_cutoff
@@ -746,38 +912,202 @@ impl MultipartStore {
             let mut uploads = self.uploads.write();
             let mut expired = Vec::new();
             uploads.retain(|_, u| {
-                // Preserve uploads in Completing state regardless of age:
-                // their engine.store* is in flight, and removing them here
-                // would desync with the handler's finish_upload/rollback.
-                // The handler always terminates, so this hold is bounded.
                 if u.state == MultipartState::Completing {
-                    return true;
+                    if u.last_activity <= completing_cutoff {
+                        expired.push(take_upload_for_cleanup(u));
+                        return false;
+                    }
+                } else if u.last_activity <= cutoff {
+                    expired.push(take_upload_for_cleanup(u));
+                    return false;
                 }
-                if u.last_activity <= cutoff {
-                    // swap-remove via retain-false, capture the value
-                    expired.push(MultipartUpload {
-                        upload_id: u.upload_id.clone(),
-                        bucket: u.bucket.clone(),
-                        key: u.key.clone(),
-                        created_at: u.created_at,
-                        last_activity: u.last_activity,
-                        content_type: u.content_type.clone(),
-                        user_metadata: u.user_metadata.clone(),
-                        parts: std::mem::take(&mut u.parts),
-                        state: u.state,
-                    });
-                    false
-                } else {
-                    true
-                }
+                true
             });
             expired
         };
 
+        let mut report = MultipartSweepReport::default();
         for u in expired {
-            self.release_bytes(&u);
+            if u.state == MultipartState::Completing {
+                report.swept_completing_uploads += 1;
+            } else {
+                report.swept_open_uploads += 1;
+            }
+            report.reclaimed_bytes += self.release_bytes(&u);
+            cleanup_relay_dir_for_upload(&u);
+        }
+        report
+    }
+
+    /// Startup hardening: remove orphan relay temp artifacts that don't belong
+    /// to currently tracked relayed uploads.
+    pub fn sweep_orphan_relay_artifacts(&self) -> MultipartSweepReport {
+        let active_relay_dirs: HashSet<PathBuf> = self
+            .uploads
+            .read()
+            .values()
+            .filter_map(|u| match &u.relay_strategy {
+                RelayStrategy::Relayed { relay_dir } => Some(relay_dir.clone()),
+                RelayStrategy::InMemory { .. } => None,
+            })
+            .collect();
+        let (dirs_removed, files_removed) =
+            cleanup_orphan_relay_entries_at(&relay_root_dir(), &active_relay_dirs);
+        MultipartSweepReport {
+            orphan_relay_dirs_removed: dirs_removed,
+            orphan_relay_files_removed: files_removed,
+            ..MultipartSweepReport::default()
         }
     }
+
+    /// Current number of tracked uploads (Open + Completing).
+    pub fn count_uploads(&self) -> usize {
+        self.uploads.read().len()
+    }
+
+    fn promote_upload_to_relay(upload: &mut MultipartUpload) -> Result<(), S3Error> {
+        let relay_dir = relay_dir_for_upload(&upload.upload_id);
+        fs::create_dir_all(&relay_dir).map_err(|e| {
+            S3Error::InternalError(format!("Failed to create multipart relay directory: {}", e))
+        })?;
+        for (part_number, part) in &mut upload.parts {
+            if let PartPayload::InMemory(bytes) = &part.payload {
+                let path = part_path(&relay_dir, *part_number);
+                write_part_file(&path, bytes)?;
+                part.payload = PartPayload::RelayedFile(path);
+            }
+        }
+        upload.relay_strategy = RelayStrategy::Relayed { relay_dir };
+        Ok(())
+    }
+}
+
+fn relay_root_dir() -> PathBuf {
+    std::env::temp_dir().join(RELAY_ROOT_DIR)
+}
+
+fn relay_dir_for_upload(upload_id: &str) -> PathBuf {
+    relay_root_dir().join(upload_id)
+}
+
+fn part_path(relay_dir: &Path, part_number: u32) -> PathBuf {
+    relay_dir.join(format!("part-{:05}.bin", part_number))
+}
+
+fn write_part_file(path: &Path, data: &Bytes) -> Result<(), S3Error> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| S3Error::InternalError("Multipart relay path has no parent".to_string()))?;
+    fs::create_dir_all(parent)
+        .map_err(|e| S3Error::InternalError(format!("Failed to create relay directory: {}", e)))?;
+    let mut tmp = NamedTempFile::new_in(parent)
+        .map_err(|e| S3Error::InternalError(format!("Failed to create relay tmp file: {}", e)))?;
+    tmp.write_all(data)
+        .map_err(|e| S3Error::InternalError(format!("Failed to write relay part: {}", e)))?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| S3Error::InternalError(format!("Failed to sync relay part: {}", e)))?;
+    tmp.persist(path).map_err(|e| {
+        S3Error::InternalError(format!("Failed to persist relay part: {}", e.error))
+    })?;
+    Ok(())
+}
+
+fn assemble_relayed_parts(
+    relay_dir: &Path,
+    requested_parts: &[(u32, String)],
+    upload: &MultipartUpload,
+) -> Result<PathBuf, S3Error> {
+    fs::create_dir_all(relay_dir)
+        .map_err(|e| S3Error::InternalError(format!("Failed to prepare relay directory: {}", e)))?;
+    let assembled_path = relay_dir.join("assembled.bin");
+    let mut tmp = NamedTempFile::new_in(relay_dir).map_err(|e| {
+        S3Error::InternalError(format!("Failed to create assembled relay tmp file: {}", e))
+    })?;
+    for (part_number, _) in requested_parts {
+        let part = upload.parts.get(part_number).ok_or_else(|| {
+            S3Error::InvalidPart(format!("Part {} has not been uploaded", part_number))
+        })?;
+        match &part.payload {
+            PartPayload::InMemory(bytes) => tmp.write_all(bytes).map_err(|e| {
+                S3Error::InternalError(format!("Failed to write relayed in-memory part: {}", e))
+            })?,
+            PartPayload::RelayedFile(path) => {
+                let mut src = fs::File::open(path).map_err(|e| {
+                    S3Error::InternalError(format!("Failed to open relayed part: {}", e))
+                })?;
+                std::io::copy(&mut src, &mut tmp).map_err(|e| {
+                    S3Error::InternalError(format!("Failed to assemble relayed parts: {}", e))
+                })?;
+            }
+        }
+    }
+    tmp.as_file().sync_all().map_err(|e| {
+        S3Error::InternalError(format!("Failed to sync assembled relay file: {}", e))
+    })?;
+    tmp.persist(&assembled_path).map_err(|e| {
+        S3Error::InternalError(format!(
+            "Failed to persist assembled relay file: {}",
+            e.error
+        ))
+    })?;
+    Ok(assembled_path)
+}
+
+fn cleanup_relay_dir_for_upload(upload: &MultipartUpload) {
+    if let RelayStrategy::Relayed { relay_dir } = &upload.relay_strategy {
+        let _ = fs::remove_dir_all(relay_dir);
+    }
+}
+
+fn take_upload_for_cleanup(upload: &mut MultipartUpload) -> MultipartUpload {
+    MultipartUpload {
+        upload_id: upload.upload_id.clone(),
+        bucket: upload.bucket.clone(),
+        key: upload.key.clone(),
+        created_at: upload.created_at,
+        last_activity: upload.last_activity,
+        content_type: upload.content_type.clone(),
+        user_metadata: upload.user_metadata.clone(),
+        parts: std::mem::take(&mut upload.parts),
+        state: upload.state,
+        relay_strategy: match &upload.relay_strategy {
+            RelayStrategy::InMemory {
+                relay_threshold_bytes,
+            } => RelayStrategy::InMemory {
+                relay_threshold_bytes: *relay_threshold_bytes,
+            },
+            RelayStrategy::Relayed { relay_dir } => RelayStrategy::Relayed {
+                relay_dir: relay_dir.clone(),
+            },
+        },
+    }
+}
+
+fn cleanup_orphan_relay_entries_at(
+    relay_root: &Path,
+    active_relay_dirs: &HashSet<PathBuf>,
+) -> (u64, u64) {
+    let mut dirs_removed = 0u64;
+    let mut files_removed = 0u64;
+    let Ok(entries) = fs::read_dir(relay_root) else {
+        return (0, 0);
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if active_relay_dirs.contains(&path) {
+                continue;
+            }
+            if fs::remove_dir_all(&path).is_ok() {
+                dirs_removed += 1;
+            }
+        } else if fs::remove_file(&path).is_ok() {
+            files_removed += 1;
+        }
+    }
+    (dirs_removed, files_removed)
 }
 
 #[cfg(test)]
@@ -1334,7 +1664,11 @@ mod tests {
 
         // Sleep past the idle TTL.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        store.cleanup_expired(std::time::Duration::from_secs(3600));
+        let report = store.cleanup_expired(
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(3600),
+        );
+        assert_eq!(report.swept_open_uploads, 1);
 
         assert!(
             store.uploads.read().get(&id).is_none(),
@@ -1348,22 +1682,127 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_expired_preserves_completing_upload() {
-        // An upload in Completing state must NOT be swept — the handler's
-        // engine.store* is in flight and the sweeper would desync the map.
-        let store = MultipartStore::new_for_test(10 * 1024, 10 * 1024, Duration::milliseconds(1));
+    fn test_cleanup_expired_preserves_recent_completing_upload() {
+        // Completing uploads should survive until completing_timeout elapses.
+        let store = MultipartStore::new_for_test(10 * 1024, 10 * 1024, Duration::hours(24));
         let id = store.create("b", "k", None, HashMap::new()).unwrap();
         let etag = store
             .upload_part(&id, "b", "k", 1, Bytes::from(vec![0u8; 100]))
             .unwrap();
         store.complete(&id, "b", "k", &[(1, etag)]).unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        store.cleanup_expired(std::time::Duration::from_secs(3600));
+        let report = store.cleanup_expired(
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(3600),
+        );
+        assert_eq!(report.swept_completing_uploads, 0);
 
         assert!(
             store.uploads.read().get(&id).is_some(),
-            "Completing uploads must be preserved"
+            "recent Completing uploads must be preserved"
         );
+    }
+
+    #[test]
+    fn test_cleanup_expired_sweeps_stuck_completing_upload() {
+        let store = MultipartStore::new_for_test(10 * 1024, 10 * 1024, Duration::hours(24));
+        let id = store.create("b", "k", None, HashMap::new()).unwrap();
+        let etag = store
+            .upload_part(&id, "b", "k", 1, Bytes::from(vec![0u8; 100]))
+            .unwrap();
+        store.complete(&id, "b", "k", &[(1, etag)]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let report = store.cleanup_expired(
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_millis(1),
+        );
+        assert_eq!(report.swept_completing_uploads, 1);
+        assert_eq!(store.in_flight_bytes(), 0);
+        assert!(store.uploads.read().get(&id).is_none());
+    }
+
+    #[test]
+    fn test_cleanup_orphan_relay_entries_removes_untracked_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let active_dir = dir.path().join("active");
+        let orphan_dir = dir.path().join("orphan");
+        let orphan_file = dir.path().join("stray.tmp");
+        fs::create_dir_all(&active_dir).unwrap();
+        fs::create_dir_all(&orphan_dir).unwrap();
+        fs::write(orphan_dir.join("part-00001.bin"), b"orphan").unwrap();
+        fs::write(&orphan_file, b"stray").unwrap();
+
+        let mut active = HashSet::new();
+        active.insert(active_dir.clone());
+        let (dirs_removed, files_removed) = cleanup_orphan_relay_entries_at(dir.path(), &active);
+
+        assert_eq!(dirs_removed, 1);
+        assert_eq!(files_removed, 1);
+        assert!(active_dir.exists(), "active relay dir must be preserved");
+        assert!(!orphan_dir.exists(), "orphan relay dir must be removed");
+        assert!(!orphan_file.exists(), "orphan relay file must be removed");
+    }
+
+    #[test]
+    fn test_relay_promotion_on_threshold_cross() {
+        let store = MultipartStore::new(10 * 1024);
+        let id = store
+            .create_with_relay_policy("b", "k", None, HashMap::new(), Some(512), false)
+            .unwrap();
+
+        store
+            .upload_part(&id, "b", "k", 1, Bytes::from(vec![0u8; 256]))
+            .unwrap();
+        {
+            let uploads = store.uploads.read();
+            let upload = uploads.get(&id).unwrap();
+            assert!(matches!(
+                upload.relay_strategy,
+                RelayStrategy::InMemory { .. }
+            ));
+        }
+
+        store
+            .upload_part(&id, "b", "k", 2, Bytes::from(vec![1u8; 300]))
+            .unwrap();
+        let uploads = store.uploads.read();
+        let upload = uploads.get(&id).unwrap();
+        assert!(matches!(
+            upload.relay_strategy,
+            RelayStrategy::Relayed { .. }
+        ));
+        let part1 = upload.parts.get(&1).unwrap();
+        let part2 = upload.parts.get(&2).unwrap();
+        assert!(matches!(part1.payload, PartPayload::RelayedFile(_)));
+        assert!(matches!(part2.payload, PartPayload::RelayedFile(_)));
+    }
+
+    #[test]
+    fn test_complete_passthrough_returns_relayed_file_payload() {
+        let store = MultipartStore::new(10 * 1024);
+        let id = store
+            .create_with_relay_policy("b", "k", None, HashMap::new(), None, true)
+            .unwrap();
+        let e1 = store
+            .upload_part(&id, "b", "k", 1, Bytes::from_static(b"hello"))
+            .unwrap();
+        let e2 = store
+            .upload_part(&id, "b", "k", 2, Bytes::from_static(b"world"))
+            .unwrap();
+
+        let completed = store
+            .complete_passthrough(&id, "b", "k", &[(1, e1), (2, e2)])
+            .unwrap();
+        assert_eq!(completed.total_size, 10);
+        match completed.payload {
+            PassthroughPayload::RelayedFile(path) => {
+                let data = std::fs::read(path).unwrap();
+                assert_eq!(data, b"helloworld");
+            }
+            PassthroughPayload::Chunks(_) => {
+                panic!("expected relayed file payload for always-relay upload")
+            }
+        }
     }
 }

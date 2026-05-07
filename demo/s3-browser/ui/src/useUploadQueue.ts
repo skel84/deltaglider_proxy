@@ -1,12 +1,27 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { uploadObject } from './s3client';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { uploadObject, type UploadTelemetry } from './s3client';
+import { clampPercent, DEFAULT_UPLOAD_QUEUE_SIZE, type UploadStatus } from './uploadTelemetry';
 
-interface UploadItem {
+export interface UploadQueueItem {
   id: string;
   file: File;
   destination: string;
-  status: 'pending' | 'uploading' | 'done' | 'error';
+  key: string;
+  status: UploadStatus;
   originalSize: number;
+  transferredBytes: number;
+  totalBytes: number;
+  percent: number;
+  speedBytesPerSec: number;
+  totalParts: number;
+  completedParts: number;
+  inFlightParts: number;
+  activeConnections: number;
+  currentPart: number | null;
+  startedAtMs: number | null;
+  completingSinceMs: number | null;
+  updatedAtMs: number | null;
+  durationMs: number | null;
   error?: string;
 }
 
@@ -17,70 +32,232 @@ interface UploadStats {
 }
 
 export default function useUploadQueue(destination: string) {
-  const [queue, setQueue] = useState<UploadItem[]>([]);
-  const [stats, setStats] = useState<UploadStats>({ uploaded: 0, originalSize: 0, storedSize: 0 });
-  const processingRef = useRef(false);
+  const [queue, setQueue] = useState<UploadQueueItem[]>([]);
+  const activeUploadsRef = useRef(new Set<string>());
+  const controllersRef = useRef(new Map<string, AbortController>());
+  const maxConcurrentFiles = Math.max(1, Math.floor(DEFAULT_UPLOAD_QUEUE_SIZE / 2));
+  const [tick, setTick] = useState(0);
+
+  const toKey = useCallback((dest: string, file: File): string => {
+    const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+    const cleanRelativePath = relativePath.replace(/^\/+/, '').replace(/\/{2,}/g, '/');
+    return dest ? `${dest}/${cleanRelativePath}` : cleanRelativePath;
+  }, []);
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const cleanDest = destination.replace(/^\/+/, '').replace(/\/+$/, '').replace(/\/{2,}/g, '/');
-    const items: UploadItem[] = Array.from(files).map((file) => ({
+    const items: UploadQueueItem[] = Array.from(files).map((file) => ({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       file,
       destination: cleanDest,
-      status: 'pending' as const,
+      key: toKey(cleanDest, file),
+      status: 'queued',
       originalSize: file.size,
+      transferredBytes: 0,
+      totalBytes: file.size,
+      percent: 0,
+      speedBytesPerSec: 0,
+      totalParts: 0,
+      completedParts: 0,
+      inFlightParts: 0,
+      activeConnections: 0,
+      currentPart: null,
+      startedAtMs: null,
+      completingSinceMs: null,
+      updatedAtMs: null,
+      durationMs: null,
     }));
     setQueue((prev) => [...prev, ...items]);
-  }, [destination]);
+  }, [destination, toKey]);
 
-  // Process one pending item at a time
-  useEffect(() => {
-    if (processingRef.current) return;
-    const pending = queue.find((item) => item.status === 'pending');
-    if (!pending) return;
-
-    processingRef.current = true;
-
+  const applyTelemetry = useCallback((id: string, telemetry: UploadTelemetry) => {
     setQueue((prev) =>
-      prev.map((item) => (item.id === pending.id ? { ...item, status: 'uploading' as const } : item))
+      prev.map((item) =>
+        item.id !== id
+          ? item
+          : (() => {
+              const nextStatus = telemetry.status;
+              const enteringCompleting = nextStatus === 'completing' && item.status !== 'completing';
+              return {
+                ...item,
+                status: nextStatus,
+                transferredBytes: telemetry.loadedBytes,
+                totalBytes: telemetry.totalBytes || item.totalBytes,
+                percent: clampPercent(telemetry.percent),
+                speedBytesPerSec: telemetry.speedBytesPerSec,
+                totalParts: telemetry.totalParts,
+                completedParts: telemetry.completedParts,
+                inFlightParts: telemetry.inFlightParts,
+                activeConnections: telemetry.activeConnections,
+                currentPart: telemetry.currentPart,
+                updatedAtMs: telemetry.updatedAtMs,
+                startedAtMs: item.startedAtMs ?? telemetry.updatedAtMs,
+                completingSinceMs: enteringCompleting
+                  ? telemetry.updatedAtMs
+                  : nextStatus !== 'completing'
+                    ? null
+                    : item.completingSinceMs,
+                durationMs: telemetry.elapsedMs,
+                error: telemetry.status === 'error' ? item.error : undefined,
+              };
+            })(),
+      ),
     );
-
-    const relativePath = (pending.file as File & { webkitRelativePath?: string }).webkitRelativePath || pending.file.name;
-    const cleanRelativePath = relativePath.replace(/^\/+/, '').replace(/\/{2,}/g, '/');
-    const key = pending.destination ? `${pending.destination}/${cleanRelativePath}` : cleanRelativePath;
-
-    uploadObject(key, pending.file)
-      .then(() => {
-        setQueue((prev) =>
-          prev.map((item) =>
-            item.id === pending.id ? { ...item, status: 'done' as const } : item
-          )
-        );
-        setStats((prev) => ({
-          uploaded: prev.uploaded + 1,
-          originalSize: prev.originalSize + pending.originalSize,
-          storedSize: prev.storedSize + pending.originalSize,
-        }));
-      })
-      .catch((err) => {
-        setQueue((prev) =>
-          prev.map((item) =>
-            item.id === pending.id
-              ? { ...item, status: 'error' as const, error: err instanceof Error ? err.message : 'Upload failed' }
-              : item
-          )
-        );
-      })
-      .finally(() => {
-        processingRef.current = false;
-      });
-  }, [queue]);
-
-  const clearCompleted = useCallback(() => {
-    setQueue((prev) => prev.filter((item) => item.status !== 'done' && item.status !== 'error'));
   }, []);
 
-  const pendingCount = queue.filter((i) => i.status === 'pending' || i.status === 'uploading').length;
+  const startUpload = useCallback((item: UploadQueueItem) => {
+    if (activeUploadsRef.current.has(item.id)) return;
+    activeUploadsRef.current.add(item.id);
+    const controller = new AbortController();
+    controllersRef.current.set(item.id, controller);
+
+    setQueue((prev) =>
+      prev.map((entry) =>
+        entry.id !== item.id
+          ? entry
+          : {
+              ...entry,
+              status: 'uploading',
+              error: undefined,
+              startedAtMs: Date.now(),
+              completingSinceMs: null,
+              updatedAtMs: Date.now(),
+            },
+      ),
+    );
+
+    uploadObject(item.key, item.file, {
+      signal: controller.signal,
+      onTelemetry: (telemetry) => applyTelemetry(item.id, telemetry),
+    })
+      .then(() => {
+        setQueue((prev) =>
+          prev.map((entry) =>
+            entry.id !== item.id
+              ? entry
+              : {
+                  ...entry,
+                  status: entry.status === 'cancelled' ? 'cancelled' : 'success',
+                  percent: 100,
+                  transferredBytes: entry.totalBytes,
+                  completedParts: entry.totalParts,
+                  inFlightParts: 0,
+                  activeConnections: 0,
+                  completingSinceMs: null,
+                },
+          ),
+        );
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) {
+          setQueue((prev) =>
+            prev.map((entry) =>
+              entry.id === item.id
+                ? {
+                    ...entry,
+                    status: 'cancelled',
+                    inFlightParts: 0,
+                    activeConnections: 0,
+                    speedBytesPerSec: 0,
+                    completingSinceMs: null,
+                  }
+              : entry,
+            ),
+          );
+          return;
+        }
+        setQueue((prev) =>
+          prev.map((entry) =>
+            entry.id === item.id
+              ? {
+                  ...entry,
+                  status: 'error',
+                  error: err instanceof Error ? err.message : 'Upload failed',
+                  inFlightParts: 0,
+                  activeConnections: 0,
+                  speedBytesPerSec: 0,
+                  completingSinceMs: null,
+                }
+                : entry,
+            ),
+          );
+      })
+      .finally(() => {
+        activeUploadsRef.current.delete(item.id);
+        controllersRef.current.delete(item.id);
+        setTick((n) => n + 1);
+      });
+  }, [applyTelemetry]);
+
+  useEffect(() => {
+    const availableSlots = maxConcurrentFiles - activeUploadsRef.current.size;
+    if (availableSlots <= 0) return;
+    const queued = queue.filter((item) => item.status === 'queued').slice(0, availableSlots);
+    queued.forEach((item) => startUpload(item));
+  }, [maxConcurrentFiles, queue, startUpload, tick]);
+
+  const clearCompleted = useCallback(() => {
+    setQueue((prev) =>
+      prev.filter((item) => item.status !== 'success' && item.status !== 'error' && item.status !== 'cancelled'),
+    );
+  }, []);
+
+  const cancelUpload = useCallback((id: string) => {
+    const controller = controllersRef.current.get(id);
+    if (controller) {
+      controller.abort();
+      return;
+    }
+    setQueue((prev) =>
+      prev.map((item) =>
+        item.id === id && item.status === 'queued'
+          ? { ...item, status: 'cancelled' as const, speedBytesPerSec: 0 }
+          : item,
+      ),
+    );
+  }, []);
+
+  const retryUpload = useCallback((id: string) => {
+    setQueue((prev) =>
+      prev.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              status: 'queued',
+              transferredBytes: 0,
+              percent: 0,
+              speedBytesPerSec: 0,
+              completedParts: 0,
+              inFlightParts: 0,
+              activeConnections: 0,
+              currentPart: null,
+              error: undefined,
+              startedAtMs: null,
+              completingSinceMs: null,
+              updatedAtMs: null,
+              durationMs: null,
+            }
+          : item,
+      ),
+    );
+    setTick((n) => n + 1);
+  }, []);
+
+  const pendingCount = queue.filter(
+    (i) => i.status === 'queued' || i.status === 'uploading' || i.status === 'completing',
+  ).length;
+  const activeCount = queue.filter((i) => i.status === 'uploading' || i.status === 'completing').length;
+
+  const stats = useMemo<UploadStats>(() => {
+    const completed = queue.filter((item) => item.status === 'success');
+    const originalSize = completed.reduce((sum, item) => sum + item.originalSize, 0);
+    return {
+      uploaded: completed.length,
+      originalSize,
+      // The browser only knows logical object bytes; stored size is computed server-side later.
+      storedSize: originalSize,
+    };
+  }, [queue]);
 
   const rawSavings = stats.originalSize > 0
     ? Math.max(0, ((stats.originalSize - stats.storedSize) / stats.originalSize) * 100)
@@ -88,5 +265,15 @@ export default function useUploadQueue(destination: string) {
   // Cap at 99.9% unless stored size is truly zero (avoid misleading "100.0%")
   const savings = rawSavings >= 100 && stats.storedSize !== 0 ? 99.9 : rawSavings;
 
-  return { queue, stats, savings, pendingCount, addFiles, clearCompleted };
+  return {
+    queue,
+    stats,
+    savings,
+    pendingCount,
+    activeCount,
+    addFiles,
+    clearCompleted,
+    cancelUpload,
+    retryUpload,
+  };
 }

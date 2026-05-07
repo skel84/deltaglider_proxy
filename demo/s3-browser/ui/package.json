@@ -13,6 +13,7 @@
     "test:writable-prefixes": "node scripts/writable-prefixes-regression-test.mjs",
     "test:virtual-prefix-scan": "node scripts/virtual-prefix-scan-regression-test.mjs",
     "test:storage-path": "node scripts/storage-path-regression-test.mjs",
+    "test:upload-telemetry": "node scripts/upload-telemetry-regression-test.mjs",
     "e2e": "playwright test",
     "typecheck": "tsc --noEmit",
     "knip": "knip"

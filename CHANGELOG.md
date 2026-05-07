@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## v0.9.13 — 2026-05-07
+
+### Multipart passthrough relay and cleanup hardening
+
+- CompleteMultipartUpload now supports relay-backed passthrough completes for large
+  payloads, avoiding monolithic in-memory assembly when delta reconstruction would be
+  too expensive.
+- Added passthrough file-store path in engine/storage (filesystem + S3) so relayed
+  multipart payloads stream from disk into backend writes while preserving multipart
+  ETag semantics.
+- Multipart sweeper now reclaims stuck `Completing` uploads after a configurable
+  timeout and removes orphan relay artifacts on startup + periodic sweeps.
+- Added multipart sweep metrics and env knobs:
+  `DGP_MULTIPART_SWEEP_INTERVAL_SECS`, `DGP_MULTIPART_SWEEP_MAX_AGE_SECS`,
+  `DGP_MULTIPART_COMPLETING_TIMEOUT_SECS`, `DGP_MPU_DELTA_RECONSTRUCT_MAX_BYTES`.
+
+### S3 form POST compatibility
+
+- Added minimal SigV4 policy-based `multipart/form-data` object POST support on
+  bucket endpoints for `create_presigned_post` flows.
+- Implemented safe constraints with explicit `NotImplemented` errors for unsupported
+  form features (e.g. ACL overrides, `success_action_*`, session-token policy forms).
+- Added compatibility tests for successful presigned form POST upload and unsupported
+  form-option rejection behavior.
+
+### Coverage for relay and reclaim behavior
+
+- Added S3-backend integration coverage for large multipart passthrough completes.
+- Added startup orphan relay cleanup integration coverage.
+- Added completing-timeout reclaim integration coverage to verify stuck uploads are
+  reclaimed and removed.
+
 ## v0.9.12 — 2026-05-07
 
 ### Upload reliability and UX
