@@ -297,11 +297,37 @@ pub fn build_s3_router(
     public_prefix_snapshot: &deltaglider_proxy::bucket_policy::SharedPublicPrefixSnapshot,
     admission_chain: &deltaglider_proxy::admission::SharedAdmissionChain,
 ) -> Router {
+    // Move-A status (architectural review):
+    //
+    // The `s3s-adapter` feature is **experimental**, not the
+    // production path. Production Docker builds (Dockerfile)
+    // intentionally compile WITHOUT this feature, so production
+    // traffic always hits the axum router below. The s3s adapter
+    // exists in CI as a research path toward replacing axum with a
+    // protocol-conformance-driven implementation.
+    //
+    // Pre-fix the default below was `"s3s"` — but only when the
+    // feature flag was on, which is never on in production. The
+    // confusion of "s3s is default everywhere" vs "axum is what
+    // ships" was exactly what the architectural review flagged. Now
+    // axum is the default in BOTH compilations. Operators who want
+    // to test s3s explicitly opt in with `DGP_S3_ADAPTER=s3s` AND
+    // a feature-flagged build.
+    //
+    // Removal plan (deferred): once we have a real protocol
+    // conformance fixture (Java AWS SDK + boto3 + s3-tests), pick
+    // the empirical winner. If axum stays: delete `s3_adapter_s3s.rs`
+    // (1823 LOC) + `build_s3s_router` (~400 LOC) + the
+    // `add_s3_request_id` XML rewrite middleware (~100 LOC) + the
+    // 5 conditional-evaluator parallels + the 2 ensure_bucket_exists
+    // parallels + the feature flag. Total ~2400 LOC reclaim.
     #[cfg(feature = "s3s-adapter")]
     {
-        let adapter = std::env::var("DGP_S3_ADAPTER").unwrap_or_else(|_| "s3s".to_string());
+        let adapter = std::env::var("DGP_S3_ADAPTER").unwrap_or_else(|_| "axum".to_string());
         if adapter.eq_ignore_ascii_case("s3s") {
-            info!("S3 adapter: s3s path enabled (default; set DGP_S3_ADAPTER=axum to roll back)");
+            tracing::warn!(
+                "S3 adapter: s3s path ENABLED via DGP_S3_ADAPTER=s3s (experimental; not the production default)"
+            );
             return build_s3s_router(
                 state,
                 iam_state,
@@ -316,11 +342,11 @@ pub fn build_s3_router(
         }
         if !adapter.eq_ignore_ascii_case("axum") {
             tracing::warn!(
-                "Unknown DGP_S3_ADAPTER='{}'; falling back to legacy Axum S3 adapter",
+                "Unknown DGP_S3_ADAPTER='{}'; using axum (the default)",
                 adapter
             );
         } else {
-            info!("S3 adapter: legacy Axum path enabled (DGP_S3_ADAPTER=axum)");
+            info!("S3 adapter: axum path enabled (default)");
         }
     }
 
