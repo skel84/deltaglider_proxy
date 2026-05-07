@@ -1440,7 +1440,13 @@ mod tests {
             .create("bucket", "other.bin", None, HashMap::new())
             .unwrap();
         store
-            .upload_part(&upload_b, "bucket", "other.bin", 1, Bytes::from_static(b"x"))
+            .upload_part(
+                &upload_b,
+                "bucket",
+                "other.bin",
+                1,
+                Bytes::from_static(b"x"),
+            )
             .unwrap();
         let etag = {
             let u = store.uploads.read();

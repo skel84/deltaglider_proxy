@@ -852,7 +852,10 @@ mod tests {
 
     // ── H-P1-1: RFC 7232 §6 conditional precedence on GET/HEAD ──
 
-    fn dummy_metadata_for_conditional(etag_md5: &str, mtime: chrono::DateTime<chrono::Utc>) -> FileMetadata {
+    fn dummy_metadata_for_conditional(
+        etag_md5: &str,
+        mtime: chrono::DateTime<chrono::Utc>,
+    ) -> FileMetadata {
         let mut m = FileMetadata::new_passthrough(
             "test.bin".to_string(),
             "0".repeat(64),
@@ -891,12 +894,7 @@ mod tests {
         let one_year_ago = (now - chrono::Duration::days(365))
             .format("%a, %d %b %Y %H:%M:%S GMT")
             .to_string();
-        let headers = headers_pair(
-            "if-match",
-            &etag,
-            "if-unmodified-since",
-            &one_year_ago,
-        );
+        let headers = headers_pair("if-match", &etag, "if-unmodified-since", &one_year_ago);
 
         assert!(
             check_conditionals(&headers, &meta).is_none(),
@@ -929,6 +927,57 @@ mod tests {
             check_conditionals(&headers, &meta).is_none(),
             "If-None-Match (mismatching) must suppress If-Modified-Since per RFC 7232 §6"
         );
+    }
+
+    // ── Range header parsing ──
+
+    #[test]
+    fn range_header_full_byte_range() {
+        assert_eq!(
+            parse_range_header("bytes=0-99"),
+            Some(ByteRange::FromTo(0, 99))
+        );
+        assert_eq!(
+            parse_range_header("bytes=42-42"),
+            Some(ByteRange::FromTo(42, 42))
+        );
+    }
+
+    #[test]
+    fn range_header_open_end() {
+        assert_eq!(parse_range_header("bytes=100-"), Some(ByteRange::From(100)));
+    }
+
+    #[test]
+    fn range_header_suffix() {
+        assert_eq!(parse_range_header("bytes=-50"), Some(ByteRange::Suffix(50)));
+    }
+
+    /// `start > end` is rejected (caller falls back to full GET).
+    #[test]
+    fn range_header_inverted_returns_none() {
+        assert_eq!(parse_range_header("bytes=10-5"), None);
+    }
+
+    #[test]
+    fn range_header_missing_prefix_returns_none() {
+        assert_eq!(parse_range_header("0-99"), None);
+        assert_eq!(parse_range_header(""), None);
+    }
+
+    /// H-P1-3 verification: a multi-range header (`bytes=0-1,5-10`)
+    /// returns `None`, which the caller interprets as "no range
+    /// requested" and serves the full object — the AWS S3-spec
+    /// behaviour ("if you request multiple ranges in a single
+    /// request, S3 returns the entire object"). The agent's report
+    /// claimed we returned 416 here; in fact `parse()` on the
+    /// post-comma fragment fails and `?` propagates `None`. This
+    /// test pins that contract so a future "improvement" doesn't
+    /// regress it.
+    #[test]
+    fn range_header_multi_range_falls_back_to_full_get() {
+        assert_eq!(parse_range_header("bytes=0-1,5-10"), None);
+        assert_eq!(parse_range_header("bytes=0-,5-10"), None);
     }
 
     /// Without `If-Match`, `If-Unmodified-Since` IS consulted as
@@ -1039,7 +1088,7 @@ pub(super) fn check_conditionals(
 // ---------------------------------------------------------------------------
 
 /// Represents a parsed byte range from the Range header.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ByteRange {
     /// bytes=X-Y (inclusive on both ends)
     FromTo(u64, u64),

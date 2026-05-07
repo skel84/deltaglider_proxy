@@ -763,7 +763,10 @@ async fn test_orphan_reference_rolled_back_on_encode_overload() {
         }
     }
     let n_503 = statuses.iter().filter(|s| **s == 503u16).count();
-    let n_2xx = statuses.iter().filter(|s| **s >= 200u16 && **s < 300u16).count();
+    let n_2xx = statuses
+        .iter()
+        .filter(|s| **s >= 200u16 && **s < 300u16)
+        .count();
     eprintln!(
         "S-P1-2 burst: {} responses, {} 2xx, {} 503",
         statuses.len(),

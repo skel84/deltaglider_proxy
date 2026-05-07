@@ -1594,13 +1594,7 @@ mod tests {
         // because it's the first thing it checks. So this path proves
         // race-A is closed.
         let err = backend
-            .put_passthrough(
-                "racy",
-                "ns",
-                "f.bin",
-                b"payload",
-                &dummy_metadata("f.bin"),
-            )
+            .put_passthrough("racy", "ns", "f.bin", b"payload", &dummy_metadata("f.bin"))
             .await
             .expect_err("must refuse");
         assert!(matches!(err, StorageError::BucketNotFound(_)));

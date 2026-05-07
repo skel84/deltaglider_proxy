@@ -159,6 +159,41 @@ fn resolve_form_key(key_field: &str, filename: Option<&str>) -> Result<String, S
     Ok(out.trim_start_matches('/').to_string())
 }
 
+/// Resolve a `$variable` reference inside a policy condition (e.g.
+/// `["starts-with", "$key", "alice/"]`) to its concrete value.
+///
+/// **A-P1-1 known parity drift**: `$key` here evaluates to the
+/// pre-`${filename}`-substitution `key_field` (the literal value of
+/// the form's `key` field as the client submitted it), NOT the
+/// post-substitution `resolved_key` that ultimately gets written to
+/// storage. AWS S3's documented behaviour ("policy is evaluated
+/// after `${filename}` substitution") suggests this should match
+/// `resolved_key` instead.
+///
+/// In practice the bypass is bounded:
+///   1. Path-traversal segments (`..`) in `${filename}` are caught
+///      downstream by `engine.validated_key`.
+///   2. The user's IAM `auth_user.can(Write, bucket, &resolved_key)`
+///      check at the end of `authenticate_form_post` runs against
+///      the post-substitution key. So a policy issuer's intent can
+///      only "leak" within the requesting IAM user's own permitted
+///      scope.
+///
+/// What WOULD be broken: a third-party policy issuer (external CI
+/// signs a presigned policy for a less-trusted IAM user) whose
+/// `["starts-with", "$key", "alice/"]` is intended to require an
+/// exact one-segment file under `alice/`, but the signed form has
+/// `key=alice/${filename}` and the browser substitutes `subdir/x`
+/// → resolved_key = `alice/subdir/x`. Policy validates (because we
+/// match against `key_field=alice/${filename}`, which starts with
+/// `alice/`); IAM allows (because the user has `bucket/alice/*`).
+/// Result: deeper nesting than the operator intended.
+///
+/// We keep the existing semantics here pending behavioural
+/// verification against real AWS S3 — the docs are ambiguous, and
+/// changing semantics blindly risks breaking real form-POST
+/// integrations that match `["starts-with", "$key", "alice/${filename}"]`
+/// as a literal string.
 fn policy_lookup_variable(
     variable: &str,
     fields_ci: &HashMap<String, String>,
@@ -168,6 +203,10 @@ fn policy_lookup_variable(
 ) -> Result<String, S3Error> {
     match variable {
         "$bucket" => Ok(bucket.to_string()),
+        // See A-P1-1 doc-comment above on the pre- vs post-substitution
+        // ambiguity. `key_field` = pre-substitution literal. The IAM
+        // check at the end of `authenticate_form_post` is the
+        // belt-and-braces gate against scope escape.
         "$key" => Ok(key_field.to_string()),
         "$Content-Type" | "$content-type" => Ok(resolved_content_type.to_string()),
         _ => {

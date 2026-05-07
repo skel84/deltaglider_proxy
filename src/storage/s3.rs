@@ -310,12 +310,7 @@ impl S3Backend {
             // in the SDK error body when the upstream returns it
             // without a 503 status (some implementations).
             if s == 503 || debug_str.contains("SlowDown") {
-                return StorageError::Throttled(format!(
-                    "{} throttled (status={}): {}",
-                    op,
-                    s,
-                    e
-                ));
+                return StorageError::Throttled(format!("{} throttled (status={}): {}", op, s, e));
             }
         } else if debug_str.contains("SlowDown") {
             return StorageError::Throttled(format!("{} throttled: {}", op, e));

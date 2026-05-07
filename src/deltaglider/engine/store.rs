@@ -180,10 +180,8 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
                     // original encode failure.
                     let cache_key = Self::cache_key(bucket, &deltaspace_id);
                     self.cache.invalidate(&cache_key);
-                    if let Err(cleanup_err) = self
-                        .storage
-                        .delete_reference(bucket, &deltaspace_id)
-                        .await
+                    if let Err(cleanup_err) =
+                        self.storage.delete_reference(bucket, &deltaspace_id).await
                     {
                         warn!(
                             "S-P1-2: encode failed AND reference rollback failed for {}/{}: encode_err={}, rollback_err={}",
