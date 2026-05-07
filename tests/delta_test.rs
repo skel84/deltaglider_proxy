@@ -280,7 +280,19 @@ async fn test_delete_one_of_many_deltas() {
 }
 
 #[tokio::test]
-async fn test_dissimilar_files_still_delta() {
+/// S-P1-1 regression: when a dissimilar file produces a delta worse
+/// than `max_delta_ratio`, it must be stored as PASSTHROUGH even when
+/// a reference already exists in the deltaspace. Pre-fix the
+/// threshold gate was `!has_existing_reference && ratio >= threshold`,
+/// so once any file pinned the reference, every later file was forced
+/// into delta storage regardless of cost. A dissimilar follow-up to
+/// a tiny anchor produced a delta as big as the source file plus
+/// xdelta3 framing — strictly worse than passthrough.
+///
+/// Post-fix the ratio gate fires unconditionally. The reference is
+/// kept (other delta siblings might need it); only this single file
+/// is stored passthrough.
+async fn test_dissimilar_files_fall_back_to_passthrough() {
     let server = TestServer::filesystem().await;
     let http = reqwest::Client::new();
 
@@ -296,7 +308,7 @@ async fn test_dissimilar_files_still_delta() {
     )
     .await;
 
-    // Completely different file — once reference exists, still stored as delta
+    // Completely different file — must NOT be forced into delta.
     let different = generate_binary(50_000, 999);
     let st = put_and_get_storage_type(
         &http,
@@ -308,10 +320,11 @@ async fn test_dissimilar_files_still_delta() {
     )
     .await;
     assert_eq!(
-        st, "delta",
-        "Once ref exists, all zips are delta even if dissimilar"
+        st, "passthrough",
+        "S-P1-1: dissimilar follow-up must store passthrough, not waste bytes on a useless delta"
     );
 
+    // Bytes still recoverable.
     assert_eq!(
         get_bytes(
             &http,

@@ -149,6 +149,15 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
             .await;
 
         // Ensure deltaspace has an internal reference baseline.
+        //
+        // S-P1-2: when we CREATE the reference here, we own its
+        // lifecycle. If the subsequent `encode_and_store` fails (codec
+        // semaphore exhausted, codec panic, size cap, storage write
+        // error), the reference would otherwise remain on disk with no
+        // sibling delta — every future PUT to this prefix would anchor
+        // against bytes the user never successfully stored, poisoning
+        // the deltaspace permanently. Rollback on failure to restore
+        // the "no reference yet" invariant.
         let ref_meta = if has_existing_reference {
             self.storage
                 .get_reference_metadata(ctx.bucket, ctx.deltaspace_id)
@@ -159,9 +168,37 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         };
 
         // Encode delta and decide: keep as delta or fall back to direct storage
-        let result = self
+        let result = match self
             .encode_and_store(ctx, &ref_meta, has_existing_reference)
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if !has_existing_reference {
+                    // Best-effort: undo the reference we just created.
+                    // Errors here are logged but do not mask the
+                    // original encode failure.
+                    let cache_key = Self::cache_key(bucket, &deltaspace_id);
+                    self.cache.invalidate(&cache_key);
+                    if let Err(cleanup_err) = self
+                        .storage
+                        .delete_reference(bucket, &deltaspace_id)
+                        .await
+                    {
+                        warn!(
+                            "S-P1-2: encode failed AND reference rollback failed for {}/{}: encode_err={}, rollback_err={}",
+                            bucket, deltaspace_id, e, cleanup_err
+                        );
+                    } else {
+                        debug!(
+                            "S-P1-2: encode failed; rolled back fresh reference for {}/{}",
+                            bucket, deltaspace_id
+                        );
+                    }
+                }
+                return Err(e);
+            }
+        };
         self.metadata_cache
             .insert(bucket, key, result.metadata.clone());
         Ok(result)
@@ -224,39 +261,67 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         delta: Vec<u8>,
         ratio: f32,
     ) -> Result<StoreResult, EngineError> {
-        // Only apply the threshold when NO reference exists yet (first file in deltaspace).
-        // Once a reference exists, ALWAYS store as delta — the deltaspace is committed to
-        // delta storage and we want all related files to benefit from the shared reference.
+        // S-P1-1: re-evaluate the ratio on every PUT, not just the
+        // first one in the deltaspace. Pre-fix, the threshold gate
+        // was `!has_existing_reference && ratio >= effective_ratio` —
+        // once any file pinned the reference, every subsequent file
+        // was forced into delta storage regardless of cost. A 1 KB
+        // sentinel followed by a 50 MB unrelated file produced a 50
+        // MB delta + 1 KB reference (worse than the 50 MB plain
+        // passthrough would have been). When the deltas were against
+        // unrelated bytes, storage grew without bound.
+        //
+        // Post-fix: the ratio is checked unconditionally. When the
+        // delta is poor, we store passthrough. Three sub-cases:
+        //
+        //   1. `!has_existing_reference` AND poor ratio — same as
+        //      before, except now we also tear down the just-written
+        //      reference (next file may benefit; the heuristic is
+        //      "don't pin a reference for a deltaspace whose first
+        //      file proves we don't have a useful baseline").
+        //   2. `has_existing_reference` AND poor ratio — NEW
+        //      behaviour. Other delta files in this deltaspace need
+        //      the reference, so we KEEP the reference and only
+        //      store this single file as passthrough.
+        //   3. Good ratio — commit as delta as before.
         let effective_ratio = self.bucket_policies.max_delta_ratio(ctx.bucket);
-        if !has_existing_reference && ratio >= effective_ratio {
+        if ratio >= effective_ratio {
             debug!(
-                "First file in deltaspace with poor delta ratio {:.2} >= {:.2}, storing as passthrough",
-                ratio, effective_ratio
+                "Delta ratio {:.2} >= {:.2} (has_existing_reference={}), storing as passthrough",
+                ratio, effective_ratio, has_existing_reference
             );
             self.with_metrics(|m| {
                 m.delta_decisions_total
                     .with_label_values(&["passthrough"])
                     .inc()
             });
-            // Write passthrough first, then clean up old delta/reference.
-            // This prevents transient 404s on concurrent GETs during strategy transition.
             let del_bucket = ctx.bucket.to_string();
             let del_dsid = ctx.deltaspace_id.to_string();
             let del_filename = ctx.obj_key.filename.clone();
+            // Write passthrough FIRST, then clean up. This prevents
+            // transient 404s on concurrent GETs during strategy
+            // transition.
             let result = self.store_passthrough(ctx).await?;
-            let cache_key = Self::cache_key(&del_bucket, &del_dsid);
-            self.cache.invalidate(&cache_key);
-            if let Err(e) = self.storage.delete_reference(&del_bucket, &del_dsid).await {
-                warn!(
-                    "Failed to clean up reference after passthrough write: {}",
-                    e
-                );
-            }
+            // Always tear down any prior delta for THIS key (we just
+            // overwrote it with passthrough at the same logical key).
             if let Err(e) = self
                 .delete_delta_idempotent(&del_bucket, &del_dsid, &del_filename)
                 .await
             {
                 warn!("Failed to clean up delta after passthrough write: {}", e);
+            }
+            // Reference cleanup ONLY when we just minted the reference
+            // for this PUT (case 1). If the reference pre-existed, it
+            // belongs to other delta siblings and must stay.
+            if !has_existing_reference {
+                let cache_key = Self::cache_key(&del_bucket, &del_dsid);
+                self.cache.invalidate(&cache_key);
+                if let Err(e) = self.storage.delete_reference(&del_bucket, &del_dsid).await {
+                    warn!(
+                        "Failed to clean up reference after passthrough write: {}",
+                        e
+                    );
+                }
             }
             return Ok(result);
         }
