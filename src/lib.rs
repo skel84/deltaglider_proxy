@@ -25,6 +25,7 @@ pub mod rate_limiter;
 pub mod replication;
 #[cfg(feature = "s3s-adapter")]
 pub mod s3_adapter_s3s;
+pub mod secret;
 pub mod session;
 pub mod storage;
 pub mod tls;
