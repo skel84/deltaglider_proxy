@@ -298,6 +298,27 @@ impl S3Backend {
             if s == 403 && op.is_bucket_level() {
                 return StorageError::BucketNotFound(bucket.to_string());
             }
+            // E-P1-1: 503 SlowDown is the AWS-spec transient throttle
+            // signal. Map to a dedicated `Throttled` variant so the
+            // API layer can surface 503 SlowDown to the caller —
+            // pre-fix this fell into `S3(...)` → catch-all in
+            // `api/errors.rs` → 500 InternalError, which AWS SDKs
+            // treat as permanent and DON'T back off on. Real
+            // production load against a back-pressuring backend
+            // would cascade into client retry storms with no
+            // throttle propagation. Also catches `SlowDown` literal
+            // in the SDK error body when the upstream returns it
+            // without a 503 status (some implementations).
+            if s == 503 || debug_str.contains("SlowDown") {
+                return StorageError::Throttled(format!(
+                    "{} throttled (status={}): {}",
+                    op,
+                    s,
+                    e
+                ));
+            }
+        } else if debug_str.contains("SlowDown") {
+            return StorageError::Throttled(format!("{} throttled: {}", op, e));
         }
         StorageError::S3(format!(
             "{} failed (status={}): {}",

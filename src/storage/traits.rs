@@ -51,6 +51,15 @@ pub enum StorageError {
     #[error("Bucket not empty: {0}")]
     BucketNotEmpty(String),
 
+    /// Backend-side throttling — the upstream returned 503 SlowDown
+    /// (or equivalent transient pressure signal). E-P1-1: distinct
+    /// from `S3(...)` so the API layer can surface this as
+    /// `S3Error::SlowDown` (which the AWS SDK retry contract treats
+    /// as transient) rather than `S3Error::InternalError` (permanent
+    /// 500). See `From<StorageError> for S3Error` in `api/errors.rs`.
+    #[error("Backend throttled: {0}")]
+    Throttled(String),
+
     #[error("Storage error: {0}")]
     Other(String),
 }

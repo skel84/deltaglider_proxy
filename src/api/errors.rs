@@ -209,6 +209,14 @@ impl From<crate::storage::StorageError> for S3Error {
             crate::storage::StorageError::DiskFull => S3Error::InternalError(
                 "Insufficient storage space. The server's disk is full.".to_string(),
             ),
+            // E-P1-1: backend throttling propagates as a 503 SlowDown
+            // so AWS-SDK clients honour the spec retry/backoff
+            // contract. Pre-fix this fell into the catch-all below,
+            // surfacing as a 500 InternalError that SDKs treat as
+            // permanent.
+            crate::storage::StorageError::Throttled(_) => S3Error::SlowDown(
+                "Backend signalled transient pressure; please retry with backoff.".to_string(),
+            ),
             other => S3Error::InternalError(sanitise_for_client(&other)),
         }
     }
@@ -281,6 +289,22 @@ mod tests {
         assert_eq!(err.status_code(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.status_code().as_u16(), 503);
         assert_eq!(err.code(), "SlowDown");
+    }
+
+    /// E-P1-1 regression: backend `Throttled` must surface as
+    /// `S3Error::SlowDown` (HTTP 503), not `S3Error::InternalError`
+    /// (HTTP 500). Pre-fix the `From<StorageError>` catch-all swept
+    /// `StorageError::S3("...status=503...")` into `InternalError`,
+    /// breaking the AWS-SDK retry/backoff contract.
+    #[test]
+    fn throttled_storage_error_maps_to_slow_down() {
+        let storage = crate::storage::StorageError::Throttled(
+            "PutObject throttled (status=503): SlowDown".into(),
+        );
+        let s3: S3Error = storage.into();
+        assert_eq!(s3.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(s3.status_code().as_u16(), 503);
+        assert_eq!(s3.code(), "SlowDown");
     }
 
     /// E4 security fix: `sanitise_for_client` must return a generic string,
