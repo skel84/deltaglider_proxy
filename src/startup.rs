@@ -633,13 +633,23 @@ fn build_s3s_router(
     builder.set_access(AllowAllS3sAccess);
     let s3_service = HandleError::new(builder.build(), handle_s3s_http_error);
 
+    // Pre-fix `2abe031` registered `.route("/:bucket", post(delete_objects))`
+    // here to give s3s adapter a path through to the form-POST handler.
+    // That broke the s3s parity tests catastrophically: `.route(...)`
+    // claims the path slot for ALL methods, so non-POST requests
+    // (CreateBucket = `PUT /:bucket`) returned 405 instead of falling
+    // through to the s3s fallback. CI on `4ccd8ae` showed 4/4 parity
+    // tests failing.
+    //
+    // Form-POST upload support under s3s is deferred to a proper fix
+    // — likely a method-aware middleware that intercepts POST +
+    // `multipart/form-data` Content-Type and dispatches to
+    // `delete_objects` while letting other POSTs (like the
+    // `?delete` batch) reach the s3s service. The legacy axum
+    // adapter (DGP_S3_ADAPTER=axum) handles form-POST natively;
+    // s3s adapter form-POSTs return whatever s3s returns
+    // (typically not implemented).
     let mut router = Router::new()
-        // s3s currently doesn't handle browser form POST uploads (`POST /bucket`
-        // multipart/form-data with SigV4 policy fields). Route bucket POST to the
-        // existing axum handler so both DeleteObjects and presigned form uploads
-        // share the same compatibility path as the legacy adapter.
-        .route("/:bucket", axum::routing::post(delete_objects))
-        .route("/:bucket/", axum::routing::post(delete_objects))
         .fallback_service(s3_service)
         .layer(middleware::from_fn(add_s3_request_id))
         .layer(TraceLayer::new_for_http())
