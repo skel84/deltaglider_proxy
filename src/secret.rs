@@ -197,8 +197,7 @@ mod tests {
     /// `DynSecret` (Arc<dyn Secret>) works for hot-reload patterns.
     #[test]
     fn dyn_secret_arc_works() {
-        let s: DynSecret =
-            std::sync::Arc::new(InMemorySecret::new("dyn", vec![9, 8, 7]));
+        let s: DynSecret = std::sync::Arc::new(InMemorySecret::new("dyn", vec![9, 8, 7]));
         let cloned: DynSecret = s.clone();
         assert_eq!(cloned.id().as_str(), "dyn");
         assert_eq!(cloned.material(), &[9, 8, 7]);
