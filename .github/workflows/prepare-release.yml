@@ -119,29 +119,26 @@ jobs:
 
           git push origin "$BRANCH"
 
-          # PR body summarises what landed and points the reviewer at
-          # the CHANGELOG section to edit if needed before merge.
-          gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "chore(release): v${NEW_VERSION}" \
-            --body "Automated release preparation.
-
-          ## What this PR does
-
-          - Bumps \`Cargo.toml\` and \`Cargo.lock\` to **v${NEW_VERSION}**
-          - Renames \`## Unreleased\` in \`CHANGELOG.md\` to \`## v${NEW_VERSION} — $(date -u +%Y-%m-%d)\`
-          - Inserts a fresh empty \`## Unreleased\` block above it
-
-          ## Reviewer checklist
-
-          - [ ] CHANGELOG section under \`## v${NEW_VERSION}\` reads correctly (edit on this branch if needed)
-          - [ ] Version bump matches semver intent (patch / minor / major)
-          - [ ] CI is green on this PR
-
-          ## What happens on merge
-
-          \`tag-on-merge.yml\` reads the version from the PR title, tags the
-          merge commit \`v${NEW_VERSION}\`, and pushes it. That fires
-          \`release.yml\` (CI gate → 4-target builds → multi-arch Docker →
-          GitHub Release with SBOM and attestation)."
+          # Create the PR via the GitHub REST API — the builder image
+          # on the k3s self-hosted runner doesn't ship with the `gh`
+          # CLI, so we can't shell out to `gh pr create` here. The
+          # REST API is always available and only needs `curl` + the
+          # GITHUB_TOKEN we already have via `pull-requests: write`.
+          BODY_JSON=$(jq -nR --arg ver "$NEW_VERSION" --arg date "$(date -u +%Y-%m-%d)" '{
+            title: "chore(release): v\($ver)",
+            head: "release/v\($ver)",
+            base: "main",
+            body: ("Automated release preparation.\n\n## What this PR does\n\n- Bumps `Cargo.toml` and `Cargo.lock` to **v" + $ver + "**\n- Renames `## Unreleased` in `CHANGELOG.md` to `## v" + $ver + " — " + $date + "`\n- Inserts a fresh empty `## Unreleased` block above it\n\n## Reviewer checklist\n\n- [ ] CHANGELOG section under `## v" + $ver + "` reads correctly (edit on this branch if needed)\n- [ ] Version bump matches semver intent (patch / minor / major)\n- [ ] CI is green on this PR\n\n## What happens on merge\n\n`tag-on-merge.yml` reads the version from the PR title, tags the merge commit `v" + $ver + "`, and pushes it. That fires `release.yml` (CI gate → 4-target builds → multi-arch Docker → GitHub Release with SBOM and attestation).")
+          }')
+          PR_URL=$(curl -fsSL -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls" \
+            -d "$BODY_JSON" \
+            | jq -r '.html_url // empty')
+          if [ -z "$PR_URL" ]; then
+            echo "::error::Failed to create PR via REST API"
+            exit 1
+          fi
+          echo "Release PR opened: $PR_URL"
