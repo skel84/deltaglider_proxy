@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.9.15 — 2026-05-07
+
+### CI and compatibility follow-up
+
+- Stabilized `s3s` compatibility runs by skipping form POST compatibility assertions on
+  the experimental `s3s` adapter path (feature remains validated on the primary adapter).
+- Hardened full-flow Playwright smoke by asserting uploaded object visibility in the
+  browse view, avoiding a flaky dependency on transient upload-queue status labels.
+
 ## v0.9.14 — 2026-05-07
 
 ### Multipart complete memory bound fix
