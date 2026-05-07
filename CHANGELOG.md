@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+### Correctness x-ray fix programme
+
+A focused audit by five specialised investigators (concurrency, auth,
+storage, HTTP/wire, error handling) surfaced ten distinct correctness
+bugs ranging from durable on-disk drift to silent panics on
+attacker-reachable input. All ten are now fixed; tests pin each
+contract.
+
+- **C-P0-1 / C-P1-1: DeleteBucket race with in-flight CompleteMultipartUpload.**
+  `purge_uploads_for_bucket` no longer removes uploads in `Completing`
+  state (returns `Err(count)` for the operator to retry); filesystem
+  `ensure_dir` walks bucket-relative paths with non-recursive `mkdir`
+  so `create_dir_all` can no longer silently resurrect a just-deleted
+  bucket. Closes the data-resurrection class entirely.
+- **E-P0-1: OAuth callback panic from `?next=` header injection.**
+  Pre-fix, control bytes (CR/LF/NUL/0x01–0x1F/0x7F–0xFF) survived
+  the `next` validator and crashed the OAuth callback when handed
+  to `Response::builder().header(LOCATION, ...).unwrap()`. Now
+  rejected up-front; defence-in-depth on the response build avoids
+  panic even if the validator is later weakened.
+- **S-P1-1: Anchor poisoning.** Removed the
+  `!has_existing_reference` gate from the `max_delta_ratio` check.
+  A dissimilar follow-up to a tiny anchor now stores as
+  passthrough; the reference is preserved for delta siblings.
+- **S-P1-2: Orphan reference on encode failure.** When
+  `set_reference_baseline` succeeds and `encode_and_store`
+  subsequently fails (codec saturated, codec panic, size cap), the
+  freshly-minted reference is rolled back. Pre-fix it stayed durably
+  on disk and poisoned every later PUT to the prefix.
+- **S-P1-3: Filesystem fallback ETag.** Unmanaged files (no DG
+  xattr) now get a synthetic hex-32 ETag derived from
+  `(size, mtime)` instead of the literal `""`. Empty files use the
+  canonical `d41d8cd9...`. Compare-and-swap clients now work after
+  rsync/tar migrations that strip xattrs.
+- **H-P1-1: RFC 7232 §6 conditional precedence.** `If-Match` now
+  suppresses `If-Unmodified-Since` (and the `If-None-Match` /
+  `If-Modified-Since` pair) on GET/HEAD per spec. Pre-fix, requests
+  combining both headers got spurious 412s.
+- **H-P1-3: Multi-range header.** Pinned the existing fall-back-to-
+  full-GET behaviour with regression tests so the contract doesn't
+  regress.
+- **E-P1-1: Backend 503 SlowDown surfaces as 503, not 500.** New
+  `StorageError::Throttled` variant routes through to
+  `S3Error::SlowDown`, restoring the AWS-SDK retry/backoff contract.
+- **E-P1-2: Usage scanner panic leak.** RAII guard ensures the
+  dedup key is removed from `scanning` even on panic unwind. Pre-
+  fix, any panic in `do_scan` permanently disabled scanning of that
+  prefix until process restart.
+
+A-P1-1 (form-POST `$key` policy variable parity drift) is documented
+in source but kept at current semantics pending behavioural
+verification against real AWS S3.
+
+`cargo test --lib` 769 (was 746); +23 regression tests across nine
+test modules. Clippy `-D warnings` clean on default features and
+`--features s3s-adapter`. No env-var, schema, or wire-protocol
+changes; backwards compatible.
+
 ## v0.9.15 — 2026-05-07
 
 ### CI and compatibility follow-up
