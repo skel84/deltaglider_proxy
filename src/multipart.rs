@@ -109,16 +109,6 @@ pub struct CompletedUpload {
     pub user_metadata: HashMap<String, String>,
 }
 
-/// Result of completing a multipart upload without assembling into a contiguous buffer.
-/// Used for non-delta-eligible files to avoid the ~2x memory spike from assembly.
-pub struct CompletedParts {
-    pub parts: Vec<Bytes>,
-    pub etag: String,
-    pub total_size: u64,
-    pub content_type: Option<String>,
-    pub user_metadata: HashMap<String, String>,
-}
-
 pub enum PassthroughPayload {
     Chunks(Vec<Bytes>),
     RelayedParts(Vec<PathBuf>),
@@ -507,46 +497,6 @@ impl MultipartStore {
         Ok(result)
     }
 
-    /// Begin-complete variant that returns the individual part buffers
-    /// instead of a single contiguous buffer — avoids the ~2x memory
-    /// spike for non-delta-eligible files. Same state-machine semantics
-    /// as `complete()`.
-    pub fn complete_parts(
-        &self,
-        upload_id: &str,
-        bucket: &str,
-        key: &str,
-        requested_parts: &[(u32, String)],
-    ) -> Result<CompletedParts, S3Error> {
-        let mut uploads = self.uploads.write();
-
-        if let Some(u) = uploads.get(upload_id) {
-            if u.state == MultipartState::Completing {
-                return Err(S3Error::InvalidRequest(
-                    "Upload is already being completed".to_string(),
-                ));
-            }
-        }
-
-        let (validated, upload) =
-            self.validate_parts(&uploads, upload_id, bucket, key, requested_parts, true)?;
-
-        let result = CompletedParts {
-            parts: validated.part_data,
-            etag: validated.etag,
-            total_size: validated.total_size,
-            content_type: upload.content_type.clone(),
-            user_metadata: upload.user_metadata.clone(),
-        };
-
-        if let Some(u) = uploads.get_mut(upload_id) {
-            u.state = MultipartState::Completing;
-            u.last_activity = Utc::now();
-        }
-
-        Ok(result)
-    }
-
     /// Begin-complete variant optimized for passthrough storage.
     ///
     /// In relay mode this assembles a temporary file under the upload's relay
@@ -850,15 +800,6 @@ impl MultipartStore {
         }
         let next_marker = all.last().map(|p| p.part_number).unwrap_or(0);
         Ok((all, is_truncated, next_marker))
-    }
-
-    /// List uploads, optionally filtered by bucket and prefix.
-    /// Back-compat helper — internally delegates to the paginated variant
-    /// with a generous cap. New callers should prefer `list_uploads_paginated`.
-    pub fn list_uploads(&self, bucket: Option<&str>, prefix: Option<&str>) -> Vec<UploadInfo> {
-        let (uploads, _, _, _) =
-            self.list_uploads_paginated(bucket, prefix, "", "", self.max_uploads as u32);
-        uploads
     }
 
     /// Paginated ListMultipartUploads (L1 correctness fix).

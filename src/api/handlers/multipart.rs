@@ -127,8 +127,8 @@ async fn complete_multipart_upload(
     // Bifurcate: non-delta-eligible files use the chunked path to avoid
     // assembling all parts into a single contiguous buffer (~2x memory savings).
     //
-    // C4 security fix: `complete()` / `complete_parts()` now flip the
-    // upload to `Completing` atomically. We MUST call either
+    // C4 security fix: `complete()` / `complete_passthrough()` now flip
+    // the upload to `Completing` atomically. We MUST call either
     // `finish_upload` (on success) or `rollback_upload` (on error) —
     // otherwise the upload stays stuck in `Completing` and rejects
     // both abort and further UploadPart calls until the sweeper GC's it.
