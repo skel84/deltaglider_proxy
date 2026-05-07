@@ -587,12 +587,27 @@ pub async fn delete_bucket(
 
     // For object-empty buckets, MPU state is internal residue: purge it
     // deterministically so deletion is self-healing and frictionless.
+    //
+    // C-P0-1: refuse if any upload is in `Completing` state. The
+    // multipart store would otherwise tear down state that the
+    // in-flight `engine.store_*` handler still holds borrowed paths
+    // for, and the storage layer's `create_dir_all` would race to
+    // resurrect the bucket dir under us. Surface a clean
+    // `BucketNotEmpty` so the operator can retry once the multipart
+    // finalises (typically seconds).
     if mpu_count > 0 {
-        let purged = state.multipart.purge_uploads_for_bucket(&bucket);
-        info!(
-            "DELETE bucket {} purged {} multipart upload residues before deletion",
-            bucket, purged
-        );
+        match state.multipart.purge_uploads_for_bucket(&bucket) {
+            Ok(purged) => info!(
+                "DELETE bucket {} purged {} multipart upload residues before deletion",
+                bucket, purged
+            ),
+            Err(completing) => {
+                return Err(S3Error::BucketNotEmpty(format!(
+                    "{} (blocked: {} multipart upload(s) finalising; retry in a few seconds)",
+                    bucket, completing
+                )));
+            }
+        }
     }
 
     // Delete the real bucket on the storage backend

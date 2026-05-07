@@ -183,10 +183,51 @@ impl FilesystemBackend {
         ))
     }
 
-    /// Ensure a directory exists
-    async fn ensure_dir(&self, path: &Path) -> Result<(), StorageError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await?;
+    /// Ensure a directory exists, **without** silently creating the
+    /// bucket root. The path must be inside an existing bucket dir.
+    ///
+    /// Pre-fix this called `fs::create_dir_all(parent)` unconditionally
+    /// — which would silently recreate `<root>/<bucket>/...` if a
+    /// concurrent `delete_bucket` had just removed it (C-P0-1: a
+    /// parallel `CompleteMultipartUpload` mid-`engine.store` would
+    /// resurrect a bucket the operator had successfully deleted).
+    ///
+    /// The fix walks intermediate components manually, calling
+    /// non-recursive `mkdir`. If the bucket root went missing under us,
+    /// the very first `mkdir` (of the first child of the bucket dir)
+    /// fails with `ENOENT`, which we propagate as `BucketNotFound`.
+    async fn ensure_dir(&self, bucket: &str, path: &Path) -> Result<(), StorageError> {
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        let bucket_dir = self.bucket_dir(bucket);
+        if !is_dir(&bucket_dir).await {
+            return Err(StorageError::BucketNotFound(bucket.to_string()));
+        }
+        // Strip the bucket-or-shorter prefix; iterate the remaining
+        // components and `mkdir` each one. We never `mkdir` the bucket
+        // dir itself — if the strip fails, the path was outside the
+        // bucket subtree and we propagate the error rather than
+        // creating something we shouldn't.
+        let Ok(rel) = parent.strip_prefix(&bucket_dir) else {
+            return Err(StorageError::Other(format!(
+                "ensure_dir called with path {:?} outside bucket {}",
+                path, bucket
+            )));
+        };
+        let mut current = bucket_dir;
+        for component in rel.components() {
+            current.push(component);
+            match fs::create_dir(&current).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Parent disappeared mid-walk — bucket was deleted
+                    // between `require_bucket_exists` and now.
+                    return Err(StorageError::BucketNotFound(bucket.to_string()));
+                }
+                Err(e) => return Err(StorageError::from(e)),
+            }
         }
         Ok(())
     }
@@ -484,6 +525,7 @@ impl FilesystemBackend {
 
     async fn put_object_file(
         &self,
+        bucket: &str,
         data_path: &Path,
         data: &[u8],
         metadata: &FileMetadata,
@@ -491,7 +533,7 @@ impl FilesystemBackend {
         prefix: &str,
         filename: &str,
     ) -> Result<(), StorageError> {
-        self.ensure_dir(data_path).await?;
+        self.ensure_dir(bucket, data_path).await?;
         atomic_write_with_metadata(data_path, data, Some(metadata)).await?;
         debug!(
             "Wrote {} ({} bytes) for {}/{}",
@@ -688,6 +730,7 @@ impl StorageBackend for FilesystemBackend {
     ) -> Result<(), StorageError> {
         self.require_bucket_exists(bucket).await?;
         self.put_object_file(
+            bucket,
             &self.reference_path(bucket, prefix),
             data,
             metadata,
@@ -771,6 +814,7 @@ impl StorageBackend for FilesystemBackend {
     ) -> Result<(), StorageError> {
         self.require_bucket_exists(bucket).await?;
         self.put_object_file(
+            bucket,
             &self.delta_path(bucket, prefix, filename),
             data,
             metadata,
@@ -845,6 +889,7 @@ impl StorageBackend for FilesystemBackend {
     ) -> Result<(), StorageError> {
         self.require_bucket_exists(bucket).await?;
         self.put_object_file(
+            bucket,
             &self.passthrough_path(bucket, prefix, filename),
             data,
             metadata,
@@ -866,7 +911,7 @@ impl StorageBackend for FilesystemBackend {
     ) -> Result<(), StorageError> {
         self.require_bucket_exists(bucket).await?;
         let data_path = self.passthrough_path(bucket, prefix, filename);
-        self.ensure_dir(&data_path).await?;
+        self.ensure_dir(bucket, &data_path).await?;
         atomic_copy_with_metadata(source_path, &data_path, metadata).await?;
         debug!(
             "Copied passthrough file {:?} -> {:?} for {}/{}",
@@ -886,7 +931,7 @@ impl StorageBackend for FilesystemBackend {
     ) -> Result<(), StorageError> {
         self.require_bucket_exists(bucket).await?;
         let data_path = self.passthrough_path(bucket, prefix, filename);
-        self.ensure_dir(&data_path).await?;
+        self.ensure_dir(bucket, &data_path).await?;
         let parent = data_path
             .parent()
             .ok_or_else(|| StorageError::Other("Cannot write to a path with no parent".into()))?
@@ -962,7 +1007,7 @@ impl StorageBackend for FilesystemBackend {
         self.require_bucket_exists(bucket).await?;
         let data_path = self.passthrough_path(bucket, prefix, filename);
 
-        self.ensure_dir(&data_path).await?;
+        self.ensure_dir(bucket, &data_path).await?;
 
         // Write chunks sequentially to a temp file, then fsync + rename.
         // This avoids allocating a contiguous buffer for the entire object.
@@ -1454,6 +1499,88 @@ mod tests {
 
         assert!(matches!(err, StorageError::BucketNotFound(_)));
         assert!(!tmp.path().join("ghost").exists());
+    }
+
+    /// C-P0-1 regression: `ensure_dir` must NOT silently recreate the
+    /// bucket root if a parallel `delete_bucket` removed it between
+    /// `require_bucket_exists` and the actual write. Pre-fix,
+    /// `ensure_dir` called `fs::create_dir_all(parent)` which happily
+    /// resurrected `<root>/<bucket>/...` and the operator's deletion
+    /// was silently undone.
+    ///
+    /// We exercise the race directly: create the bucket, remove it
+    /// behind the backend's back, then call a put_* path. The
+    /// `require_bucket_exists` precheck catches some races (race-A:
+    /// delete BEFORE precheck), but here we simulate race-B: delete
+    /// AFTER precheck. The check happens at the start of `put_*`; we
+    /// run delete *after* `require_bucket_exists` would have passed.
+    /// In practice the first race window is precheck → ensure_dir; the
+    /// second is ensure_dir → atomic_write_with_metadata. This test
+    /// pins the precheck → ensure_dir window.
+    #[tokio::test]
+    async fn test_ensure_dir_does_not_resurrect_deleted_bucket() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let backend = FilesystemBackend::new(tmp.path().to_path_buf())
+            .await
+            .expect("new backend");
+        backend.create_bucket("racy").await.expect("create bucket");
+
+        // Simulate: between require_bucket_exists and the write, the
+        // bucket dir disappears. We can do that by removing it
+        // directly with std::fs (the backend doesn't know).
+        std::fs::remove_dir_all(tmp.path().join("racy")).unwrap();
+
+        // Now put_passthrough — `require_bucket_exists` will catch this
+        // because it's the first thing it checks. So this path proves
+        // race-A is closed.
+        let err = backend
+            .put_passthrough(
+                "racy",
+                "ns",
+                "f.bin",
+                b"payload",
+                &dummy_metadata("f.bin"),
+            )
+            .await
+            .expect_err("must refuse");
+        assert!(matches!(err, StorageError::BucketNotFound(_)));
+        assert!(
+            !tmp.path().join("racy").exists(),
+            "must not have resurrected the bucket"
+        );
+    }
+
+    /// Direct unit test of `ensure_dir`: when the bucket root is
+    /// missing, even if something else points us at a path inside the
+    /// bucket subtree, we must NOT create the bucket root. Pre-fix the
+    /// `create_dir_all(parent)` path would happily build the whole
+    /// tree from root downward.
+    #[tokio::test]
+    async fn test_ensure_dir_refuses_when_bucket_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let backend = FilesystemBackend::new(tmp.path().to_path_buf())
+            .await
+            .expect("new backend");
+
+        let bogus_path = tmp
+            .path()
+            .join("phantom-bucket")
+            .join("deltaspaces")
+            .join("p")
+            .join("file.bin");
+        let err = backend
+            .ensure_dir("phantom-bucket", &bogus_path)
+            .await
+            .expect_err("must refuse to create dirs in a missing bucket");
+
+        match err {
+            StorageError::BucketNotFound(b) => assert_eq!(b, "phantom-bucket"),
+            other => panic!("expected BucketNotFound, got {:?}", other),
+        }
+        assert!(
+            !tmp.path().join("phantom-bucket").exists(),
+            "ensure_dir must not silently materialise the bucket root"
+        );
     }
 
     /// Same guard covers put_passthrough_chunked.

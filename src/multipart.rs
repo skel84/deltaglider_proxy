@@ -721,9 +721,35 @@ impl MultipartStore {
     ///
     /// Used by DeleteBucket when the bucket has no visible objects:
     /// MPU state is internal residue and should not block deletion.
-    pub fn purge_uploads_for_bucket(&self, bucket: &str) -> usize {
+    ///
+    /// **Refuses** if any upload is in `Completing` state. A
+    /// `Completing` upload is mid-flight on `engine.store_*` and holds
+    /// borrowed buffers / relay-dir paths that the handler is still
+    /// reading; tearing those down here while the storage write is
+    /// in-progress causes a P0-class race (the storage layer's
+    /// `create_dir_all` silently recreates the bucket inside the
+    /// just-deleted directory tree). The operator gets a clean
+    /// `BucketNotEmpty` error and can retry once the multipart
+    /// finalises (typically seconds).
+    ///
+    /// On success: returns the number of `Open` uploads purged.
+    /// On refusal: returns `Err(count_completing)` — never partially
+    /// purges so the caller's bookkeeping is all-or-nothing.
+    pub fn purge_uploads_for_bucket(&self, bucket: &str) -> Result<usize, usize> {
+        // Collect `Open` uploads under the write lock; refuse and
+        // release the lock if any `Completing` upload is targeting
+        // this bucket. Atomic check-and-purge.
         let removed: Vec<MultipartUpload> = {
             let mut uploads = self.uploads.write();
+
+            let completing_count = uploads
+                .values()
+                .filter(|u| u.bucket == bucket && u.state == MultipartState::Completing)
+                .count();
+            if completing_count > 0 {
+                return Err(completing_count);
+            }
+
             let mut removed = Vec::new();
             uploads.retain(|_, u| {
                 if u.bucket == bucket {
@@ -741,7 +767,7 @@ impl MultipartStore {
             cleanup_relay_dir_for_upload(&upload);
         }
 
-        removed_count
+        Ok(removed_count)
     }
 
     /// List parts for an upload. Validates bucket+key match.
@@ -1389,6 +1415,79 @@ mod tests {
         assert_eq!(
             store.uploads.read().get(&upload_id).unwrap().state,
             MultipartState::Completing
+        );
+    }
+
+    /// C-P0-1 regression: `purge_uploads_for_bucket` must NOT remove
+    /// uploads that are in `Completing` state. Doing so would tear down
+    /// state that the in-flight `engine.store_*` handler still has
+    /// borrowed paths/buffers for; the storage layer's `create_dir_all`
+    /// would then race to resurrect a bucket the operator just deleted.
+    ///
+    /// Pre-fix: `purge_uploads_for_bucket` silently removed Completing
+    /// uploads and returned a usize. Post-fix: it returns
+    /// `Err(count_completing)` when any Completing upload targets the
+    /// bucket; `delete_bucket` translates that to `BucketNotEmpty`.
+    #[test]
+    fn test_purge_for_bucket_refuses_when_completing() {
+        let store = MultipartStore::new(100 * 1024 * 1024);
+
+        // One Open upload in `bucket-a` — would be safe to purge alone.
+        let _ = seed_upload(&store); // bucket="bucket", key="key.bin"
+
+        // Second upload, drive it into Completing.
+        let upload_b = store
+            .create("bucket", "other.bin", None, HashMap::new())
+            .unwrap();
+        store
+            .upload_part(&upload_b, "bucket", "other.bin", 1, Bytes::from_static(b"x"))
+            .unwrap();
+        let etag = {
+            let u = store.uploads.read();
+            let p = u.get(&upload_b).unwrap().parts.get(&1).unwrap();
+            format!("\"{}\"", p.md5_hex)
+        };
+        store
+            .complete(&upload_b, "bucket", "other.bin", &[(1, etag)])
+            .unwrap();
+        assert_eq!(
+            store.uploads.read().get(&upload_b).unwrap().state,
+            MultipartState::Completing,
+            "second upload should be Completing"
+        );
+
+        // Purge must refuse, with the count of Completing uploads as
+        // the error payload. Nothing must be removed (all-or-nothing).
+        let result = store.purge_uploads_for_bucket("bucket");
+        assert_eq!(result, Err(1), "must refuse with completing count");
+        assert_eq!(
+            store.uploads.read().len(),
+            2,
+            "must not have partially purged"
+        );
+    }
+
+    /// Sister test: when ALL uploads for the bucket are `Open`, purge
+    /// proceeds and returns the count purged. Sanity check that the new
+    /// signature didn't break the happy path.
+    #[test]
+    fn test_purge_for_bucket_proceeds_when_all_open() {
+        let store = MultipartStore::new(100 * 1024 * 1024);
+        let _ = seed_upload(&store);
+        let _ = store
+            .create("bucket", "other.bin", None, HashMap::new())
+            .unwrap();
+        // Different bucket — must NOT be purged.
+        let _ = store
+            .create("other-bucket", "elsewhere.bin", None, HashMap::new())
+            .unwrap();
+
+        let result = store.purge_uploads_for_bucket("bucket");
+        assert_eq!(result, Ok(2), "purges Open uploads in target bucket");
+        assert_eq!(
+            store.uploads.read().len(),
+            1,
+            "leaves the other-bucket upload alone"
         );
     }
 

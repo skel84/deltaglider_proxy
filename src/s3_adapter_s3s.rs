@@ -456,13 +456,26 @@ impl s3s::S3 for DeltaGliderS3Service {
 
         // For object-empty buckets, MPU state is internal residue: purge it
         // deterministically so deletion is self-healing and frictionless.
+        //
+        // C-P0-1 (mirror of axum handler): refuse while any upload is
+        // `Completing` so we don't tear down state the in-flight
+        // `engine.store_*` is still holding borrowed paths for.
         if mpu_count > 0 {
-            let purged = self.state.multipart.purge_uploads_for_bucket(&bucket);
-            tracing::info!(
-                "DELETE bucket {} purged {} multipart upload residues before deletion",
-                bucket,
-                purged
-            );
+            match self.state.multipart.purge_uploads_for_bucket(&bucket) {
+                Ok(purged) => tracing::info!(
+                    "DELETE bucket {} purged {} multipart upload residues before deletion",
+                    bucket,
+                    purged
+                ),
+                Err(completing) => {
+                    return Err(s3s::s3_error!(
+                        BucketNotEmpty,
+                        "{} (blocked: {} multipart upload(s) finalising; retry in a few seconds)",
+                        bucket,
+                        completing
+                    ));
+                }
+            }
         }
 
         engine
