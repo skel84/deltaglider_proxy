@@ -1,0 +1,16 @@
+---
+description: After demo/s3-browser/ui React changes, rebuild embedded dist and restart proxy for user testing
+alwaysApply: true
+---
+
+# Embedded UI — rebuild + restart for manual testing
+
+When **any** file under `demo/s3-browser/ui/src/` (or UI build inputs) changes and the user is iterating or will test in the browser against the **embedded** `/_/` app (rust-embed), the agent must **by default**:
+
+1. `cd demo/s3-browser/ui && npm run build`
+2. `cargo build --release` from the **repository root** (embeds `demo/s3-browser/ui/dist/`)
+3. **Restart** the local `deltaglider_proxy` process the user uses (e.g. stop listener on their port, then start again with their `DGP_CONFIG`).
+
+If the user’s config path or port is unknown, use their last stated values (e.g. `DGP_CONFIG=/tmp/dgp-local-launch.yaml`, `127.0.0.1:9000`); otherwise ask once, then remember.
+
+Do **not** end a UI-fix turn with only `npm run build` or only `cargo build` — the running binary must be restarted so the embedded `dist/` is actually served.
