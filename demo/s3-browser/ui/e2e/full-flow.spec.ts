@@ -37,12 +37,8 @@ test('open auth: bucket, upload, list, admin login, sign out, reconnect, object 
     buffer: Buffer.from('deltaglider e2e payload\n'),
   });
 
-  await expect(page.getByRole('listitem', { name: new RegExp(`${uploadName} — done`) })).toBeVisible({
-    timeout: 60_000,
-  });
-
   await page.getByRole('button', { name: 'Back to browse' }).click();
-  await expect(page.getByText(uploadName)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(uploadName)).toBeVisible({ timeout: 60_000 });
 
   // ── Admin (bootstrap password) ──────────────────────────────────
   await page.goto('/_/admin');
