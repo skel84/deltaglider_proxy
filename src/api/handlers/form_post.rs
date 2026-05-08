@@ -117,16 +117,38 @@ fn lookup_form_field<'a>(fields_ci: &'a HashMap<String, String>, name: &str) -> 
         .map(std::string::String::as_str)
 }
 
+/// Canned ACL values whose semantics match this proxy's default
+/// (single-tenant, owner-only access). Accepting them lets clients that
+/// auto-include `acl=private` (boto3 default, common SDK builders)
+/// succeed without surprising rejections — same as we silently ignore
+/// `x-amz-acl: private` on regular PUT object operations.
+///
+/// `bucket-owner-*` variants only matter in cross-account scenarios;
+/// in a single-tenant proxy they're effectively no-ops.
+fn is_compatible_canned_acl(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "private" | "bucket-owner-full-control" | "bucket-owner-read"
+    )
+}
+
 fn ensure_supported_form_fields(fields_ci: &HashMap<String, String>) -> Result<(), S3Error> {
     if lookup_form_field(fields_ci, "x-amz-security-token").is_some() {
         return Err(S3Error::NotImplemented(
             "POST form uploads with x-amz-security-token are not supported".into(),
         ));
     }
-    if lookup_form_field(fields_ci, "acl").is_some() {
-        return Err(S3Error::NotImplemented(
-            "POST form upload ACL overrides are not supported".into(),
-        ));
+    // ACL: accept canned values that match our default (private, bucket-owner-*).
+    // Reject public-grant variants (public-read, public-read-write, authenticated-read)
+    // because silently accepting them would be a security lie — the proxy doesn't
+    // grant non-owner access via canned ACLs.
+    if let Some(acl) = lookup_form_field(fields_ci, "acl") {
+        if !is_compatible_canned_acl(acl) {
+            return Err(S3Error::NotImplemented(format!(
+                "POST form upload acl='{}' is not supported (only 'private' and 'bucket-owner-*' canned ACLs are accepted)",
+                acl
+            )));
+        }
     }
     if lookup_form_field(fields_ci, "success_action_redirect").is_some() {
         return Err(S3Error::NotImplemented(
@@ -267,9 +289,25 @@ fn validate_form_post_policy(
                         }
                     }
                     "acl" => {
-                        return Err(S3Error::NotImplemented(
-                            "POST form upload ACL policy conditions are not supported".into(),
-                        ));
+                        // Mirror ensure_supported_form_fields: accept canned ACLs that
+                        // are compatible with our owner-only default. The policy
+                        // condition still has to match the form field (already
+                        // validated by the field check above), so the only thing
+                        // we need to add here is "is the policy-promised value one
+                        // we'd actually accept as a form field?"
+                        if !is_compatible_canned_acl(expected) {
+                            return Err(S3Error::NotImplemented(format!(
+                                "POST form upload acl policy condition '{}' is not supported (only 'private' and 'bucket-owner-*' canned ACLs are accepted)",
+                                expected
+                            )));
+                        }
+                        // The form field's acl value (if present) must match the
+                        // policy expectation — same exact-match semantics as
+                        // bucket/key/content-type above.
+                        let actual = lookup_form_field(fields_ci, "acl").unwrap_or_default();
+                        if actual != expected {
+                            return Err(S3Error::AccessDenied);
+                        }
                     }
                     x if x.starts_with("x-amz-meta-")
                         || x == "x-amz-algorithm"
@@ -632,4 +670,114 @@ pub(super) async fn handle_form_post_upload(
         "",
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pure-function truth table for the canned-ACL compatibility check.
+    /// Boto3 default is `acl=private`; many SDK presigned-POST builders
+    /// auto-include it. Accepting it (and the bucket-owner-* variants
+    /// that are no-ops in single-tenant) keeps regular SDK usage working
+    /// without surprise 501s. Rejecting public-grant variants prevents
+    /// the proxy from silently lying about object visibility.
+    #[test]
+    fn canned_acl_compat_truth_table() {
+        // Accepted — match owner-only default.
+        for ok in [
+            "private",
+            "PRIVATE",
+            "Private",
+            " private ",
+            "bucket-owner-full-control",
+            "bucket-owner-read",
+            "BUCKET-OWNER-FULL-CONTROL",
+        ] {
+            assert!(
+                is_compatible_canned_acl(ok),
+                "expected '{}' to be compatible",
+                ok
+            );
+        }
+        // Rejected — would imply non-owner access we can't grant.
+        for bad in [
+            "public-read",
+            "public-read-write",
+            "authenticated-read",
+            "log-delivery-write",
+            "aws-exec-read",
+            "",
+            "garbage",
+        ] {
+            assert!(
+                !is_compatible_canned_acl(bad),
+                "expected '{}' to be rejected",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_supported_form_fields_accepts_private_acl() {
+        let mut fields = HashMap::new();
+        fields.insert("acl".to_string(), "private".to_string());
+        ensure_supported_form_fields(&fields).expect("acl=private should be accepted");
+
+        let mut fields = HashMap::new();
+        fields.insert("acl".to_string(), "bucket-owner-full-control".to_string());
+        ensure_supported_form_fields(&fields)
+            .expect("acl=bucket-owner-full-control should be accepted");
+
+        // No acl field at all — also fine.
+        let fields = HashMap::new();
+        ensure_supported_form_fields(&fields).expect("missing acl should be accepted");
+    }
+
+    #[test]
+    fn ensure_supported_form_fields_rejects_public_acl() {
+        let mut fields = HashMap::new();
+        fields.insert("acl".to_string(), "public-read".to_string());
+        let err =
+            ensure_supported_form_fields(&fields).expect_err("acl=public-read must be rejected");
+        match err {
+            S3Error::NotImplemented(msg) => {
+                assert!(
+                    msg.contains("public-read"),
+                    "expected msg to cite the value, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected NotImplemented, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ensure_supported_form_fields_still_rejects_security_token() {
+        let mut fields = HashMap::new();
+        fields.insert("x-amz-security-token".to_string(), "tok".to_string());
+        match ensure_supported_form_fields(&fields) {
+            Err(S3Error::NotImplemented(_)) => {}
+            other => panic!(
+                "expected NotImplemented for security-token, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn ensure_supported_form_fields_still_rejects_success_action_redirect() {
+        let mut fields = HashMap::new();
+        fields.insert(
+            "success_action_redirect".to_string(),
+            "https://example.com/done".to_string(),
+        );
+        match ensure_supported_form_fields(&fields) {
+            Err(S3Error::NotImplemented(_)) => {}
+            other => panic!(
+                "expected NotImplemented for success_action_redirect, got {:?}",
+                other
+            ),
+        }
+    }
 }

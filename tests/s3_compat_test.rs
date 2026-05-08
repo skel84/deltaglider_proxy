@@ -2436,6 +2436,151 @@ async fn test_form_post_upload_rejects_invalid_signature() {
     );
 }
 
+/// Browser presigned-POST builders (boto3, minio-js, aws-amplify)
+/// auto-include `acl=private` when the user constructs a presigned-POST
+/// without explicitly opting out. Pre-fix this returned 501
+/// NotImplemented; we now silently accept it because the value matches
+/// our owner-only default — same semantics as `x-amz-acl: private` on
+/// regular PUT (header silently ignored).
+#[tokio::test]
+async fn test_form_post_upload_accepts_private_acl() {
+    if using_s3s_adapter() {
+        eprintln!("skipping form POST compatibility test on s3s adapter");
+        return;
+    }
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let client = reqwest::Client::new();
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+    let key = "post/uploads/acl-private.txt";
+    let amz_date = "20260507T120000Z";
+    let credential = "POSTACCESSKEY/20260507/us-east-1/s3/aws4_request";
+    let policy = serde_json::json!({
+        "expiration": "2099-01-01T00:00:00.000Z",
+        "conditions": [
+            { "bucket": bucket },
+            ["starts-with", "$key", "post/uploads/"],
+            { "acl": "private" },
+            { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+            { "x-amz-credential": credential },
+            { "x-amz-date": amz_date },
+            ["content-length-range", 1, 1048576]
+        ]
+    });
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy.to_string());
+    let signing_key = derive_post_signing_key("POSTSECRETKEY123", "20260507", "us-east-1");
+    let signature = hex::encode(hmac_sha256(&signing_key, policy_b64.as_bytes()));
+    let form = reqwest::multipart::Form::new()
+        .text("key", key)
+        .text("acl", "private")
+        .text("policy", policy_b64)
+        .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+        .text("x-amz-credential", credential)
+        .text("x-amz-date", amz_date)
+        .text("x-amz-signature", signature)
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"hello-acl-private".to_vec())
+                .file_name("acl-private.txt")
+                .mime_str("text/plain")
+                .unwrap(),
+        );
+    let resp = client
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "POST form upload with acl=private should return 204, got {}: {}",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+
+    // Confirm the object actually landed.
+    let s3 = server.s3_client().await;
+    let got = s3
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .expect("GET uploaded object");
+    let body = got.body.collect().await.expect("collect body").into_bytes();
+    assert_eq!(body.as_ref(), b"hello-acl-private");
+}
+
+/// Public-grant ACL variants are still rejected with 501 — silently
+/// accepting them would lie about the object's visibility.
+#[tokio::test]
+async fn test_form_post_upload_rejects_public_read_acl() {
+    if using_s3s_adapter() {
+        eprintln!("skipping form POST compatibility test on s3s adapter");
+        return;
+    }
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let client = reqwest::Client::new();
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+    let amz_date = "20260507T120000Z";
+    let credential = "POSTACCESSKEY/20260507/us-east-1/s3/aws4_request";
+    let policy = serde_json::json!({
+        "expiration": "2099-01-01T00:00:00.000Z",
+        "conditions": [
+            { "bucket": bucket },
+            ["starts-with", "$key", "post/uploads/"],
+            { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+            { "x-amz-credential": credential },
+            { "x-amz-date": amz_date },
+            ["content-length-range", 1, 1048576]
+        ]
+    });
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy.to_string());
+    let signing_key = derive_post_signing_key("POSTSECRETKEY123", "20260507", "us-east-1");
+    let signature = hex::encode(hmac_sha256(&signing_key, policy_b64.as_bytes()));
+    let form = reqwest::multipart::Form::new()
+        .text("key", "post/uploads/public.txt")
+        .text("acl", "public-read")
+        .text("policy", policy_b64)
+        .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+        .text("x-amz-credential", credential)
+        .text("x-amz-date", amz_date)
+        .text("x-amz-signature", signature)
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"public".to_vec())
+                .file_name("public.txt")
+                .mime_str("text/plain")
+                .unwrap(),
+        );
+    let resp = client
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        501,
+        "POST form upload with acl=public-read should return 501, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("public-read"),
+        "501 body should cite the rejected value, got: {}",
+        body
+    );
+}
+
 // ============================================================================
 // Tagging / versioning stubs
 //

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Form-POST upload rejected `acl=private`.** Browser presigned-POST
+  builders (boto3, minio-js, aws-amplify) auto-include `acl=private`
+  when the user constructs a presigned-POST without explicitly opting
+  out. Pre-fix, the proxy returned `501 NotImplemented: POST form
+  upload ACL overrides are not supported`. Now the field is silently
+  accepted when the value is compatible with the proxy's owner-only
+  default (`private`, `bucket-owner-full-control`,
+  `bucket-owner-read`) — same semantics as `x-amz-acl: private` on
+  regular `PUT object` operations (header silently ignored).
+  Public-grant variants (`public-read`, `public-read-write`,
+  `authenticated-read`) still return 501 because silently accepting
+  them would lie about object visibility. Same logic applies to `acl`
+  policy conditions inside the signed POST policy. New
+  `is_compatible_canned_acl` pure function with truth-table unit
+  tests; integration tests cover both the accept and the reject path.
+
 ## v0.9.17 — 2026-05-07
 
 ## v0.9.16 — 2026-05-07
