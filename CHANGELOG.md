@@ -2,26 +2,47 @@
 
 ## Unreleased
 
+### Documented
+
+- **Reverse-proxy read-timeout requirement** for large uploads.
+  Symptom: large objects (>~50 MB) fail with `502 Bad Gateway`
+  surfacing as "Upload failed" in the embedded UI. Root cause:
+  Traefik 3.x defaults `respondingTimeouts.readTimeout` to **60 s**,
+  killing the body-read mid-upload. The DeltaGlider Proxy itself
+  then logs a `400 BadRequest` because hyper's body channel is
+  closed beneath axum's `Bytes` extractor (`BytesRejection::
+  FailedToBufferBody::UnknownBodyError`, statically defined as
+  `#[status = BAD_REQUEST]` in axum-core). Reproduced locally:
+  default Traefik 3.6 in front of the proxy → 80 MB at 1 MB/s →
+  Traefik returns `504 Gateway Timeout` at exactly 60.7 s. Fix:
+  set `entryPoints.<name>.transport.respondingTimeouts.readTimeout`
+  to `30m` (or `0` for no limit). For Coolify users: edit
+  `/data/coolify/proxy/docker-compose.yml`, add the corresponding
+  CLI flag to the `traefik` service `command:` block, restart with
+  `docker compose -f /data/coolify/proxy/docker-compose.yml up -d`.
+  Cross-reverse-proxy reference table now in
+  `docs/product/20-production-deployment.md` (Traefik, Caddy,
+  nginx, AWS ALB, HAProxy).
+
 ### Mitigations
 
 - **Embedded uploader: cap concurrent files at 1.** Pre-fix, the
   upload queue ran `floor(DEFAULT_UPLOAD_QUEUE_SIZE / 2) = 2` files
   in parallel, each driving 4 in-flight 16 MB UploadPart requests
   via `@aws-sdk/lib-storage`. Two large files queued together
-  produced 8 × 16 MB = 128 MB of concurrent body data hitting the
-  proxy + reverse-proxy ingress; on prod (Coolify behind Caddy) this
-  consistently triggered a 60 s body-read timeout that returned
-  `400 BadRequest` from the proxy and surfaced as `502 Bad Gateway`
-  to the browser via Caddy. Solo uploads of equivalent or larger
-  files succeeded fine — proven by a `dg-160mb.bin` upload that
-  completed all 10 parts at ~43 s each in the same window where
-  `Warp.dmg` (294 MB) and `bonsai-1.7b-ternary-M4Max.tar.xz` (358 MB)
-  failed every part at exactly 60 000 ms (Coolify logs,
-  2026-05-08 ~20:34 UTC). Setting `maxConcurrentFiles = 1` keeps
-  the per-file 4-part queue alone governing ingress pressure
-  (~64 MB peak) which has never failed. Root cause investigation
-  for the body-read timeout is ongoing; this is a UI-side mitigation
-  pending a proper proxy-side fix.
+  produced 8 × 16 MB = 128 MB of concurrent body data through the
+  reverse proxy, with each part's slice of the upload pipe
+  spread across more streams — making it more likely an individual
+  part exceeds the 60 s default Traefik read-timeout. Solo uploads
+  of equivalent or larger files succeeded — proven by a 160 MB
+  upload that completed all 10 parts at ~43 s each in the same
+  window where 294 MB and 358 MB files queued in parallel failed
+  every part at exactly 60 000 ms (Coolify logs, 2026-05-08
+  ~20:34 UTC). Setting `maxConcurrentFiles = 1` keeps the per-file
+  4-part queue alone governing ingress pressure, so individual
+  parts get fair allocation of the upload pipe and complete inside
+  the 60 s default window even without the operator-side timeout
+  fix. Belt-and-braces with the docs change above.
 
 ### Fixed
 

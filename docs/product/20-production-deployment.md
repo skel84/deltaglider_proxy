@@ -87,6 +87,57 @@ deltaglider_proxy:
 
 The UI (`/_/*`) and the S3 API (`/`) share the same port — route everything under `/` to the proxy; no per-path rules needed.
 
+### Reverse-proxy read-timeout — required for large uploads
+
+**Critical for objects > ~50 MB or any multipart upload.** Most reverse
+proxies default their request-read timeout to 60 seconds. A multipart
+`UploadPart` carrying a 16 MB chunk over a typical home upload link
+(2-5 MB/s, often shared between concurrent parts) takes longer than
+that, and the reverse proxy will close the upstream connection
+mid-body. The browser sees `502 Bad Gateway` (Traefik) or `504 Gateway
+Timeout`, and DeltaGlider Proxy logs a `400 BAD_REQUEST` because
+hyper's body channel got closed under axum's `Bytes` extractor.
+
+| Reverse proxy | Default | Setting | Recommended |
+|---|---|---|---|
+| **Traefik 3.x** | 60 s | `entryPoints.<name>.transport.respondingTimeouts.readTimeout` | `30m` or `0` (no limit) |
+| **Caddy 2.x** | 0 (no limit) | `read_timeout` in `servers` block | leave at default |
+| **nginx** | 60 s | `client_body_timeout` and `proxy_read_timeout` | `30m` |
+| **AWS ALB**  | 60 s `idle_timeout` | target-group attribute | `4000` (max) |
+| **HAProxy** | 60 s `timeout client` | global / frontend | `30m` |
+
+**Traefik 3.x example** (extend the `coolify-proxy` compose, or your own
+Traefik static config):
+
+```yaml
+# Static config (traefik.yml)
+entryPoints:
+  websecure:
+    address: ":443"
+    transport:
+      respondingTimeouts:
+        readTimeout: "30m"
+        writeTimeout: "30m"
+        idleTimeout: "180s"
+```
+
+…or as CLI flags on the Traefik container:
+
+```yaml
+command:
+  - '--entrypoints.websecure.transport.respondingTimeouts.readTimeout=30m'
+  - '--entrypoints.websecure.transport.respondingTimeouts.writeTimeout=30m'
+```
+
+**Coolify** users: edit `/data/coolify/proxy/docker-compose.yml`, add
+those flags to the `traefik` service `command:`, then
+`docker compose -f /data/coolify/proxy/docker-compose.yml up -d` to
+apply. The change is preserved across Coolify restarts.
+
+DeltaGlider Proxy's own request timeout (`DGP_REQUEST_TIMEOUT_SECS`)
+defaults to **300 s** and is unrelated to the reverse-proxy timer —
+both must be generous for large uploads to succeed.
+
 ## Health and observability
 
 Three always-on endpoints, exempt from SigV4 auth so monitoring systems can scrape them without credentials:

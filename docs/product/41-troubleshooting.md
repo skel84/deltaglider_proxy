@@ -51,6 +51,42 @@ The encryption key doesn't match the DB file. Usually:
 
 Recovery path: `POST /_/api/admin/recover-db` with the correct password. The endpoint is public but rate-limited.
 
+## 502 Bad Gateway / 504 Gateway Timeout on large uploads
+
+**Symptom:** Multipart uploads of files >50 MB fail with `502` (Traefik)
+or `504` (Caddy / nginx). The embedded UI shows "Upload object … failed
+(502): Gateway returned 502 Bad Gateway." The proxy logs show
+`tower_http::trace::on_response: finished processing request
+latency=60000 ms status=400` (latency is exactly 60 000 ms).
+
+**Cause:** Reverse-proxy default request read-timeout is **60 seconds**.
+A 16 MB multipart part over a typical home upload link (1–5 MB/s,
+shared between concurrent parts) takes longer than that. The reverse
+proxy closes the upstream connection mid-body; hyper raises a body-read
+error; axum's `Bytes` extractor returns `400 BAD_REQUEST` with body
+"Failed to buffer the request body"; the reverse proxy translates the
+broken upstream response into 502 / 504 to the client.
+
+**Fix:** extend the reverse-proxy read-timeout. Concrete examples in
+[Production deployment → Reverse-proxy read-timeout](20-production-deployment.md#reverse-proxy-read-timeout--required-for-large-uploads).
+
+For Coolify users specifically:
+
+```bash
+# On the Coolify host:
+sudo $EDITOR /data/coolify/proxy/docker-compose.yml
+# Add to the traefik service `command:` block:
+#   - '--entrypoints.https.transport.respondingTimeouts.readTimeout=30m'
+#   - '--entrypoints.https.transport.respondingTimeouts.writeTimeout=30m'
+sudo docker compose -f /data/coolify/proxy/docker-compose.yml up -d
+```
+
+**Quick mitigation without operator access:** the embedded uploader
+since v0.9.18 caps concurrent files at 1 so each part gets fair
+share of the upload pipe and completes within the 60 s default
+window for typical workloads. For very slow links or larger parts,
+the reverse-proxy timeout still has to be raised.
+
 ## 503 SlowDown on PUT
 
 The proxy doesn't generate 503 itself — this comes from the upstream S3 backend when it's throttling you. Two tuning knobs:
