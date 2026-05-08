@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Mitigations
+
+- **Embedded uploader: cap concurrent files at 1.** Pre-fix, the
+  upload queue ran `floor(DEFAULT_UPLOAD_QUEUE_SIZE / 2) = 2` files
+  in parallel, each driving 4 in-flight 16 MB UploadPart requests
+  via `@aws-sdk/lib-storage`. Two large files queued together
+  produced 8 × 16 MB = 128 MB of concurrent body data hitting the
+  proxy + reverse-proxy ingress; on prod (Coolify behind Caddy) this
+  consistently triggered a 60 s body-read timeout that returned
+  `400 BadRequest` from the proxy and surfaced as `502 Bad Gateway`
+  to the browser via Caddy. Solo uploads of equivalent or larger
+  files succeeded fine — proven by a `dg-160mb.bin` upload that
+  completed all 10 parts at ~43 s each in the same window where
+  `Warp.dmg` (294 MB) and `bonsai-1.7b-ternary-M4Max.tar.xz` (358 MB)
+  failed every part at exactly 60 000 ms (Coolify logs,
+  2026-05-08 ~20:34 UTC). Setting `maxConcurrentFiles = 1` keeps
+  the per-file 4-part queue alone governing ingress pressure
+  (~64 MB peak) which has never failed. Root cause investigation
+  for the body-read timeout is ongoing; this is a UI-side mitigation
+  pending a proper proxy-side fix.
+
 ### Fixed
 
 - **Form-POST upload rejected `acl=private`.** Browser presigned-POST

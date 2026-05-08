@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { uploadObject, type UploadTelemetry } from './s3client';
-import { clampPercent, DEFAULT_UPLOAD_QUEUE_SIZE, type UploadStatus } from './uploadTelemetry';
+import { clampPercent, type UploadStatus } from './uploadTelemetry';
 
 export interface UploadQueueItem {
   id: string;
@@ -35,7 +35,18 @@ export default function useUploadQueue(destination: string) {
   const [queue, setQueue] = useState<UploadQueueItem[]>([]);
   const activeUploadsRef = useRef(new Set<string>());
   const controllersRef = useRef(new Map<string, AbortController>());
-  const maxConcurrentFiles = Math.max(1, Math.floor(DEFAULT_UPLOAD_QUEUE_SIZE / 2));
+  // Upload one file at a time. With queueSize=4 parts per file, a single
+  // active file already drives ~64 MB of in-flight body buffering;
+  // running two files concurrently (8 × 16 MB = 128 MB of body data
+  // hitting the proxy + reverse-proxy ingress simultaneously) hit a
+  // 60 s 400 from somewhere in the body-buffering chain on prod (see
+  // prod logs at 2026-05-08 20:34 UTC, Warp.dmg + bonsai .tar.xz both
+  // failed every part at exactly 60 000 ms while a subsequent solo
+  // `dg-160mb.bin` upload — same proxy, same prefix — succeeded with
+  // all 10 parts at ~43 s each). Keep cross-file concurrency at 1
+  // until the root-cause investigation in the spawned task pins down
+  // the timer; per-file 4-part queue still governs throughput.
+  const maxConcurrentFiles = 1;
   const [tick, setTick] = useState(0);
 
   const toKey = useCallback((dest: string, file: File): string => {
