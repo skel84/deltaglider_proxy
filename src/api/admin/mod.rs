@@ -51,6 +51,9 @@ pub use config::{
     SectionApplyResponse, SyncNowResponse, TestS3Request, TestS3Response, TraceRequest,
     TraceResolved, TraceResponse,
 };
+pub use delta_efficiency::{
+    get_delta_efficiency, post_delta_efficiency_scan, DeltaEfficiencyScanner,
+};
 pub use event_outbox::{
     list as event_outbox_list, requeue_many as event_outbox_requeue_many,
     requeue_one as event_outbox_requeue_one, EventOutboxQuery, EventOutboxResponse,
@@ -73,9 +76,6 @@ pub use replication::{
     failures as replication_failures, history as replication_history,
     list_rules as replication_list_rules, pause as replication_pause, resume as replication_resume,
     run_now as replication_run_now,
-};
-pub use delta_efficiency::{
-    get_delta_efficiency, post_delta_efficiency_scan, DeltaEfficiencyScanner,
 };
 pub use scanner::{get_usage, migrate_legacy, scan_usage, ScanUsageRequest, UsageQuery};
 pub use users::{

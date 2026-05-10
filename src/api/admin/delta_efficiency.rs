@@ -470,7 +470,10 @@ pub async fn get_delta_efficiency(
         min_deltas,
         state.s3_state.clone(),
     );
-    let scanning = started || state.delta_efficiency_scanner.is_scanning(&q.bucket, min_deltas);
+    let scanning = started
+        || state
+            .delta_efficiency_scanner
+            .is_scanning(&q.bucket, min_deltas);
 
     (
         StatusCode::ACCEPTED,

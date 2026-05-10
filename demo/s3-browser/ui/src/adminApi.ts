@@ -1612,8 +1612,12 @@ export interface DeltaEfficiencyResponse {
  * 202 Accepted shape — server has enqueued (or already running) a
  * background scan. Caller should poll `fetchDeltaEfficiency` until it
  * returns the full `DeltaEfficiencyResponse`.
+ *
+ * Not exported: callers see this shape only via the function return
+ * types (`fetchDeltaEfficiency`, `triggerDeltaEfficiencyScan`) and use
+ * the `'scanning' in r` discriminator to branch.
  */
-export interface DeltaEfficiencyScanning {
+interface DeltaEfficiencyScanning {
   scanning: true;
   bucket: string;
   min_deltas: number;
@@ -1624,7 +1628,7 @@ export interface DeltaEfficiencyScanning {
  * Discriminated union: either a fresh/cached result, or a 202 saying
  * "we're working on it, poll again". Callers switch on `'scanning' in r`.
  */
-export type DeltaEfficiencyFetchResult = DeltaEfficiencyResponse | DeltaEfficiencyScanning;
+type DeltaEfficiencyFetchResult = DeltaEfficiencyResponse | DeltaEfficiencyScanning;
 
 /**
  * Scan one bucket's deltaspaces and surface those whose reference
