@@ -36,6 +36,7 @@ import LifecyclePanel from './LifecyclePanel';
 import SetupWizard from './SetupWizard';
 import TracePanel from './TracePanel';
 import AuditLogPanel from './AuditLogPanel';
+import DeltaEfficiencyPanel from './DeltaEfficiencyPanel';
 import EventOutboxPanel from './EventOutboxPanel';
 import RecoveryPanel from './RecoveryPanel';
 import CommandPalette, {
@@ -61,7 +62,7 @@ import {
 import { useNavigation } from '../NavigationContext';
 import TabHeader from './TabHeader';
 import { YamlImportExportModal } from './YamlImportExportModal';
-import { FileTextOutlined } from '@ant-design/icons';
+import { FileTextOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useDirtyGlobalIndicators, requestApplyCurrent } from '../useDirtySection';
 import type { SectionName } from '../adminApi';
 import type { AccountMenuConfigProps } from './AccountMenu';
@@ -173,6 +174,11 @@ const PAGE_HEADERS: Record<string, { icon: React.ReactNode; title: string; descr
     icon: <FileTextOutlined />,
     title: 'Audit log',
     description: 'Recent authentication + mutation events from this process (in-memory ring, default 500 entries). Stdout remains authoritative for long-term audit.',
+  },
+  'diagnostics/delta-efficiency': {
+    icon: <ThunderboltOutlined />,
+    title: 'Delta efficiency',
+    description: "Scan a bucket's deltaspaces and surface prefixes where the chosen reference baseline is producing too-large deltas — the v0.9.17 1.70.0-pre5 incident shape. Read-only; the operator decides what to re-upload.",
   },
   'diagnostics/event-outbox': {
     icon: <DatabaseOutlined />,
@@ -650,6 +656,14 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         <>
           {header}
           <AuditLogPanel onSessionExpired={onSessionExpired} />
+        </>
+      );
+    }
+    if (adminPath === 'diagnostics/delta-efficiency') {
+      return (
+        <>
+          {header}
+          <DeltaEfficiencyPanel onSessionExpired={onSessionExpired} />
         </>
       );
     }

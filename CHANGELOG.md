@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Added
+
+- **Delta efficiency diagnostics panel** at
+  `/_/admin/diagnostics/delta-efficiency`. Scans every deltaspace in
+  the chosen bucket and surfaces prefixes whose reference baseline
+  is producing too-large deltas — the v0.9.17 incident shape where
+  `s3://beshu/ror/builds/1.70.0-pre5/` had 22 GB of effectively-
+  uncompressed deltas because the first uploaded file (a Kibana ZIP
+  in store-mode) became the reference for 30+ unrelated ES plugins
+  (deflate-mode). Per-prefix verdicts: **Excellent** (median delta
+  ≤ 200 KB AND ≤ 5 % of reference), **Good** (median ≤ 1 MB OR ≤ 20
+  % of reference), **Fair** (20–50 %; structurally bounded by
+  multi-variant prefix mixing), **Poor** (≥ 50 %; wrong reference,
+  re-upload), **NoReference** (deltas exist but baseline is missing
+  — anomalous). Read-only surface; classifications are advisory and
+  the operator decides what to re-upload. Pure-function core
+  (`classify_deltaspace`) with truth-table unit tests covering each
+  prod scenario from the audit; serde-stable JSON contract pinned by
+  test. New `GET /_/api/admin/diagnostics/delta-efficiency?bucket=X
+  &min_deltas=N` admin API endpoint.
+
 ### Documented
 
 - **Reverse-proxy read-timeout requirement** for large uploads.

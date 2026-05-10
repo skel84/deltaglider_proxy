@@ -5,6 +5,7 @@ mod auth;
 pub(crate) mod backends;
 mod backup;
 mod config;
+mod delta_efficiency;
 mod event_outbox;
 pub mod external_auth;
 mod groups;
@@ -73,6 +74,7 @@ pub use replication::{
     list_rules as replication_list_rules, pause as replication_pause, resume as replication_resume,
     run_now as replication_run_now,
 };
+pub use delta_efficiency::get_delta_efficiency;
 pub use scanner::{get_usage, migrate_legacy, scan_usage, ScanUsageRequest, UsageQuery};
 pub use users::{
     clone_user, create_user, delete_user, get_canned_policies, iam_version, list_users,

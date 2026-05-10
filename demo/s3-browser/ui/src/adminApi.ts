@@ -1572,3 +1572,56 @@ export function bulkZipDownloadUrl(bucketKeys: string[]): string {
   const qs = new URLSearchParams({ keys: bucketKeys.join(',') });
   return `${BASE}/api/admin/objects/zip?${qs.toString()}`;
 }
+
+// ─────────────────────────────────────────────────────────────
+// Delta efficiency diagnostics
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Coarse health classification for a single deltaspace, mirroring the
+ * server-side `Efficiency` enum in `src/api/admin/delta_efficiency.rs`.
+ */
+export type DeltaEfficiency = 'excellent' | 'good' | 'fair' | 'poor' | 'no_reference';
+
+export interface DeltaspaceEfficiencyReport {
+  bucket: string;
+  prefix: string;
+  deltas: number;
+  passthrough: number;
+  reference_bytes: number | null;
+  total_delta_bytes: number;
+  total_original_bytes: number;
+  median_delta_bytes: number;
+  max_delta_bytes: number;
+  savings_bytes: number;
+  efficiency: DeltaEfficiency;
+  explanation: string;
+}
+
+export interface DeltaEfficiencyResponse {
+  bucket: string;
+  scanned_deltaspaces: number;
+  reported_deltaspaces: number;
+  min_deltas: number;
+  reports: DeltaspaceEfficiencyReport[];
+}
+
+/**
+ * Scan one bucket's deltaspaces and surface those whose reference
+ * baseline produces too-large deltas. Cost: list-deltaspaces + one
+ * scan_deltaspace per prefix; fine for O(100) prefixes, slow for
+ * thousands. Synchronous from the caller's view — the server may
+ * take seconds.
+ */
+export async function fetchDeltaEfficiency(
+  bucket: string,
+  minDeltas = 3,
+): Promise<DeltaEfficiencyResponse> {
+  const qs = new URLSearchParams({
+    bucket,
+    min_deltas: String(minDeltas),
+  });
+  const res = await adminFetch(`/api/admin/diagnostics/delta-efficiency?${qs.toString()}`);
+  if (!res.ok) await throwApiError(res, 'Delta efficiency fetch');
+  return safeJson(res);
+}

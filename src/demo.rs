@@ -188,6 +188,13 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         // Usage scanner
         .route("/_/api/admin/usage/scan", post(admin::scan_usage))
         .route("/_/api/admin/usage", get(admin::get_usage))
+        // Delta-efficiency diagnostics: scan a bucket's deltaspaces and
+        // surface prefixes whose reference baseline is producing
+        // too-large deltas (the v0.9.17 1.70.0-pre5 incident shape).
+        .route(
+            "/_/api/admin/diagnostics/delta-efficiency",
+            get(admin::get_delta_efficiency),
+        )
         // Audit log viewer — recent ring of structured audit entries.
         // Read-only; no corresponding mutation route. Session-gated
         // via the surrounding `require_session` layer. Not IAM-gated

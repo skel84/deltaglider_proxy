@@ -13,6 +13,7 @@ import {
   ClockCircleOutlined,
   LockOutlined,
   SettingOutlined,
+  ThunderboltOutlined,
   SyncOutlined,
 } from '@ant-design/icons';
 import type { ReactNode } from 'react';
@@ -59,6 +60,16 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
         path: 'diagnostics/audit',
         label: 'Audit log',
         icon: <FileTextOutlined />,
+      },
+      {
+        // v0.9.18: per-deltaspace efficiency report. Backs onto
+        // the GET /_/api/admin/diagnostics/delta-efficiency
+        // endpoint. Surfaces prefixes whose reference baseline
+        // produces too-large deltas (the v0.9.17 1.70.0-pre5
+        // incident shape).
+        path: 'diagnostics/delta-efficiency',
+        label: 'Delta efficiency',
+        icon: <ThunderboltOutlined />,
       },
       {
         path: 'diagnostics/event-outbox',
