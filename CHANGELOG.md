@@ -20,8 +20,13 @@
   the operator decides what to re-upload. Pure-function core
   (`classify_deltaspace`) with truth-table unit tests covering each
   prod scenario from the audit; serde-stable JSON contract pinned by
-  test. New `GET /_/api/admin/diagnostics/delta-efficiency?bucket=X
-  &min_deltas=N` admin API endpoint.
+  test. Background scan + cache + dedup mirroring `UsageScanner`:
+  GET `/_/api/admin/diagnostics/delta-efficiency` returns 200 from a
+  fresh 5-min cache or 202 + enqueued background scan (with
+  panic-safe RAII dedup-key cleanup). POST `…/scan` forces a
+  re-scan. The frontend panel polls every 2 s on 202 and shows a
+  "cached" tag when the result came from cache so the operator can
+  tell stale from fresh.
 
 ### Documented
 

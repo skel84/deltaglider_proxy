@@ -9,31 +9,53 @@
 //! for ≈ 99.99 % size of original. Re-uploading via the proxy with a
 //! sensible seed brought it from 22 GB → 569 MB (−97.4 %).
 //!
-//! This module surfaces such cases proactively: it scans the
-//! deltaspaces in a bucket, computes per-prefix size statistics, and
-//! classifies each prefix into a coarse health bucket so the operator
-//! can see and act before the bill grows.
+//! This module surfaces such cases proactively: on demand it walks
+//! the deltaspaces in a bucket, computes per-prefix size statistics,
+//! and classifies each prefix into a coarse health bucket.
+//!
+//! ## Concurrency model
+//!
+//! Mirrors [`crate::usage_scanner::UsageScanner`] — same
+//! background-task + cache + dedup shape so an operator clicking
+//! "Scan" doesn't accidentally fan out a dozen parallel scans on a
+//! flaky page-reload, and so a fresh page-load on a previously
+//! scanned bucket gets an instant answer from cache.
+//!
+//! - [`DeltaEfficiencyScanner::get`]: read cached result for a
+//!   `(bucket, min_deltas)` pair if present and not stale.
+//! - [`DeltaEfficiencyScanner::is_scanning`]: tell the UI whether to
+//!   poll vs. show empty-state.
+//! - [`DeltaEfficiencyScanner::enqueue_scan`]: spawn a background
+//!   scan if not already running. RAII-cleaned dedup key (panic-safe,
+//!   same fix as `usage_scanner::ScanInProgressGuard`).
 //!
 //! ## Pure-function core
 //!
 //! [`classify_deltaspace`] takes only `(reference_size, &[delta_size])`
-//! and returns an [`Efficiency`] verdict. No I/O, fully unit-testable.
-//! [`scan_bucket_efficiency`] is the I/O layer that walks
-//! `list_deltaspaces` × `scan_deltaspace` and feeds the pure classifier.
+//! and returns an [`Efficiency`] verdict. No I/O, fully unit-testable
+//! against a truth table of real prod scenarios.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tracing::{debug, warn};
 
 use super::AdminState;
+use crate::api::handlers::AppState;
 use crate::types::StorageInfo;
+
+/// Cache TTL — five minutes mirrors `UsageScanner` so an operator
+/// reloading the diagnostics tab doesn't kick off duplicate work.
+const CACHE_TTL_SECS: i64 = 300;
 
 // ─── Pure-function core ──────────────────────────────────────────────
 
 /// Coarse health classification for a single deltaspace.
 ///
-/// Thresholds chosen empirically from the prod audit
-/// (`docs/dev/delta-efficiency.md` if/when written):
+/// Thresholds chosen empirically from the prod audit:
 ///
 /// * **Excellent**: median delta ≤ 200 KB AND ≤ 5 % of reference. The
 ///   reference is well-chosen and most siblings are close-cousins.
@@ -138,7 +160,7 @@ fn median_u64(values: &[u64]) -> u64 {
     sorted[sorted.len() / 2]
 }
 
-// ─── I/O layer ───────────────────────────────────────────────────────
+// ─── I/O layer: types ─────────────────────────────────────────────────
 
 /// Per-prefix efficiency report row, returned over the admin API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,117 +190,247 @@ pub struct EfficiencyResponse {
     pub reported_deltaspaces: usize,
     pub min_deltas: usize,
     pub reports: Vec<DeltaspaceReport>,
+    /// When this scan was completed. The frontend uses this to render
+    /// "scanned 2m ago" so the operator knows whether the data is fresh.
+    pub computed_at: DateTime<Utc>,
+    /// True when this response was served from cache rather than freshly
+    /// computed. Lets the UI render a "cached — re-scan?" affordance.
+    #[serde(default)]
+    pub cached: bool,
 }
 
-/// Walk every deltaspace in `bucket` and return per-prefix efficiency
-/// reports for those that have at least `min_deltas` delta files.
-///
-/// Cost: one `list_deltaspaces` call + one `scan_deltaspace` per
-/// prefix. Each `scan_deltaspace` is a list-objects + per-object
-/// metadata read on S3 backends. For O(100) prefixes × O(100) objects
-/// this is in seconds.
-pub async fn scan_bucket_efficiency(
-    state: &AdminState,
-    bucket: &str,
-    min_deltas: usize,
-) -> Result<EfficiencyResponse, String> {
-    let engine = state.s3_state.engine.load();
-    let storage = engine.storage();
-    let prefixes = storage
-        .list_deltaspaces(bucket)
-        .await
-        .map_err(|e| format!("list_deltaspaces failed: {e}"))?;
+// ─── Background scanner with cache + dedup ──────────────────────────
 
-    let mut reports: Vec<DeltaspaceReport> = Vec::new();
-    let scanned = prefixes.len();
+/// Background scanner. Same `Arc<RwLock<...>>` shape as
+/// [`UsageScanner`](crate::usage_scanner::UsageScanner) — one cache
+/// (`bucket|min_deltas` → `EfficiencyResponse`), one dedup set.
+pub struct DeltaEfficiencyScanner {
+    cache: Arc<RwLock<HashMap<String, EfficiencyResponse>>>,
+    scanning: Arc<RwLock<HashSet<String>>>,
+}
 
-    for prefix in prefixes {
-        let scan = match storage.scan_deltaspace(bucket, &prefix).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    "delta-efficiency: scan_deltaspace failed for {}/{}: {}",
-                    bucket,
-                    prefix,
-                    e
+impl Default for DeltaEfficiencyScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// RAII guard mirroring `UsageScanner::ScanInProgressGuard` — clears
+/// the dedup entry on drop, including drop-on-panic. Without this, a
+/// panic in the scan future would leave the bucket permanently marked
+/// "in progress" until process restart (E-P1-2 class of bug).
+struct ScanInProgressGuard {
+    scanner: Arc<DeltaEfficiencyScanner>,
+    key: String,
+}
+
+impl Drop for ScanInProgressGuard {
+    fn drop(&mut self) {
+        self.scanner.scanning.write().remove(&self.key);
+    }
+}
+
+impl DeltaEfficiencyScanner {
+    pub fn new() -> Self {
+        Self {
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            scanning: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    fn cache_key(bucket: &str, min_deltas: usize) -> String {
+        format!("{bucket}|{min_deltas}")
+    }
+
+    /// Read the cached entry for this `(bucket, min_deltas)` pair if
+    /// present AND younger than [`CACHE_TTL_SECS`]. Stale entries are
+    /// ignored on read; they get overwritten by the next scan.
+    pub fn get(&self, bucket: &str, min_deltas: usize) -> Option<EfficiencyResponse> {
+        let key = Self::cache_key(bucket, min_deltas);
+        let cache = self.cache.read();
+        let entry = cache.get(&key)?.clone();
+        let age = Utc::now()
+            .signed_duration_since(entry.computed_at)
+            .num_seconds();
+        if age > CACHE_TTL_SECS {
+            return None;
+        }
+        Some(EfficiencyResponse {
+            cached: true,
+            ..entry
+        })
+    }
+
+    pub fn is_scanning(&self, bucket: &str, min_deltas: usize) -> bool {
+        let key = Self::cache_key(bucket, min_deltas);
+        self.scanning.read().contains(&key)
+    }
+
+    /// Spawn a background scan if not already running. Returns true
+    /// if a new scan was started, false if one was already in flight
+    /// (or cache is fresh).
+    pub fn enqueue_scan(
+        self: &Arc<Self>,
+        bucket: String,
+        min_deltas: usize,
+        s3_state: Arc<AppState>,
+    ) -> bool {
+        let key = Self::cache_key(&bucket, min_deltas);
+
+        // Dedup: skip if already scanning this (bucket, min_deltas).
+        {
+            let mut scanning = self.scanning.write();
+            if !scanning.insert(key.clone()) {
+                debug!(
+                    bucket = %bucket,
+                    min_deltas,
+                    "Delta-efficiency scan already in progress, skipping"
                 );
-                continue;
-            }
-        };
-        // Partition into reference / deltas / passthroughs.
-        let mut reference_bytes: Option<u64> = None;
-        let mut delta_sizes: Vec<u64> = Vec::new();
-        let mut passthrough_count: usize = 0;
-        let mut total_original: u64 = 0;
-        for m in &scan {
-            match &m.storage_info {
-                StorageInfo::Reference { .. } => {
-                    reference_bytes = Some(m.file_size);
-                }
-                StorageInfo::Delta { delta_size, .. } => {
-                    delta_sizes.push(*delta_size);
-                    total_original = total_original.saturating_add(m.file_size);
-                }
-                StorageInfo::Passthrough => {
-                    passthrough_count += 1;
-                    total_original = total_original.saturating_add(m.file_size);
-                }
+                return false;
             }
         }
 
-        let Some(efficiency) = classify_deltaspace(reference_bytes, &delta_sizes, min_deltas)
-        else {
-            continue;
-        };
+        let scanner = Arc::clone(self);
+        tokio::spawn(async move {
+            debug!(bucket = %bucket, min_deltas, "Starting delta-efficiency scan");
 
-        let total_delta: u64 = delta_sizes.iter().sum();
-        let median = median_u64(&delta_sizes);
-        let max_delta = delta_sizes.iter().copied().max().unwrap_or(0);
-        let stored_bytes = reference_bytes.unwrap_or(0).saturating_add(total_delta);
-        let savings = total_original as i64 - stored_bytes as i64;
+            let _scan_guard = ScanInProgressGuard {
+                scanner: scanner.clone(),
+                key: key.clone(),
+            };
 
-        reports.push(DeltaspaceReport {
-            bucket: bucket.to_string(),
-            prefix,
-            deltas: delta_sizes.len(),
-            passthrough: passthrough_count,
-            reference_bytes,
-            total_delta_bytes: total_delta,
-            total_original_bytes: total_original,
-            median_delta_bytes: median,
-            max_delta_bytes: max_delta,
-            savings_bytes: savings,
-            efficiency,
-            explanation: efficiency.explanation().to_string(),
+            match Self::do_scan(&s3_state, &bucket, min_deltas).await {
+                Ok(entry) => {
+                    debug!(
+                        bucket = %bucket,
+                        scanned = entry.scanned_deltaspaces,
+                        reported = entry.reported_deltaspaces,
+                        "Delta-efficiency scan complete"
+                    );
+                    scanner.cache.write().insert(key.clone(), entry);
+                }
+                Err(e) => {
+                    warn!(
+                        bucket = %bucket,
+                        min_deltas,
+                        error = %e,
+                        "Delta-efficiency scan failed"
+                    );
+                }
+            }
+            // _scan_guard drops here, removing the dedup key.
         });
+
+        true
     }
 
-    // Sort: worst first (Poor before Fair before Good), tiebreaker
-    // by total_delta_bytes desc so the biggest waste rises.
-    reports.sort_by(|a, b| {
-        let order = |e: Efficiency| match e {
-            Efficiency::NoReference => 0,
-            Efficiency::Poor => 1,
-            Efficiency::Fair => 2,
-            Efficiency::Good => 3,
-            Efficiency::Excellent => 4,
-        };
-        order(a.efficiency)
-            .cmp(&order(b.efficiency))
-            .then_with(|| b.total_delta_bytes.cmp(&a.total_delta_bytes))
-    });
+    /// Walk every deltaspace in `bucket` and build the efficiency
+    /// response. Cost: one `list_deltaspaces` call + one
+    /// `scan_deltaspace` per prefix. For O(100) prefixes × O(100)
+    /// objects this is in seconds — hence the cache.
+    async fn do_scan(
+        s3_state: &AppState,
+        bucket: &str,
+        min_deltas: usize,
+    ) -> Result<EfficiencyResponse, String> {
+        let engine = s3_state.engine.load();
+        let storage = engine.storage();
+        let prefixes = storage
+            .list_deltaspaces(bucket)
+            .await
+            .map_err(|e| format!("list_deltaspaces failed: {e}"))?;
 
-    let reported = reports.len();
-    Ok(EfficiencyResponse {
-        bucket: bucket.to_string(),
-        scanned_deltaspaces: scanned,
-        reported_deltaspaces: reported,
-        min_deltas,
-        reports,
-    })
+        let mut reports: Vec<DeltaspaceReport> = Vec::new();
+        let scanned = prefixes.len();
+
+        for prefix in prefixes {
+            let scan = match storage.scan_deltaspace(bucket, &prefix).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "delta-efficiency: scan_deltaspace failed for {}/{}: {}",
+                        bucket, prefix, e
+                    );
+                    continue;
+                }
+            };
+            // Partition into reference / deltas / passthroughs.
+            let mut reference_bytes: Option<u64> = None;
+            let mut delta_sizes: Vec<u64> = Vec::new();
+            let mut passthrough_count: usize = 0;
+            let mut total_original: u64 = 0;
+            for m in &scan {
+                match &m.storage_info {
+                    StorageInfo::Reference { .. } => {
+                        reference_bytes = Some(m.file_size);
+                    }
+                    StorageInfo::Delta { delta_size, .. } => {
+                        delta_sizes.push(*delta_size);
+                        total_original = total_original.saturating_add(m.file_size);
+                    }
+                    StorageInfo::Passthrough => {
+                        passthrough_count += 1;
+                        total_original = total_original.saturating_add(m.file_size);
+                    }
+                }
+            }
+
+            let Some(efficiency) = classify_deltaspace(reference_bytes, &delta_sizes, min_deltas)
+            else {
+                continue;
+            };
+
+            let total_delta: u64 = delta_sizes.iter().sum();
+            let median = median_u64(&delta_sizes);
+            let max_delta = delta_sizes.iter().copied().max().unwrap_or(0);
+            let stored_bytes = reference_bytes.unwrap_or(0).saturating_add(total_delta);
+            let savings = total_original as i64 - stored_bytes as i64;
+
+            reports.push(DeltaspaceReport {
+                bucket: bucket.to_string(),
+                prefix,
+                deltas: delta_sizes.len(),
+                passthrough: passthrough_count,
+                reference_bytes,
+                total_delta_bytes: total_delta,
+                total_original_bytes: total_original,
+                median_delta_bytes: median,
+                max_delta_bytes: max_delta,
+                savings_bytes: savings,
+                efficiency,
+                explanation: efficiency.explanation().to_string(),
+            });
+        }
+
+        // Sort: worst first (Poor before Fair before Good), tiebreaker
+        // by total_delta_bytes desc so the biggest waste rises.
+        reports.sort_by(|a, b| {
+            let order = |e: Efficiency| match e {
+                Efficiency::NoReference => 0,
+                Efficiency::Poor => 1,
+                Efficiency::Fair => 2,
+                Efficiency::Good => 3,
+                Efficiency::Excellent => 4,
+            };
+            order(a.efficiency)
+                .cmp(&order(b.efficiency))
+                .then_with(|| b.total_delta_bytes.cmp(&a.total_delta_bytes))
+        });
+
+        let reported = reports.len();
+        Ok(EfficiencyResponse {
+            bucket: bucket.to_string(),
+            scanned_deltaspaces: scanned,
+            reported_deltaspaces: reported,
+            min_deltas,
+            reports,
+            computed_at: Utc::now(),
+            cached: false,
+        })
+    }
 }
 
-// ─── Admin API handler ───────────────────────────────────────────────
+// ─── Admin API handlers ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
 pub struct EfficiencyQuery {
@@ -290,19 +442,77 @@ pub struct EfficiencyQuery {
 }
 
 /// `GET /_/api/admin/diagnostics/delta-efficiency?bucket=X&min_deltas=N`
+///
+/// Returns:
+/// * `200 OK` with the full response when a fresh cached result
+///   (or one we just computed inline) is available.
+/// * `202 Accepted` with `{ scanning: true }` when no fresh cache
+///   exists and a background scan is now running. The frontend
+///   should poll the same endpoint until it gets a 200.
 pub async fn get_delta_efficiency(
     State(state): State<Arc<AdminState>>,
     axum::extract::Query(q): axum::extract::Query<EfficiencyQuery>,
 ) -> impl IntoResponse {
     let min_deltas = q.min_deltas.unwrap_or(3).max(1);
-    match scan_bucket_efficiency(&state, &q.bucket, min_deltas).await {
-        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+
+    // Cache hit → return immediately.
+    if let Some(cached) = state.delta_efficiency_scanner.get(&q.bucket, min_deltas) {
+        return (StatusCode::OK, Json(cached)).into_response();
     }
+
+    // No fresh cache → enqueue a background scan and tell the caller
+    // to poll. Same affordance as `UsageScanner::enqueue_scan` →
+    // `get_usage`'s 404+`scanning: true` shape, but we use 202 here
+    // because "the work has been accepted" is the more accurate
+    // semantic than "not found".
+    let started = state.delta_efficiency_scanner.enqueue_scan(
+        q.bucket.clone(),
+        min_deltas,
+        state.s3_state.clone(),
+    );
+    let scanning = started || state.delta_efficiency_scanner.is_scanning(&q.bucket, min_deltas);
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "bucket": q.bucket,
+            "min_deltas": min_deltas,
+            "scanning": scanning,
+            "status": if started { "scan_started" } else { "scan_already_running" },
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct EfficiencyScanRequest {
+    pub bucket: String,
+    #[serde(default)]
+    pub min_deltas: Option<usize>,
+}
+
+/// `POST /_/api/admin/diagnostics/delta-efficiency/scan` — operator
+/// "Re-scan" affordance. Force-enqueues a background scan, ignoring
+/// the cache (the cache will be overwritten on completion). Always
+/// returns 202.
+pub async fn post_delta_efficiency_scan(
+    State(state): State<Arc<AdminState>>,
+    Json(req): Json<EfficiencyScanRequest>,
+) -> impl IntoResponse {
+    let min_deltas = req.min_deltas.unwrap_or(3).max(1);
+    let started = state.delta_efficiency_scanner.enqueue_scan(
+        req.bucket.clone(),
+        min_deltas,
+        state.s3_state.clone(),
+    );
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "bucket": req.bucket,
+            "min_deltas": min_deltas,
+            "status": if started { "scan_started" } else { "scan_already_running" },
+        })),
+    )
 }
 
 #[cfg(test)]
@@ -340,11 +550,7 @@ mod tests {
     fn median_at_or_above_half_is_poor() {
         // 91 MB delta, 61 MB ref ⇒ ratio ≈ 1.49 — Poor
         assert_eq!(
-            classify_deltaspace(
-                Some(61 * 1024 * 1024),
-                &[91 * 1024 * 1024; 5],
-                3
-            ),
+            classify_deltaspace(Some(61 * 1024 * 1024), &[91 * 1024 * 1024; 5], 3),
             Some(Efficiency::Poor),
         );
         // Edge: exactly 50 %
@@ -376,11 +582,7 @@ mod tests {
     fn small_absolute_and_small_ratio_is_excellent() {
         // 70 KB median against 19.5 MB ref ⇒ ~0.35 % — Excellent
         assert_eq!(
-            classify_deltaspace(
-                Some(19_500_000),
-                &[70_000; 49],
-                3
-            ),
+            classify_deltaspace(Some(19_500_000), &[70_000; 49], 3),
             Some(Efficiency::Excellent),
         );
         // Edge: exactly 200 KB / 5 % boundary
@@ -397,11 +599,7 @@ mod tests {
     fn large_absolute_but_small_ratio_is_good() {
         // 270 KB median, 61 MB ref ⇒ ratio 0.44 % but absolute > 200 KB
         assert_eq!(
-            classify_deltaspace(
-                Some(61 * 1024 * 1024),
-                &[270 * 1024; 188],
-                3
-            ),
+            classify_deltaspace(Some(61 * 1024 * 1024), &[270 * 1024; 188], 3),
             Some(Efficiency::Good),
         );
     }
@@ -412,11 +610,7 @@ mod tests {
     #[test]
     fn cross_major_delta_is_good() {
         assert_eq!(
-            classify_deltaspace(
-                Some(91 * 1024 * 1024),
-                &[2_182_000; 242],
-                3
-            ),
+            classify_deltaspace(Some(91 * 1024 * 1024), &[2_182_000; 242], 3),
             Some(Efficiency::Good),
         );
     }
@@ -431,7 +625,7 @@ mod tests {
         assert_eq!(median_u64(&[]), 0);
     }
 
-    // ── Efficiency::as_str / explanation ─────────────────────────────
+    // ── Efficiency::explanation ────────────────────────────────────
 
     #[test]
     fn explanation_is_non_empty_for_every_variant() {
@@ -460,5 +654,83 @@ mod tests {
             let s = serde_json::to_string(&variant).unwrap();
             assert_eq!(s, expected, "JSON for {:?}", variant);
         }
+    }
+
+    // ── Cache + dedup behaviour ────────────────────────────────────
+
+    /// Fresh cache entry is returned with `cached: true`.
+    #[test]
+    fn get_returns_cached_with_flag_set() {
+        let scanner = DeltaEfficiencyScanner::new();
+        let key = DeltaEfficiencyScanner::cache_key("bucket", 3);
+        scanner.cache.write().insert(
+            key,
+            EfficiencyResponse {
+                bucket: "bucket".into(),
+                scanned_deltaspaces: 0,
+                reported_deltaspaces: 0,
+                min_deltas: 3,
+                reports: vec![],
+                computed_at: Utc::now(),
+                cached: false, // stored as false
+            },
+        );
+        let got = scanner.get("bucket", 3).expect("present");
+        assert!(got.cached, "get() must mark response as cached");
+    }
+
+    /// Stale cache entries are ignored on read.
+    #[test]
+    fn get_returns_none_when_entry_is_stale() {
+        let scanner = DeltaEfficiencyScanner::new();
+        let key = DeltaEfficiencyScanner::cache_key("bucket", 3);
+        scanner.cache.write().insert(
+            key,
+            EfficiencyResponse {
+                bucket: "bucket".into(),
+                scanned_deltaspaces: 0,
+                reported_deltaspaces: 0,
+                min_deltas: 3,
+                reports: vec![],
+                computed_at: Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECS + 1),
+                cached: false,
+            },
+        );
+        assert!(
+            scanner.get("bucket", 3).is_none(),
+            "stale cache entry must be ignored"
+        );
+    }
+
+    /// `is_scanning` reflects the dedup set.
+    #[test]
+    fn is_scanning_tracks_dedup() {
+        let scanner = DeltaEfficiencyScanner::new();
+        assert!(!scanner.is_scanning("bucket", 3));
+        let key = DeltaEfficiencyScanner::cache_key("bucket", 3);
+        scanner.scanning.write().insert(key);
+        assert!(scanner.is_scanning("bucket", 3));
+        // Different (bucket, min_deltas) combos are independent.
+        assert!(!scanner.is_scanning("bucket", 5));
+        assert!(!scanner.is_scanning("other", 3));
+    }
+
+    /// RAII guard removes its key on drop.
+    #[test]
+    fn scan_guard_clears_dedup_on_drop() {
+        let scanner = Arc::new(DeltaEfficiencyScanner::new());
+        let key = DeltaEfficiencyScanner::cache_key("bucket", 3);
+        scanner.scanning.write().insert(key.clone());
+        assert!(scanner.is_scanning("bucket", 3));
+        {
+            let _g = ScanInProgressGuard {
+                scanner: scanner.clone(),
+                key: key.clone(),
+            };
+            // Still in set during guard's lifetime.
+            assert!(scanner.is_scanning("bucket", 3));
+        }
+        // Cleared on drop.
+        assert!(!scanner.is_scanning("bucket", 3));
     }
 }

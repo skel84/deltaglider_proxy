@@ -639,6 +639,9 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         iam_state,
         config_db,
         usage_scanner: usage_scanner.clone(),
+        delta_efficiency_scanner: Arc::new(
+            deltaglider_proxy::api::admin::DeltaEfficiencyScanner::new(),
+        ),
         rate_limiter,
         config_sync,
         config_db_mismatch,

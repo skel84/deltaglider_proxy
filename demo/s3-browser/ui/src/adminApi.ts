@@ -1604,24 +1604,64 @@ export interface DeltaEfficiencyResponse {
   reported_deltaspaces: number;
   min_deltas: number;
   reports: DeltaspaceEfficiencyReport[];
+  computed_at: string; // ISO 8601
+  cached: boolean;
 }
 
 /**
+ * 202 Accepted shape — server has enqueued (or already running) a
+ * background scan. Caller should poll `fetchDeltaEfficiency` until it
+ * returns the full `DeltaEfficiencyResponse`.
+ */
+export interface DeltaEfficiencyScanning {
+  scanning: true;
+  bucket: string;
+  min_deltas: number;
+  status: 'scan_started' | 'scan_already_running';
+}
+
+/**
+ * Discriminated union: either a fresh/cached result, or a 202 saying
+ * "we're working on it, poll again". Callers switch on `'scanning' in r`.
+ */
+export type DeltaEfficiencyFetchResult = DeltaEfficiencyResponse | DeltaEfficiencyScanning;
+
+/**
  * Scan one bucket's deltaspaces and surface those whose reference
- * baseline produces too-large deltas. Cost: list-deltaspaces + one
- * scan_deltaspace per prefix; fine for O(100) prefixes, slow for
- * thousands. Synchronous from the caller's view — the server may
- * take seconds.
+ * baseline produces too-large deltas. Same shape as the usage scanner:
+ *   - 200 OK with the result if a fresh cached scan exists (5-min TTL).
+ *   - 202 Accepted with `{ scanning: true }` when a background scan
+ *     was just enqueued (or one is already running). Caller polls.
  */
 export async function fetchDeltaEfficiency(
   bucket: string,
   minDeltas = 3,
-): Promise<DeltaEfficiencyResponse> {
+): Promise<DeltaEfficiencyFetchResult> {
   const qs = new URLSearchParams({
     bucket,
     min_deltas: String(minDeltas),
   });
   const res = await adminFetch(`/api/admin/diagnostics/delta-efficiency?${qs.toString()}`);
+  if (res.status === 202) {
+    return safeJson(res) as Promise<DeltaEfficiencyScanning>;
+  }
   if (!res.ok) await throwApiError(res, 'Delta efficiency fetch');
+  return safeJson(res);
+}
+
+/**
+ * Force a re-scan even when a fresh cached result exists. Returns
+ * 202 immediately; the caller should then poll `fetchDeltaEfficiency`.
+ */
+export async function triggerDeltaEfficiencyScan(
+  bucket: string,
+  minDeltas = 3,
+): Promise<DeltaEfficiencyScanning> {
+  const res = await adminFetch(
+    '/api/admin/diagnostics/delta-efficiency/scan',
+    'POST',
+    { bucket, min_deltas: minDeltas },
+  );
+  if (!res.ok && res.status !== 202) await throwApiError(res, 'Delta efficiency scan trigger');
   return safeJson(res);
 }

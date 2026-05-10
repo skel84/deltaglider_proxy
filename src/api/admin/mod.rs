@@ -74,7 +74,9 @@ pub use replication::{
     list_rules as replication_list_rules, pause as replication_pause, resume as replication_resume,
     run_now as replication_run_now,
 };
-pub use delta_efficiency::get_delta_efficiency;
+pub use delta_efficiency::{
+    get_delta_efficiency, post_delta_efficiency_scan, DeltaEfficiencyScanner,
+};
 pub use scanner::{get_usage, migrate_legacy, scan_usage, ScanUsageRequest, UsageQuery};
 pub use users::{
     clone_user, create_user, delete_user, get_canned_policies, iam_version, list_users,
@@ -105,6 +107,11 @@ pub struct AdminState {
     pub config_db: Option<Arc<tokio::sync::Mutex<ConfigDb>>>,
     /// Background usage scanner for computing prefix sizes.
     pub usage_scanner: Arc<UsageScanner>,
+    /// Background delta-efficiency scanner. Same shape as
+    /// `usage_scanner` (cache + dedup) so the diagnostics panel
+    /// gets instant cached reads on reload, and a "Re-scan" button
+    /// kicks off a fresh background scan.
+    pub delta_efficiency_scanner: Arc<delta_efficiency::DeltaEfficiencyScanner>,
     /// Per-IP rate limiter for login endpoints and auth failures.
     pub rate_limiter: RateLimiter,
     /// S3 sync for the config database (None if DGP_CONFIG_SYNC_BUCKET is not set).

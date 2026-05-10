@@ -191,9 +191,15 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         // Delta-efficiency diagnostics: scan a bucket's deltaspaces and
         // surface prefixes whose reference baseline is producing
         // too-large deltas (the v0.9.17 1.70.0-pre5 incident shape).
+        // GET returns cached result if fresh (5-min TTL), or 202 +
+        // background scan kicked off. POST forces a re-scan.
         .route(
             "/_/api/admin/diagnostics/delta-efficiency",
             get(admin::get_delta_efficiency),
+        )
+        .route(
+            "/_/api/admin/diagnostics/delta-efficiency/scan",
+            post(admin::post_delta_efficiency_scan),
         )
         // Audit log viewer — recent ring of structured audit entries.
         // Read-only; no corresponding mutation route. Session-gated

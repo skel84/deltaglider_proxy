@@ -14,11 +14,12 @@
  * that's a destructive operation we don't want one-click.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Typography, Button, Tag, Alert, Space, Select, InputNumber, Tooltip } from 'antd';
+import { Typography, Button, Tag, Alert, Space, Select, InputNumber, Tooltip, Spin } from 'antd';
 import { ReloadOutlined, ThunderboltOutlined, CopyOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import {
   fetchDeltaEfficiency,
+  triggerDeltaEfficiencyScan,
   getBucketOrigins,
   type DeltaEfficiencyResponse,
   type DeltaspaceEfficiencyReport,
@@ -77,6 +78,7 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
   const [minDeltas, setMinDeltas] = useState<number>(3);
   const [response, setResponse] = useState<DeltaEfficiencyResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Load bucket list on mount.
@@ -103,20 +105,56 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
     return () => { cancelled = true; };
   }, [onSessionExpired]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const runScan = async () => {
+  /**
+   * Server returns one of:
+   *   - 200 OK with the report (cached or fresh)
+   *   - 202 Accepted with `{scanning: true}` and a background scan
+   *     was just enqueued (or one was already running).
+   *
+   * On 202, poll the GET endpoint every 2 s until we get a 200,
+   * with a 60 s ceiling so a stuck scan doesn't spin forever.
+   */
+  const fetchOrPoll = async (
+    forceRescan: boolean,
+  ): Promise<DeltaEfficiencyResponse | null> => {
+    if (!bucket) return null;
+    if (forceRescan) {
+      // Force a re-scan, then poll.
+      await triggerDeltaEfficiencyScan(bucket, minDeltas);
+    }
+    const startedAt = Date.now();
+    const deadline = startedAt + 60_000;
+    // First call: if fresh-cached we'll get 200 immediately.
+    // If not, the server enqueues a scan and we get 202.
+    while (Date.now() < deadline) {
+      const r = await fetchDeltaEfficiency(bucket, minDeltas);
+      if ('scanning' in r) {
+        // Server is working on it. Wait briefly, then re-fetch.
+        setScanning(true);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      setScanning(false);
+      return r;
+    }
+    throw new Error('Scan timed out after 60 s — try again or check server logs');
+  };
+
+  const runScan = async (forceRescan = false) => {
     if (!bucket) return;
     setLoading(true);
     setError(null);
-    setResponse(null);
+    if (forceRescan) setResponse(null);
     try {
-      const r = await fetchDeltaEfficiency(bucket, minDeltas);
-      setResponse(r);
+      const r = await fetchOrPoll(forceRescan);
+      if (r) setResponse(r);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (/401|session/i.test(msg)) onSessionExpired?.();
       setError(`Scan failed: ${msg}`);
     } finally {
       setLoading(false);
+      setScanning(false);
     }
   };
 
@@ -174,16 +212,28 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
         <Button
           type="primary"
           icon={<ThunderboltOutlined />}
-          onClick={runScan}
-          loading={loading}
+          onClick={() => runScan(false)}
+          loading={loading && !scanning}
           disabled={!bucket}
         >
-          Scan
+          {response ? 'Refresh' : 'Scan'}
         </Button>
         {response && (
-          <Button icon={<ReloadOutlined />} onClick={runScan} loading={loading}>
-            Re-scan
-          </Button>
+          <Tooltip title="Force a fresh scan, ignoring the 5-min cache.">
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={() => runScan(true)}
+              loading={loading}
+            >
+              Re-scan
+            </Button>
+          </Tooltip>
+        )}
+        {scanning && (
+          <Space>
+            <Spin size="small" />
+            <Text type="secondary">Scan running on the server, polling…</Text>
+          </Space>
         )}
       </Space>
 
@@ -204,6 +254,11 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
               Scanned <b>{response.scanned_deltaspaces}</b> deltaspace(s);
               reporting <b>{response.reported_deltaspaces}</b> with ≥ {response.min_deltas} deltas.
             </Text>
+            {response.cached && (
+              <Tooltip title={`Scan completed at ${response.computed_at}. The cache is good for 5 min — click Re-scan to force a fresh run.`}>
+                <Tag color="blue">cached</Tag>
+              </Tooltip>
+            )}
             <Tag color="red">{summary.counts.poor} poor</Tag>
             <Tag color="magenta">{summary.counts.no_reference} no-ref</Tag>
             <Tag color="gold">{summary.counts.fair} fair</Tag>
