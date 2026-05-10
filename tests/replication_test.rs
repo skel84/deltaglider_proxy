@@ -258,17 +258,43 @@ async fn test_replication_scheduler_copies_due_rule() {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 
-    let hist: Value = admin
-        .get(format!(
-            "{}/_/api/admin/replication/rules/scheduler-rule/history",
-            server.endpoint()
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    // The file appearing on the destination only proves the COPY landed.
+    // The run-history row is updated AFTER the copy: workflow is
+    //   list → copy → set status=succeeded.
+    // On a slow CI runner (sccache cold, tokio runtime contention) the
+    // assertion below can race ahead of the status flip and observe
+    // "running". Poll for a terminal status (succeeded|failed) before
+    // asserting — same shape as the file-arrival poll above. 5 s is
+    // plenty since the file already arrived; if status never settles
+    // we have a real bug worth surfacing as the timeout.
+    let history_url = format!(
+        "{}/_/api/admin/replication/rules/scheduler-rule/history",
+        server.endpoint()
+    );
+    let status_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let hist: Value = loop {
+        let h: Value = admin
+            .get(&history_url)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let runs = h["runs"].as_array().expect("history runs");
+        if let Some(first) = runs.first() {
+            let status = first["status"].as_str().unwrap_or("");
+            if status == "succeeded" || status == "failed" {
+                break h;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < status_deadline,
+            "scheduler run status did not reach a terminal state in 5s; last history: {h}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+
     let runs = hist["runs"].as_array().expect("history runs");
     assert_eq!(runs.len(), 1, "expected exactly one scheduler run: {hist}");
     assert_eq!(runs[0]["status"].as_str(), Some("succeeded"));
