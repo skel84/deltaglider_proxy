@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 #![cfg(feature = "s3s-adapter")]
 
 //! Parity tests for DeltaGlider-specific contracts while migrating to `s3s`.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Pure planner functions for replication.
 //!
 //! All functions in this module are I/O-free: they take typed inputs

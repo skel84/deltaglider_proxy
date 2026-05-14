@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! End-to-end tests for delete-only lifecycle rules.
 
 mod common;

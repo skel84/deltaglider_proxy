@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Lifecycle execution through the DeltaGlider engine.
 
 use super::planner::{

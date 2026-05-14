@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! xdelta3 codec wrapper for delta encoding/decoding
 //!
 //! Uses the xdelta3 CLI binary for both encoding and decoding to ensure

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Store pipeline — delta encoding, passthrough, and baseline management.
 
 use super::*;

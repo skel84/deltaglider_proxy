@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! One-shot utility: open the IAM config DB with the bootstrap hash,
 //! read users / groups / auth-providers / mapping-rules, and print a
 //! new-style sectioned YAML describing the full runtime configuration.

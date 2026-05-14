@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Delta efficiency diagnostics: scan deltaspaces and report bad
 //! reference choices.
 //!

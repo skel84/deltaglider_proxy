@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! S3 backend parity tests
 //!
 //! Runs the same core operations as s3_api_test but against TestServer::s3()

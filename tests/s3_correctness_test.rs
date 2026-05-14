@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Regression tests for the second-wave correctness findings
 //! (H2 / M1 / M2 / M3 / M4 / L1). Each finding has its own
 //! `test_*` function; see the CHANGELOG for the full context.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Interoperability tests with original DeltaGlider CLI
 //!
 //! These tests verify full interoperability between DeltaGlider Proxy and the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Integration tests for IAM multi-user authentication and authorization.
 //!
 //! Tests verify that:

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! E1 security/hygiene fix regression tests: recursive DELETE uses a
 //! paginated loop instead of materialising the full listing with
 //! `u32::MAX`. A bucket with millions of keys used to balloon proxy

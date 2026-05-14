@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Self-contained S3 integration tests with ephemeral MinIO
 //!
 //! Spins up an ephemeral MinIO container via testcontainers, runs comprehensive

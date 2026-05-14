@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! External authentication provider system (OAuth/OIDC, extensible to SAML/LDAP).
 //!
 //! This module provides a provider-agnostic external auth layer for the admin GUI.

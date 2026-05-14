@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Group handlers: list, create, update, delete, add/remove members.
 
 use axum::extract::State;

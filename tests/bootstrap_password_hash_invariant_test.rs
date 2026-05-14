@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Default test harness bootstrap hash must be stable across builders and
 //! config formats so HA replicas share one SQLCipher key (see
 //! `TEST_BOOTSTRAP_PASSWORD_HASH` in `common/mod.rs`).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! IAM: local user management with attribute-based access control (ABAC).
 //!
 //! Users are stored in an encrypted SQLCipher database (see `config_db.rs`).

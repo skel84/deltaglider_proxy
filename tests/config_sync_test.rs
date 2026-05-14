@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Integration tests for config DB backup/restore — the manual equivalent of
 //! config sync. Tests the full IAM state export/import flow across two server instances.
 //! Requires MinIO for S3 backend tests.

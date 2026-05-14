@@ -296,4 +296,4 @@ Operator-facing docs are also bundled into the running binary at `/_/docs/`. Sou
 
 ## License
 
-[GPLv2](LICENSE)
+[GPL-3.0](LICENSE)

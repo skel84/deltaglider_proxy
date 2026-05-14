@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! C1 security fix regression tests: IAM LIST filtering.
 //!
 //! Pre-fix, a user with policy `{ resources: ["bucket/alice/*"] }` who

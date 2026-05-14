@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Filesystem-based storage backend with xattr-based metadata
 
 use super::traits::{DelegatedListResult, StorageBackend, StorageError};

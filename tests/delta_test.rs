@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Delta compression behavior tests
 //!
 //! Verifies delta compression through the S3 API using TestServer::filesystem().

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Retrieve pipeline — delta reconstruction, streaming, and range requests.
 
 use super::*;

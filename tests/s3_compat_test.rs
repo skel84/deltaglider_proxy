@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! S3 API compatibility tests
 //!
 //! Phase 1: Range requests, conditional headers, Content-MD5 validation,

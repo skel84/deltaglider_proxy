@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Admin API for managing named backends (multi-backend routing).
 
 use axum::extract::{Path, State};

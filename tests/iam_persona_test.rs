@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Persona-based IAM integration tests.
 //!
 //! Tests the FULL request pipeline end-to-end: SigV4 auth → authorization middleware

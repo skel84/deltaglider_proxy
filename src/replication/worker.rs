@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Replication worker: executes one full run of a single rule against
 //! a live engine + config DB.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! File type routing for delta compression eligibility
 
 /// Compression strategy based on file type

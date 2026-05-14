@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Background usage scanner — computes prefix sizes asynchronously and caches results.
 
 use std::collections::{HashMap, HashSet};

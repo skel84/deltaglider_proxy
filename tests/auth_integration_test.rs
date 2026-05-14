@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Integration tests for authentication and authorization at the HTTP layer.
 //!
 //! Unlike `iam_test.rs` and `iam_authorization_test.rs` which test the permission

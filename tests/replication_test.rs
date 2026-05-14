@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! End-to-end integration tests for lazy replication.
 //!
 //! Exercises the worker via the admin API's `run-now` endpoint so the

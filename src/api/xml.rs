@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! S3 XML response builders and parsers
 
 use chrono::{DateTime, Utc};

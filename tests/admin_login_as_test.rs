@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Integration tests for admin login-as (IAM user impersonation).
 
 mod common;

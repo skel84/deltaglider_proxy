@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Health-check and aggregate statistics handlers.
 
 use super::{AppState, S3Error};

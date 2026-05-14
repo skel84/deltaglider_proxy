@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! S3 API compliance tests using filesystem backend
 //!
 //! These tests verify S3 protocol compliance through the AWS SDK.

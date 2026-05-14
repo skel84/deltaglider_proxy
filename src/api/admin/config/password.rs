@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Password-change and config-database recovery handlers.
 //!
 //! These two flows share a responsibility — custody of the bootstrap

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Integration coverage for AWS streaming-chunked object uploads.
 //!
 //! This test file reproduces — and locks down — the production corruption

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Audit logging helpers for security compliance.
 //!
 //! Provides a single `audit_log` function used by both S3 handlers and admin API

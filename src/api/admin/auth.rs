@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Auth handlers: login, logout, login_as, whoami, check_session, require_session.
 
 use axum::{

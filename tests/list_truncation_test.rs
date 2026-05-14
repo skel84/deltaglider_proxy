@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! ListObjectsV2 truncation regression tests
 //!
 //! Uploads ~65 files across deeply nested prefixes and verifies that listing

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Prometheus metrics for DeltaGlider Proxy.
 //!
 //! All metric types use atomics internally (no locks on the hot path).

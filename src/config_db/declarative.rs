@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Phase 3c.3 — Atomic reconcile of the IAM DB against an [`IamDiff`].
 //!
 //! A single SQLite transaction covers every create/update/delete

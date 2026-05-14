@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Per-IP rate limiter for authentication endpoints.
 //!
 //! Uses a token bucket approach: each IP gets `max_attempts` attempts within a

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Admission evaluator — take a normalised request description, walk the
 //! chain, return a decision.
 //!

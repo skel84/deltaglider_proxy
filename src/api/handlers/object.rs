@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Object-level S3 handlers: GET, HEAD, PUT (with copy detection), DELETE.
 
 use super::bucket::get_acl_response;

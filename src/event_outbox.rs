@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Durable object-event outbox.
 //!
 //! Request handlers only append facts after successful mutations. Delivery

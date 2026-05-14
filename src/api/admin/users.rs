@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! User handlers: list, create, update, delete, rotate keys, canned policies,
 //! plus rebuild_iam_index and mask_user helpers.
 

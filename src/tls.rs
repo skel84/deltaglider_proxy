@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! TLS setup for DeltaGlider Proxy.
 //!
 //! Supports two modes:

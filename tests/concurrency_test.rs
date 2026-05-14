@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Parallel access safety tests
 //!
 //! Verifies that concurrent operations don't cause corruption or panics.

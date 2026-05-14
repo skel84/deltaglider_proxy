@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Operator-authored admission block wire format.
 //!
 //! This module is the **YAML-facing** layer for the admission chain.

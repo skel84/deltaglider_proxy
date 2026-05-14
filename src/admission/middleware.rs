@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Axum middleware that evaluates the admission chain and annotates the
 //! request with the decision for downstream layers.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Periodic replication scheduler.
 //!
 //! The admin API owns explicit "run now" execution. This module owns the

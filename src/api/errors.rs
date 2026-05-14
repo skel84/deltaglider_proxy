@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! S3 error types and XML responses
 
 use super::xml::escape_xml;

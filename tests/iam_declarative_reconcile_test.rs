@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Phase 3c.3 — Integration tests for the declarative-mode IAM reconciler.
 //!
 //! These cover the observable seam: `PUT /_/api/admin/config/section/access`

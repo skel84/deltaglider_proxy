@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Storage resilience tests: verify data integrity under adversarial conditions.
 //!
 //! These tests simulate scenarios that normal PUT→GET tests never exercise:

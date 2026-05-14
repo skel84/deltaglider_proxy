@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! S3 storage backend implementation using AWS SDK
 //!
 //! This backend stores metadata in S3 object metadata headers (x-amz-meta-dg-*)

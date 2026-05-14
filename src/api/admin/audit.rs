@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Audit log viewer handler (Wave 11 of the admin UI revamp).
 //!
 //! GET `/_/api/admin/audit?limit=N` returns the last N entries from

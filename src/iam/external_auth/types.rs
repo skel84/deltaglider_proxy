@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Shared types for external authentication providers.
 
 use serde::{Deserialize, Serialize};

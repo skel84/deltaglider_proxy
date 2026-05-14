@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Admin API endpoints for delete-only lifecycle rules.
 
 use super::AdminState;

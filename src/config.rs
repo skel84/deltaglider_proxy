@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Configuration for DeltaGlider Proxy S3 server
 
 use schemars::JsonSchema;

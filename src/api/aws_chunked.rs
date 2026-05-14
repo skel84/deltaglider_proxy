@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! AWS chunked transfer-encoding decoder.
 //!
 //! AWS SDKs upload object bodies using a framed on-the-wire format when

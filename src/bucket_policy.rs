@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Per-bucket policy configuration and public prefix access control.
 //!
 //! Each bucket can override global compression settings, route to a

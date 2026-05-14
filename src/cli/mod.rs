@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! CLI subcommands for the `deltaglider_proxy` binary.
 //!
 //! Top-level shape: `deltaglider_proxy <subcommand> [args...]`.

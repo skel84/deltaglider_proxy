@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Delete-only object lifecycle rules.
 //!
 //! v1 keeps lifecycle intentionally narrow: rules are YAML-authored,

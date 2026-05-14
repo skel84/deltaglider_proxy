@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! DeltaGlider engine - main orchestrator for delta-based storage
 
 use arc_swap::ArcSwap;

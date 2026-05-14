@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Admin diagnostics for the durable object-event outbox.
 
 use super::AdminState;

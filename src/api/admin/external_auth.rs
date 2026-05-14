@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! API handlers for external authentication: OAuth flow, provider CRUD, group mapping.
 
 use axum::{

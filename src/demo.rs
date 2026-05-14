@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Embedded demo UI and admin API, served under `/_/` on the main S3 port.
 
 use axum::{

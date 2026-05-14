@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! `deltaglider_proxy config <subcommand>` dispatcher.
 //!
 //! Phase 0 shipped `config migrate` and `config schema`. Phase 4 adds

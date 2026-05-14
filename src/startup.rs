@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Server startup helpers — extracted from main.rs for file size.
 
 use axum::{extract::DefaultBodyLimit, middleware, routing::get, Router};

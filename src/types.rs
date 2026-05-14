@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Core types for DeltaGlider Proxy S3-compatible storage with DeltaGlider metadata
 
 use chrono::{DateTime, Utc};

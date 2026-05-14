@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Tests for the server-side bulk-object admin endpoints
 //! (`/_/api/admin/objects/{copy,move,delete,zip,list}`).
 //!

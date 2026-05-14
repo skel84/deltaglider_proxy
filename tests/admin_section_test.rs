@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Integration tests for Wave 1 of the admin UI revamp:
 //!
 //! - `GET  /api/admin/config/section/:name[?format=yaml]`

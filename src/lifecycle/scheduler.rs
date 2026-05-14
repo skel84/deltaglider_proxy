@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Conservative lifecycle scheduler.
 
 use crate::api::handlers::AppState;

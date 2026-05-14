@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Multi-backend routing storage layer.
 //!
 //! `RoutingBackend` implements `StorageBackend` and transparently routes

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Tests for "unmanaged" objects — files that exist on the backend storage
 //! but were NOT stored through the proxy (i.e. no DeltaGlider metadata).
 //!

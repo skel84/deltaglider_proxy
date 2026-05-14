@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Authorization middleware for axum — checks IAM permissions on each S3 request.
 
 use axum::body::Body;

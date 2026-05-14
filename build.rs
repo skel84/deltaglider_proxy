@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 fn main() {
     // Embed UTC build timestamp so the binary always knows when it was compiled.
     let now = time_now_utc();

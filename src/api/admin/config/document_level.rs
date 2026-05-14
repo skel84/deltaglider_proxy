@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Document-level (GitOps) config API — export / validate / apply.
 //!
 //! These handlers accept or return a full canonical YAML document rather

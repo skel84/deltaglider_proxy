@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Persistent state for replication — wraps the v6 SQLCipher tables:
 //!
 //! - `replication_state`: one row per rule. Current scheduling state,

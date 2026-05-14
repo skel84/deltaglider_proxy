@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Comprehensive IAM authorization tests.
 //!
 //! Tests the permission model as a black box — verifying that each S3 operation

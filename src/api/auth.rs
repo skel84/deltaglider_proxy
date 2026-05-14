@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! AWS Signature Version 4 (SigV4) verification middleware
 //!
 //! When proxy credentials are configured, all incoming requests must carry a valid

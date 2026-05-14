@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! In-memory multipart upload state management
 //!
 //! Parts are buffered in memory until CompleteMultipartUpload assembles them

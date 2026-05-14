@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Transparent encryption-at-rest wrapper for any StorageBackend.
 //!
 //! `EncryptingBackend<B>` wraps a storage backend and encrypts all object data

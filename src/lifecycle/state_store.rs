@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Persistent runtime state for lifecycle rules.
 //!
 //! Rules are YAML-owned. The config DB stores only scheduler state,

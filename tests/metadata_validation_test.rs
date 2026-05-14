@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Metadata validation tests: verify correct handling of missing, partial, and wrong metadata.
 //!
 //! These tests ensure the proxy degrades gracefully (not catastrophically) when

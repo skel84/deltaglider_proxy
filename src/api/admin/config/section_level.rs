@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Section-level admin config API (Wave 1 of the admin UI revamp).
 //!
 //! Provides section-scoped GET / PUT / validate endpoints:

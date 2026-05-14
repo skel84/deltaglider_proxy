@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Multipart upload S3 handlers: CreateMultipartUpload, CompleteMultipartUpload.
 
 use super::{

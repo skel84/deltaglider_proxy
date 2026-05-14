@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Full-state export/import (backup & restore).
 //!
 //! ## Export shape

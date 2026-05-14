@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! HTTP-layer integration tests for anonymous LIST against public prefixes.
 //!
 //! Regression coverage for the AWS-parity bug where

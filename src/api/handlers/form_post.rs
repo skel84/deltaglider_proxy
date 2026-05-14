@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Browser presigned form-POST upload handling.
 //!
 //! S3 lets a browser upload directly to a bucket via an HTML form whose

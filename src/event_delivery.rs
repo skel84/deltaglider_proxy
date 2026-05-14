@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Background delivery for the durable event outbox.
 //!
 //! The dispatcher is intentionally conservative: it is disabled unless

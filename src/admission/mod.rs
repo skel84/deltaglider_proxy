@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Admission chain — pre-auth request gating (Phase 2).
 //!
 //! The admission chain runs before SigV4 verification and decides whether a

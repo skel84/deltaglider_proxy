@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Usage scanner handlers: scan_usage, get_usage, migrate_legacy.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};

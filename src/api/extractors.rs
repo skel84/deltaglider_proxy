@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Custom Axum extractors for S3 API validation
 //!
 //! These extractors provide automatic validation of S3 request parameters,

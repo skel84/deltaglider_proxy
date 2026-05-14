@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! S3 sync for the IAM config database.
 //!
 //! When `DGP_CONFIG_SYNC_BUCKET` is set, the encrypted config DB file is

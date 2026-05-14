@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Shared engine-routed object transfer primitives.
 //!
 //! Replication and lifecycle transitions both need the same copy semantics:

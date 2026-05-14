@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! DeltaGlider Proxy - S3-compatible object storage with DeltaGlider deduplication
 //!
 //! This library provides the core functionality for the DeltaGlider Proxy S3 server.

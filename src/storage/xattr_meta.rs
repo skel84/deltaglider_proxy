@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! xattr-based metadata storage for the filesystem backend.
 //!
 //! All metadata is stored as a single `user.dg.metadata` extended attribute

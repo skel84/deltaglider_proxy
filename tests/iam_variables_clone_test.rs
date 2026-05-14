@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! IAM permission templates and duplicate API coverage.
 
 mod common;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Integration tests: S3 browser-lift session + open-mode browser session.
 
 mod common;

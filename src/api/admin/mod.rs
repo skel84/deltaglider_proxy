@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Admin GUI API handlers (separate from S3 SigV4 auth).
 
 mod audit;

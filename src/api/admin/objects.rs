@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Server-side bulk object operations for the admin UI.
 //!
 //! Pre-migration the React s3-browser shipped `@aws-sdk/client-s3`

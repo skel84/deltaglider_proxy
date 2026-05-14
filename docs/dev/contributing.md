@@ -139,4 +139,4 @@ Open an issue on GitHub. If it's a bug, include:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under [GPL-2.0-only](LICENSE).
+By contributing, you agree that your contributions will be licensed under [GPL-3.0-only](LICENSE).

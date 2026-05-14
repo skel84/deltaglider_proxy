@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! In-memory metadata cache backed by moka
 //!
 //! Eliminates HEAD requests for metadata enrichment across the system.

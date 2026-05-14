@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Optimization verification tests
 //!
 //! Proves each optimization works correctly end-to-end through the real proxy:

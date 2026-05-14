@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! IAM type definitions: users, groups, permissions, actions, and authenticated identity.
 
 use iam_rs::IAMPolicy;

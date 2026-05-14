@@ -155,4 +155,4 @@ The Docker image includes a built-in healthcheck on port 9000 (15s interval).
 ## Source & License
 
 - **Source**: [github.com/beshu-tech/deltaglider_proxy](https://github.com/beshu-tech/deltaglider_proxy)
-- **License**: GPL-2.0
+- **License**: GPL-3.0

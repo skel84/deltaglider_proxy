@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Memory-bounded multipart upload integration test
 //!
 //! Verifies that the server process's peak RSS stays bounded during large

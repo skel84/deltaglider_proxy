@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Phase 3c.3 — Declarative-mode IAM reconciler.
 //!
 //! In `iam_mode: declarative` the YAML `access.*` fields are the

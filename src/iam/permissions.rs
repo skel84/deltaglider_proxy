@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Permission evaluation: pure functions with no I/O, no framework dependencies.
 //!
 //! The public API is via `AuthenticatedUser::can()` / `can_see_bucket()` / `is_admin()`.

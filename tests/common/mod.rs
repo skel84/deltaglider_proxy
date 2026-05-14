@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Shared test infrastructure for integration tests
 //!
 //! Provides TestServer (filesystem and S3 backends), data generators,

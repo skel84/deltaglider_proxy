@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! LRU cache for reference files (backed by moka)
 //!
 //! PERF: This replaced a hand-rolled `parking_lot::Mutex<LruCache>` with

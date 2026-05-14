@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Experimental `s3s` protocol adapter.
 //!
 //! This module is intentionally feature-gated (`s3s-adapter`) and not wired

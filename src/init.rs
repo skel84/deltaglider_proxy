@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Interactive configuration wizard for `--init` flag.
 //!
 //! Walks the user through creating a `deltaglider_proxy.toml` file,

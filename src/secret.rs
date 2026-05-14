@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Secret material with non-secret identifiers.
 //!
 //! Move D from the architectural review. Today the codebase has

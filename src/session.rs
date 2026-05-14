@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! In-memory session store for admin GUI authentication.
 
 use parking_lot::RwLock;

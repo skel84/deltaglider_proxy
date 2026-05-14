@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Regression tests for the public IAM identity resolver used by the browser.
 //!
 //! `POST /_/api/iam/identity` accepts S3 IAM credentials and returns the same

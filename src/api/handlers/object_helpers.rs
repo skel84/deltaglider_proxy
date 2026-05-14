@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Private helpers for object handlers: range parsing, conditionals, response overrides,
 //! PUT/COPY internals, multipart upload parts, and body decoding.
 

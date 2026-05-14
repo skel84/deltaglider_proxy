@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Encrypted configuration database backed by SQLCipher.
 //!
 //! Stores IAM users and permissions in an encrypted SQLite database.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Shared infrastructure for background job runners.
 //!
 //! - [`parse_duration_or`] — env-var duration parsing with sensible

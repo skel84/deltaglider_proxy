@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! OIDC (OpenID Connect) provider implementation.
 //!
 //! Supports any OIDC-compliant Identity Provider: Google, Okta, Azure AD, Keycloak, etc.

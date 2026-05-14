@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! H1 correctness fix regression tests: the ETag returned by
 //! CompleteMultipartUpload must match the ETag returned by every
 //! subsequent HEAD/GET/LIST on that object.

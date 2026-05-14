@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Admission-trace admin handler (Phase 2).
 //!
 //! `POST /_/api/admin/config/trace` — dry-run a synthetic request through

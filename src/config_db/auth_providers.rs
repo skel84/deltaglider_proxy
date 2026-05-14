@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! CRUD operations for external auth providers, group mapping rules, and external identities.
 
 use rusqlite::{params, OptionalExtension};

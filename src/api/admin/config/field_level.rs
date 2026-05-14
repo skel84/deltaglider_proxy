@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Legacy field-level admin-GUI config API — `GET` and `PUT /api/admin/config`.
 //!
 //! The admin GUI forms post partial JSON (only the fields being edited).

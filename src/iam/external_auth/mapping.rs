@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Group mapping evaluation: maps external identity attributes to local group IDs.
 
 use crate::config_db::auth_providers::GroupMappingRule;

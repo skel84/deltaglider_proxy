@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Integration tests for the Phase 4 admin-API CLI wrappers
 //! (`config apply`, `admission trace`).
 //!

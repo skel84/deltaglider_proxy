@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Error response XML compliance tests
 //!
 //! Uses reqwest (not aws-sdk-s3) to inspect raw HTTP responses.

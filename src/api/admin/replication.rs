@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Admin API endpoints for lazy bucket replication.
 //!
 //! Routes (all session-gated via the surrounding middleware):

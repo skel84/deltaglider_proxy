@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 use rusqlite::{params, Connection};
 
 use crate::iam::Group;

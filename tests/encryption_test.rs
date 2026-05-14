@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Integration tests for transparent encryption at rest.
 //! All tests spawn a REAL proxy with DGP_ENCRYPTION_KEY set.
 

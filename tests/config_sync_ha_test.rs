@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! HA multi-replica config-DB sync tests.
 //!
 //! `src/config_db_sync.rs` is the only supported mode for running
