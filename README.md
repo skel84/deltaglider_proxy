@@ -296,4 +296,7 @@ Operator-facing docs are also bundled into the running binary at `/_/docs/`. Sou
 
 ## License
 
-[GPL-3.0](LICENSE)
+[GPL-3.0](LICENSE). Contributors must sign the [Contributor License
+Agreement](CLA.md), which assigns copyright to Beshu Limited so the
+project can be dual-licensed (open source + commercial). A bot will
+prompt you to sign on your first pull request.

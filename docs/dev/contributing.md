@@ -137,6 +137,33 @@ Open an issue on GitHub. If it's a bug, include:
 - DeltaGlider Proxy version (`deltaglider_proxy --version`)
 - Backend type (filesystem or S3)
 
-## License
+## License and Contributor Agreement
 
-By contributing, you agree that your contributions will be licensed under [GPL-3.0-only](LICENSE).
+### Code is GPL-3.0
+
+DeltaGlider Proxy is licensed under [GPL-3.0-only](../../LICENSE).
+Every Rust source file must start with the SPDX header:
+
+```rust
+// SPDX-License-Identifier: GPL-3.0-only
+```
+
+CI fails if a `.rs` file is missing this header. Run
+`./scripts/check-spdx-headers.sh` locally before pushing.
+
+### CLA required for all contributions
+
+To contribute, you must sign the
+[Contributor License Agreement](../../CLA.md). By signing, you
+**assign copyright** in your contribution to **Beshu Limited**. This
+lets us dual-license the project (GPL-3.0 + commercial) — the same
+model used by ReadonlyREST and many other open-core products.
+
+**How to sign**: when you open your first pull request, a CLA
+Assistant bot will comment with a link and signing instructions. You
+sign once; future PRs from the same GitHub account are automatically
+accepted.
+
+If the bot has trouble or you need to sign by other means, email a
+signed copy of the CLA to `contact@beshu.tech` with subject:
+`DeltaGlider Proxy — CLA signed by [Your Name]`.

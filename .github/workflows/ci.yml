@@ -38,6 +38,16 @@ jobs:
       - name: Verify tests/*.rs map to CI --test flags
         run: ./scripts/check-integration-tests-in-ci.sh
 
+  verify-spdx-headers:
+    name: SPDX license headers
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Every .rs file must have SPDX-License-Identifier
+        run: ./scripts/check-spdx-headers.sh
+
   fmt:
     name: Rustfmt
     runs-on: k3s
