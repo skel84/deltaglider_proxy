@@ -5,39 +5,46 @@
 interface Screenshot {
   src: string;
   alt: string;
-  caption: string;
+  title: string;
+  description: string;
 }
 
 const screenshots: Screenshot[] = [
   {
     src: '/screenshots/iam.jpg',
-    alt: 'DeltaGlider admin UI showing the IAM user management page with users, groups, and permission policies',
-    caption: 'Per-user IAM with ABAC permissions',
+    alt: 'IAM user management',
+    title: 'Identity & Access Management',
+    description: 'Fine-grained ABAC permissions for users and groups. Map directly to OAuth roles and policies.',
   },
   {
     src: '/screenshots/object-replication.jpg',
-    alt: 'DeltaGlider admin UI showing replication rules between buckets, with run-now, pause, and delete-replication options',
-    caption: 'Replication rules between buckets and backends',
+    alt: 'Object replication',
+    title: 'Cross-Bucket Replication',
+    description: 'Configure real-time replication rules between S3, MinIO, or Hetzner with pause and resume controls.',
   },
   {
     src: '/screenshots/advanced_security.jpg',
-    alt: 'DeltaGlider admin UI showing the advanced security configuration page with encryption settings',
-    caption: 'AES-256-GCM at-rest encryption',
+    alt: 'Advanced security configuration',
+    title: 'AES-256-GCM Encryption',
+    description: 'Encrypt data at rest before it hits the bucket. Maintain complete custody of your encryption keys.',
   },
   {
     src: '/screenshots/analytics.jpg',
-    alt: 'DeltaGlider admin UI showing storage analytics with compression ratios and stored-footprint breakdown',
-    caption: 'Storage analytics — compression ratios live',
+    alt: 'Storage analytics',
+    title: 'Live Storage Analytics',
+    description: 'Monitor compression ratios and stored footprint across your entire infrastructure in real-time.',
   },
   {
     src: '/screenshots/bucket-policies.jpg',
-    alt: 'DeltaGlider admin UI showing per-bucket policy configuration including quotas and aliases',
-    caption: 'Per-bucket policy, quotas, and aliases',
+    alt: 'Bucket policies',
+    title: 'Bucket Policies & Quotas',
+    description: 'Enforce storage quotas, setup bucket aliases, and manage lifecycle rules from a single pane of glass.',
   },
   {
     src: '/screenshots/filebrowser.jpg',
-    alt: 'DeltaGlider admin UI showing the object browser with files in a bucket',
-    caption: 'Object browser with download and preview',
+    alt: 'Object browser',
+    title: 'Built-in Object Browser',
+    description: 'Navigate your buckets, preview files, and manage objects directly through the intuitive web interface.',
   },
 ];
 ---
@@ -46,7 +53,7 @@ const screenshots: Screenshot[] = [
   {
     screenshots.map((s) => (
       <figure class="screenshot-tile">
-        <div class="screenshot-frame">
+        <div class="screenshot-frame" data-src={s.src} data-alt={s.alt}>
           <img
             src={s.src}
             alt={s.alt}
@@ -55,12 +62,55 @@ const screenshots: Screenshot[] = [
             loading="lazy"
             decoding="async"
           />
+          <div class="glassbox">
+            <h3>{s.title}</h3>
+            <p>{s.description}</p>
+          </div>
         </div>
-        <figcaption>{s.caption}</figcaption>
       </figure>
     ))
   }
 </div>
+
+<dialog id="lightbox" class="lightbox">
+  <form method="dialog" class="lightbox-close-wrapper">
+    <button class="lightbox-close" aria-label="Close lightbox">&times;</button>
+  </form>
+  <img id="lightbox-img" src="" alt="" loading="lazy" />
+</dialog>
+
+<script>
+  const frames = document.querySelectorAll('.screenshot-frame');
+  const dialog = document.getElementById('lightbox') as HTMLDialogElement;
+  const img = document.getElementById('lightbox-img') as HTMLImageElement;
+
+  if (frames.length > 0 && dialog && img) {
+    frames.forEach(frame => {
+      frame.addEventListener('click', () => {
+        const src = frame.getAttribute('data-src');
+        const alt = frame.getAttribute('data-alt');
+        if (src) {
+          img.src = src;
+          img.alt = alt || '';
+          dialog.showModal();
+        }
+      });
+    });
+
+    // Close on backdrop click
+    dialog.addEventListener('click', (e) => {
+      const dialogDimensions = dialog.getBoundingClientRect();
+      if (
+        e.clientX < dialogDimensions.left ||
+        e.clientX > dialogDimensions.right ||
+        e.clientY < dialogDimensions.top ||
+        e.clientY > dialogDimensions.bottom
+      ) {
+        dialog.close();
+      }
+    });
+  }
+</script>
 
 <style>
   .screenshot-gallery {
@@ -86,33 +136,133 @@ const screenshots: Screenshot[] = [
     margin: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
   }
 
   .screenshot-frame {
+    position: relative;
     border: 1px solid var(--rule);
-    border-radius: 8px;
+    border-radius: 12px;
     overflow: hidden;
     background: var(--bg-soft);
     box-shadow: var(--shadow-sm);
-    transition: transform 0.12s ease, box-shadow 0.18s ease;
-  }
-
-  .screenshot-frame:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-lg);
+    aspect-ratio: 4 / 3;
+    cursor: pointer;
   }
 
   .screenshot-frame img {
     width: 100%;
-    height: auto;
+    height: 100%;
+    object-fit: cover;
+    object-position: top;
     display: block;
+    transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
   }
 
-  figcaption {
-    font-size: 0.85rem;
-    color: var(--ink-soft);
-    line-height: 1.4;
-    text-align: center;
+  .screenshot-frame:hover img {
+    transform: scale(1.1);
+  }
+
+  .glassbox {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 1.5rem;
+    background: rgba(15, 23, 42, 0.6);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    transform: translateY(100%);
+    opacity: 0;
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+  }
+
+  .screenshot-frame:hover .glassbox {
+    transform: translateY(0);
+    opacity: 1;
+  }
+
+  .glassbox h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.1rem;
+    color: var(--brand);
+    font-weight: 700;
+  }
+
+  .glassbox p {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--ink-strong);
+    line-height: 1.5;
+  }
+
+  /* === Lightbox Styles === */
+  .lightbox {
+    padding: 0;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    max-width: 90vw;
+    max-height: 90vh;
+    overflow: visible;
+  }
+
+  .lightbox::backdrop {
+    background: rgba(11, 15, 25, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .lightbox img {
+    display: block;
+    max-width: 100%;
+    max-height: 90vh;
+    border-radius: 8px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    object-fit: contain;
+  }
+
+  .lightbox-close-wrapper {
+    position: absolute;
+    top: -2rem;
+    right: -2rem;
+  }
+
+  .lightbox-close {
+    background: var(--bg-card);
+    border: 1px solid var(--rule);
+    color: var(--ink-strong);
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    font-size: 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: var(--shadow-md);
+    transition: all 0.2s ease;
+  }
+
+  .lightbox-close:hover {
+    background: var(--brand);
+    border-color: var(--brand);
+    color: #0b0f19;
+    transform: scale(1.1);
+  }
+  
+  @media (max-width: 768px) {
+    .lightbox-close-wrapper {
+      top: 0.5rem;
+      right: 0.5rem;
+    }
+    .lightbox-close {
+      width: 32px;
+      height: 32px;
+      font-size: 1.2rem;
+    }
   }
 </style>

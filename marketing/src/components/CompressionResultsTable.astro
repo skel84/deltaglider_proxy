@@ -37,37 +37,35 @@ const rows: Row[] = [
   {
     version: '1.69.0',
     variant: 'warm-path',
-    sourceSize: '2,866 MB',
-    storedSize: '32.4 MB',
-    compression: '88.5×',
+    sourceSize: '2.8 GB',
+    storedSize: '32 MB',
+    compression: '98.8%',
     verdict: 'Excellent',
   },
   {
     version: '1.38.0',
     variant: 'warm-path, multi-shape',
-    sourceSize: '13,795 MB',
-    storedSize: '3,355 MB',
-    compression: '4.1×',
+    sourceSize: '13.7 GB',
+    storedSize: '3.3 GB',
+    compression: '75.6%',
     verdict: 'Fair (cross-major ES range)',
   },
   {
     version: '1.17.1',
     variant: 'cold from Glacier',
-    sourceSize: '26.5 MB',
-    storedSize: '6.87 MB',
-    compression: '3.8×',
+    sourceSize: '26 MB',
+    storedSize: '6.8 MB',
+    compression: '74.0%',
     verdict: 'Small dataset, dominated by reference',
   },
 ];
 ---
 
-<table>
+<table class="compact-table">
   <thead>
     <tr>
       <th>Version</th>
-      <th>Source size</th>
-      <th>Stored size</th>
-      <th>Compression</th>
+      <th>Size (Encrypted)</th>
       <th>Verdict</th>
     </tr>
   </thead>
@@ -76,13 +74,16 @@ const rows: Row[] = [
       rows.map((r) => (
         <tr>
           <td>
-            {r.version}
-            {detailed && r.variant ? ` (${r.variant})` : ''}
+            <strong>{r.version}</strong>
+            {detailed && r.variant ? <div class="variant-label">{r.variant}</div> : ''}
           </td>
-          <td>{r.sourceSize}</td>
-          <td>{r.storedSize}</td>
           <td>
-            <strong>{r.compression}</strong>
+            <div class="size-flow">
+              <span class="src-size">{r.sourceSize}</span>
+              <span class="arrow">→</span>
+              <span class="dst-size">{r.storedSize}</span>
+              <span class="compression-badge">-{r.compression}</span>
+            </div>
           </td>
           <td>{r.verdict}</td>
         </tr>
@@ -95,13 +96,87 @@ const rows: Row[] = [
             <strong>Full migration</strong>
           </td>
           <td>
-            <strong>1.71 TB</strong>
+            <div class="size-flow">
+              <span class="src-size">1.71 TB</span>
+              <span class="arrow">→</span>
+              <span class="dst-size">TBD</span>
+            </div>
           </td>
-          <td>TBD</td>
-          <td>TBD</td>
           <td>In progress</td>
         </tr>
       )
     }
   </tbody>
 </table>
+
+<style>
+  .compact-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95rem;
+  }
+  
+  .compact-table th {
+    text-align: left;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--rule);
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    font-size: 0.8rem;
+    letter-spacing: 0.05em;
+  }
+
+  .compact-table td {
+    padding: 1rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: middle;
+  }
+
+  .compact-table tr:last-child td {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  .variant-label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+    margin-top: 0.25rem;
+  }
+
+  .size-flow {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: rgba(255,255,255,0.02);
+    padding: 0.4rem 0.75rem;
+    border-radius: 6px;
+    border: 1px solid var(--rule);
+  }
+
+  .src-size {
+    color: var(--ink-soft);
+    text-decoration: line-through;
+    font-family: var(--font-mono);
+  }
+
+  .arrow {
+    color: var(--ink-faint);
+  }
+
+  .dst-size {
+    color: var(--ink-strong);
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+
+  .compression-badge {
+    background: var(--brand-soft);
+    color: var(--brand);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    margin-left: 0.25rem;
+  }
+</style>

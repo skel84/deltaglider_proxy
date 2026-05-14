@@ -31,18 +31,27 @@ const schemaTiers = SCHEMA_OFFER_BRACKETS.map((b) => ({
   description: b.description,
 }));
 
+const freeTiers = BRACKETS.filter((b) => b.id === 'oss' || b.id === 'trial');
+const commercialTiers = BRACKETS.filter((b) => b.name.startsWith('Production support — '));
+const customTiers = BRACKETS.filter((b) => b.id === 'commercial');
+
 /**
  * Special-case the trial-row description so the in-table link
  * to /trial keeps working. brackets.ts holds plain text only.
  */
 function renderDescription(id: string, description: string): string {
+  let html = description;
   if (id === 'trial') {
-    return description.replace(
+    html = html.replace(
       'See /trial',
       'See <a href="/trial">/trial</a>',
     );
   }
-  return description;
+  
+  // Highlight important metrics and absorb the trailing period
+  html = html.replace(/([0-9]+(?:-[0-9]+)? TB\+? stored footprint)\./, '<span class="pr-highlight">$1</span>');
+  
+  return html;
 }
 ---
 
@@ -58,45 +67,83 @@ function renderDescription(id: string, description: string): string {
     <JsonLd schema={pricingProductSchema(schemaTiers)} />
   </Fragment>
 
-  <section class="shell hero">
-    <h1>What does DeltaGlider save you?</h1>
-
-    <p class="hero-lede">
-      Type the numbers from your current AWS S3 bill. Get an honest
-      answer in 30 seconds. No email required.
-    </p>
-  </section>
-
-  <div class="shell">
-    <section id="calculator">
-      <PricingCalculator client:visible />
+    <section class="calculator-hero shell">
+      <div class="calculator-hero-inner measure-wide">
+        <h2>What does DeltaGlider save you?</h2>
+        <p>
+          Type the numbers from your current AWS S3 bill. Get an honest answer in 30
+          seconds. No email required.
+        </p>
+      </div>
     </section>
 
+    <section class="calculator-section shell">
+      <div class="calculator-container">
+        <PricingCalculator client:load />
+      </div>
+    </section>
+
+  <div class="shell">
     <section class="tiers">
       <h2>What you'd pay</h2>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Tier</th>
-            <th>Price</th>
-            <th>What you get</th>
-          </tr>
-        </thead>
-        <tbody>
-          {
-            BRACKETS.map((b) => (
-              <tr>
-                <td>
-                  <strong>{b.name}</strong>
-                </td>
-                <td>{b.priceLabel}</td>
-                <td set:html={renderDescription(b.id, b.description)} />
-              </tr>
-            ))
-          }
-        </tbody>
-      </table>
+      <h3>Open Source & Evaluation</h3>
+      <div class="pricing-stack">
+        {
+          freeTiers.map((b) => {
+            return (
+              <div class="pricing-row">
+                <div class="pr-tier">
+                  <h4 class="tier-title">{b.name}</h4>
+                </div>
+                <div class="pr-price">
+                  <span class="price-val">{b.priceLabel}</span>
+                </div>
+                <div class="pr-desc" set:html={renderDescription(b.id, b.description)} />
+              </div>
+            );
+          })
+        }
+      </div>
+
+      <h3 class="tiers-commercial-header">Production Support</h3>
+      <div class="pricing-pillars">
+        {
+          commercialTiers.map((b) => {
+            const shortName = b.name.replace('Production support — ', '');
+            return (
+              <div class="pricing-pillar">
+                <div class="pr-pillar-tier">
+                  <h4 class="tier-title">{shortName}</h4>
+                </div>
+                <div class="pr-pillar-price">
+                  <span class="price-val">{b.priceLabel}</span>
+                </div>
+                <div class="pr-pillar-desc" set:html={renderDescription(b.id, b.description)} />
+              </div>
+            );
+          })
+        }
+      </div>
+
+      <h3>Custom Licensing</h3>
+      <div class="pricing-stack">
+        {
+          customTiers.map((b) => {
+            return (
+              <div class="pricing-row">
+                <div class="pr-tier">
+                  <h4 class="tier-title">{b.name}</h4>
+                </div>
+                <div class="pr-price">
+                  <span class="price-val">{b.priceLabel}</span>
+                </div>
+                <div class="pr-desc" set:html={renderDescription(b.id, b.description)} />
+              </div>
+            );
+          })
+        }
+      </div>
     </section>
 
     <section class="meter">
@@ -155,60 +202,78 @@ function renderDescription(id: string, description: string): string {
     </section>
 
     <section class="faq">
-      <h2>Frequently asked</h2>
+      <div class="faq-header">
+        <h2>Frequently asked</h2>
+      </div>
 
-      <h3>Why is Starter $10k? That feels high for "support."</h3>
-      <p>
-        It's not just support — it's an SLA on critical infrastructure
-        plus direct Slack access to the senior engineers who wrote the
-        proxy. At your scale (typically 1–10 TB stored footprint = 100
-        TB+ of source artifacts), the savings calculator above shows
-        annual savings in the $30–60k range for typical SaaS deployments.
-        $10k lands in a defensible range relative to the value
-        delivered.
-      </p>
+      <div class="faq-grid">
+        <div class="faq-item">
+          <h3>Why is Starter $10k? That feels high for "support."</h3>
+          <p>
+            It's not just support — it's an SLA on critical infrastructure
+            plus direct Slack access to the senior engineers who wrote the
+            proxy. At your scale (typically 1–10 TB stored footprint = 100
+            TB+ of source artifacts), the savings calculator above shows
+            annual savings in the $30–60k range for typical SaaS deployments.
+            $10k lands in a defensible range relative to the value
+            delivered.
+          </p>
+        </div>
 
-      <h3>What happens if I exceed my bracket?</h3>
-      <p>
-        Measured at renewal, not mid-year. If you're at 12 TB stored
-        footprint at renewal, you renew at Growth. No surprise
-        invoices.
-      </p>
+        <div class="faq-item">
+          <h3>What happens if I exceed my bracket?</h3>
+          <p>
+            Measured at renewal, not mid-year. If you're at 12 TB stored
+            footprint at renewal, you renew at Growth. No surprise
+            invoices.
+          </p>
+        </div>
 
-      <h3>What about shrinking?</h3>
-      <p>
-        Same — you renew at a lower bracket and pay less. Brackets are
-        a relationship tier, not a usage meter.
-      </p>
+        <div class="faq-item">
+          <h3>What about shrinking?</h3>
+          <p>
+            Same — you renew at a lower bracket and pay less. Brackets are
+            a relationship tier, not a usage meter.
+          </p>
+        </div>
 
-      <h3>Replication doubles my footprint — am I being double-counted?</h3>
-      <p>
-        No. We count logical compressed bytes managed by DeltaGlider.
-        Storage-layer replicas don't count.
-      </p>
+        <div class="faq-item">
+          <h3>Replication doubles my footprint — am I being double-counted?</h3>
+          <p>
+            No. We count logical compressed bytes managed by DeltaGlider.
+            Storage-layer replicas don't count.
+          </p>
+        </div>
 
-      <h3>Why don't you publish the Enterprise price?</h3>
-      <p>
-        Because Enterprise deals genuinely vary — multi-region SLA
-        shape, named-eng-contact attribution, custom audit/compliance
-        attachments. The $60k Scale price is the anchor below;
-        Enterprise is a conversation, not a row in a table.
-      </p>
+        <div class="faq-item">
+          <h3>Why don't you publish the Enterprise price?</h3>
+          <p>
+            Because Enterprise deals genuinely vary — multi-region SLA
+            shape, named-eng-contact attribution, custom audit/compliance
+            attachments. The $60k Scale price is the anchor below;
+            Enterprise is a conversation, not a row in a table.
+          </p>
+        </div>
 
-      <h3>I'm at 0 TB today — do I still get the trial?</h3>
-      <p>
-        Yes. The trial is bracket-agnostic. Try the relationship
-        before committing to a bracket. <a href="/trial">/trial</a>
-      </p>
+        <div class="faq-item">
+          <h3>I'm at 0 TB today — do I still get the trial?</h3>
+          <p>
+            Yes. The trial is bracket-agnostic. Try the relationship
+            before committing to a bracket. <a href="/trial">/trial</a>
+          </p>
+        </div>
 
-      <h3>How do I get a real compression number on my own data?</h3>
-      <p>
-        Run <code>docker run deltaglider/proxy</code> against your own
-        bucket and read the Delta Efficiency Panel at
-        <code>/_/admin/diagnostics/delta-efficiency</code>. No data
-        leaves your network. Or talk to us and we'll help you set it
-        up.
-      </p>
+        <div class="faq-item">
+          <h3>How do I get a real compression number on my own data?</h3>
+          <p>
+            Run <code>docker run deltaglider/proxy</code> against your own
+            bucket and read the Delta Efficiency Panel at
+            <code>/_/admin/diagnostics/delta-efficiency</code>. No data
+            leaves your network. Or talk to us and we'll help you set it
+            up.
+          </p>
+        </div>
+      </div>
     </section>
 
     <section class="cta">
@@ -237,9 +302,249 @@ function renderDescription(id: string, description: string): string {
     margin: 3rem 0;
   }
 
-  .faq h3 {
-    margin-top: 1.5rem;
-    font-size: 1.05rem;
+  /* === FAQ Redesign === */
+  .faq-header {
+    margin-bottom: 2.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .faq-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2.5rem;
+  }
+
+  @media (min-width: 768px) {
+    .faq-grid {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 3.5rem 3rem;
+    }
+  }
+
+  .faq-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .faq-item h3 {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--ink-strong);
+    line-height: 1.4;
+    letter-spacing: -0.01em;
+  }
+
+  .faq-item p {
+    margin: 0;
+    font-size: 0.95rem;
     color: var(--ink-soft);
+    line-height: 1.6;
+  }
+
+  .faq-item a {
+    color: var(--brand);
+    text-decoration: underline;
+    text-underline-offset: 4px;
+    text-decoration-color: rgba(25, 230, 203, 0.3);
+    transition: text-decoration-color 0.2s ease;
+  }
+
+  .faq-item a:hover {
+    text-decoration-color: var(--brand);
+  }
+
+  .faq-item code {
+    background: rgba(255, 255, 255, 0.05);
+    padding: 0.15rem 0.3rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: var(--ink);
+  }
+
+  /* === Calculator Section === */
+  .calculator-hero {
+    padding: 6rem 0 8rem; /* Extra padding at bottom for the overlapping calculator */
+    text-align: center;
+    background: radial-gradient(circle at 50% -20%, rgba(25, 230, 203, 0.15), transparent 60%),
+                var(--bg);
+    border-bottom: 1px solid var(--rule); /* Establish a solid "hero line" */
+  }
+
+  .calculator-hero-inner {
+    margin: 0 auto;
+  }
+
+  .calculator-hero h2 {
+    font-size: 3rem;
+    margin-bottom: 1rem;
+    letter-spacing: -0.02em;
+    color: var(--ink-strong);
+  }
+
+  .calculator-hero p {
+    font-size: 1.15rem;
+    color: var(--ink-soft);
+  }
+
+  .calculator-section {
+    padding-bottom: 4rem;
+  }
+
+  .calculator-container {
+    margin: -5rem auto 0; /* Pull up over the hero section */
+    max-width: 1040px; /* Make it significantly wider than measure-wide */
+    position: relative;
+    z-index: 10;
+  }
+
+  /* === Tiers Layout === */
+  .tiers h3 {
+    margin-top: 3rem;
+    margin-bottom: 1rem;
+    font-size: 1.15rem;
+    color: var(--ink-soft);
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 0.5rem;
+  }
+  
+  .tiers h3.tiers-commercial-header {
+    color: var(--brand);
+    border-bottom-color: var(--brand-soft);
+  }
+
+  .tier-title {
+    margin: 0;
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: var(--ink-strong);
+    letter-spacing: -0.01em;
+  }
+
+  /* === Pricing Stack Redesign === */
+  .pricing-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+
+  .pricing-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1rem;
+    background: var(--bg-card);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    padding: 1.5rem;
+    box-shadow: var(--shadow-sm);
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease, border-color 0.2s ease;
+  }
+
+  @media (min-width: 768px) {
+    .pricing-row {
+      grid-template-columns: 2fr 1.5fr 4fr;
+      align-items: center;
+      gap: 2rem;
+      padding: 1.75rem 2rem;
+    }
+  }
+
+  .pricing-row:hover {
+    transform: translateY(-2px) scale(1.01);
+    box-shadow: var(--shadow-md);
+    border-color: var(--rule-strong);
+  }
+
+  .pr-price .price-val {
+    font-size: 1.45rem;
+    font-weight: 700;
+    color: var(--brand);
+    font-family: var(--font-mono);
+  }
+
+  .pr-desc {
+    font-size: 0.95rem;
+    color: var(--ink-soft);
+    line-height: 1.55;
+    margin: 0;
+  }
+
+  .pr-desc :global(.pr-highlight) {
+    color: var(--ink-strong);
+    font-weight: 600;
+  }
+
+  /* === Pricing Pillars Design === */
+  .pricing-pillars {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+    margin-top: 1.5rem;
+  }
+
+  @media (min-width: 768px) {
+    .pricing-pillars {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  @media (min-width: 1024px) {
+    .pricing-pillars {
+      grid-template-columns: repeat(4, 1fr);
+    }
+  }
+
+  .pricing-pillar {
+    background: var(--bg-card);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    padding: 2rem 1.5rem;
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease, border-color 0.2s ease;
+    border-top: 4px solid var(--brand);
+  }
+
+  .pricing-pillar:hover {
+    transform: translateY(-4px) scale(1.02);
+    box-shadow: var(--shadow-md), 0 0 20px var(--brand-soft);
+    border-color: var(--rule-strong);
+  }
+
+  .pr-pillar-tier {
+    margin-bottom: 0.5rem;
+  }
+
+  .pr-pillar-price {
+    margin-bottom: 1.5rem;
+  }
+
+  .pr-pillar-price .price-val {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--brand);
+    font-family: var(--font-mono);
+  }
+
+  .pr-pillar-desc {
+    font-size: 0.95rem;
+    color: var(--ink-soft);
+    line-height: 1.55;
+    margin: 0;
+  }
+
+  .pr-pillar-desc :global(.pr-highlight) {
+    color: var(--ink-strong);
+    font-weight: 600;
+    display: block; 
+    margin-bottom: 0.5rem;
   }
 </style>

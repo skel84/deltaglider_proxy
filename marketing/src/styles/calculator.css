@@ -5,10 +5,14 @@
  */
 
 .calc {
-  margin: 2rem 0;
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--rule-strong);
+  border-radius: 16px; /* slightly larger radius for premium feel */
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
   overflow: hidden;
 }
 
@@ -77,9 +81,16 @@
   padding: 0.4rem 0.6rem;
   font-family: var(--font-mono);
   font-size: 0.95rem;
-  border: 1px solid var(--rule);
-  border-radius: 3px;
-  background: var(--bg);
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--ink-strong);
+}
+
+.field input[type="number"]:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 2px var(--brand-soft);
 }
 
 .field-help {
@@ -101,14 +112,16 @@
 
 .region-buttons button {
   padding: 0.5rem 0;
-  background: var(--bg);
-  border: 1px solid var(--rule);
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--rule-strong);
   border-radius: 4px;
   font-family: var(--font-mono);
   font-size: 0.9rem;
   font-weight: 500;
+  color: var(--ink-strong);
   cursor: pointer;
   min-width: 0;
+  transition: all 0.2s ease;
 }
 
 .region-buttons button:hover {
@@ -118,7 +131,8 @@
 .region-buttons .btn-active {
   background: var(--brand);
   border-color: var(--brand);
-  color: var(--bg);
+  color: #0b0f19;
+  box-shadow: var(--shadow-glow);
 }
 
 /* === Cost shortcuts === */
@@ -133,12 +147,13 @@
 .cost-shortcuts button {
   padding: 0.2rem 0.5rem;
   font-size: 0.75rem;
-  background: var(--bg);
-  border: 1px solid var(--rule);
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--rule-strong);
   border-radius: 3px;
   font-family: var(--font-mono);
   cursor: pointer;
   color: var(--ink-soft);
+  transition: all 0.2s ease;
 }
 
 .cost-shortcuts button:hover {
@@ -177,8 +192,31 @@
   margin-bottom: 0.75rem;
 }
 
-.card-ok h3 strong {
+.calc-hero-heading {
+  font-size: 1.25rem !important;
+  color: var(--ink-strong) !important;
+  margin-bottom: 0.5rem !important;
+}
+
+.calc-hero-number {
+  font-size: 3rem;
   color: var(--brand);
+  text-shadow: var(--shadow-glow);
+  display: block;
+  line-height: 1.15;
+  margin-top: 0.25rem;
+  letter-spacing: -0.03em;
+}
+
+.calc-hero-subtext {
+  font-size: 1.05rem;
+  color: var(--ink-soft);
+}
+
+.calc-hero-net {
+  color: var(--ink-strong);
+  font-size: 1.1rem;
+  font-weight: 700;
 }
 
 .card-enterprise h3,
@@ -201,12 +239,12 @@
 }
 
 .warning-chip {
-  background: #fff8e1;
-  border: 1px solid #f0c040;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
   border-radius: 4px;
   padding: 0.5rem 0.75rem;
   font-size: 0.85rem;
-  color: var(--ink);
+  color: #fcd34d;
   margin: 0.3rem 0;
 }
 
@@ -215,84 +253,164 @@
 .card-ctas {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  align-items: center;
+  gap: 1.5rem;
   margin: 1.25rem 0;
 }
 
-.calc .btn-tertiary {
-  background: transparent;
+.link-action {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.95rem;
+  color: var(--ink-soft);
+  text-decoration: underline;
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.2s ease;
+}
+
+.link-action:hover {
+  color: var(--brand);
 }
 
 /* === Breakdown table === */
 
+/* === Breakdown table enhancements === */
+
 .breakdown {
-  margin: 1.5rem 0 0 0;
+  margin: 2rem 0;
   width: 100%;
-  font-size: 0.9rem;
+  font-size: 0.95rem;
   font-family: var(--font-mono);
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
 }
 
 .breakdown th,
 .breakdown td {
-  padding: 0.4rem 0.5rem;
+  padding: 0.8rem 1rem;
   border-bottom: 1px solid var(--rule);
   text-align: right;
+  transition: background 0.2s ease;
 }
 
 .breakdown thead th {
   text-align: right;
   font-size: 0.75rem;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   color: var(--ink-faint);
   font-family: var(--font-sans);
+  border-bottom: 2px solid var(--rule-strong);
 }
 
 .breakdown tbody th {
   text-align: left;
-  font-weight: 400;
-  color: var(--ink-soft);
+  font-weight: 500;
+  color: var(--ink-strong);
   font-family: var(--font-sans);
+}
+
+.breakdown .col-today {
+  color: var(--ink-soft);
+  opacity: 0.8;
+}
+
+.breakdown .col-dgp {
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  font-weight: 600;
+}
+
+.breakdown thead th.col-dgp {
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+}
+.breakdown tbody tr:last-child td.col-dgp {
+  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
+  border-bottom: none;
 }
 
 .breakdown tr.subtotal th,
 .breakdown tr.subtotal td {
-  font-weight: 600;
-  border-top: 2px solid var(--rule);
+  font-weight: 700;
+  border-top: 2px solid var(--rule-strong);
+  font-size: 1rem;
+}
+
+.breakdown tr:last-child.subtotal th,
+.breakdown tr:last-child.subtotal td {
+  font-size: 1.15rem;
+  padding-top: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: none;
+}
+
+.breakdown tr:last-child.subtotal td.col-dgp {
+  color: var(--brand);
+  font-size: 1.35rem;
+  text-shadow: var(--shadow-glow);
 }
 
 /* === Formula details === */
 
 .formula {
-  margin-top: 1.5rem;
+  margin-top: 2rem;
   border: 1px solid var(--rule);
-  border-radius: 4px;
-  background: var(--bg-soft);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.4);
+  overflow: hidden;
+  transition: all 0.3s ease;
 }
 
 .formula summary {
-  padding: 0.6rem 1rem;
+  padding: 1rem 1.25rem;
   cursor: pointer;
-  font-size: 0.9rem;
-  color: var(--ink-soft);
-  font-weight: 500;
+  font-size: 0.95rem;
+  color: var(--ink-strong);
+  font-weight: 600;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: rgba(255, 255, 255, 0.03);
+  transition: background 0.2s ease;
+}
+
+.formula summary::-webkit-details-marker {
+  display: none;
+}
+
+.formula summary::before {
+  content: '▶';
+  font-size: 0.75rem;
+  color: var(--brand);
+  transition: transform 0.2s ease;
+  display: inline-block;
+}
+
+.formula[open] summary::before {
+  transform: rotate(90deg);
 }
 
 .formula summary:hover {
-  color: var(--brand);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .formula-body {
-  padding: 0 1rem 1rem 1rem;
+  padding: 1.25rem;
+  border-top: 1px solid var(--rule);
 }
 
 .formula-body p {
   font-size: 0.85rem;
   color: var(--ink-soft);
+  margin-top: 0;
 }
 
 .formula-body pre {
-  margin: 0.5rem 0;
+  margin: 1rem 0;
   font-size: 0.8rem;
 }

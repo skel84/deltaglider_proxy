@@ -23,12 +23,15 @@
     max-width: var(--measure-wide);
     margin: 2rem 0;
     padding: 1.75rem 2rem;
-    background: var(--ink-900);
-    color: var(--ink-100);
+    background: var(--bg-card);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    color: var(--ink-strong);
     border-radius: 8px;
+    border: 1px solid var(--rule);
     border-left: 4px solid var(--accent);
     position: relative;
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--shadow-md);
   }
 
   .callout-eyebrow {
@@ -42,7 +45,7 @@
   }
 
   .callout-body {
-    color: var(--ink-100);
+    color: var(--ink-800);
     font-size: 1.02rem;
     line-height: 1.55;
     margin: 0;
@@ -50,7 +53,7 @@
   }
 
   .callout-body strong {
-    color: white;
+    color: var(--brand);
     font-weight: 600;
   }
 
@@ -60,14 +63,14 @@
   }
 
   .callout-cta a {
-    color: var(--teal-300);
+    color: var(--brand);
     font-weight: 600;
     text-decoration: none;
     border-bottom: 1px solid transparent;
   }
 
   .callout-cta a:hover {
-    color: var(--teal-200);
-    border-bottom-color: var(--teal-300);
+    color: var(--brand-dark);
+    border-bottom-color: var(--brand);
   }
 </style>

@@ -270,10 +270,10 @@ function ResultCard({ result, onCopy, copyState, showFormula, onToggleFormula }:
           or talk to us about a different fit.
         </p>
         <div className="card-ctas">
-          <a className="btn" href="https://github.com/beshu-tech/deltaglider_proxy">
+          <a className="btn btn-primary" href="https://github.com/beshu-tech/deltaglider_proxy">
             Try the OSS build
           </a>
-          <a className="btn" href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Different%20fit">
+          <a className="link-action" href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Different%20fit">
             Email us
           </a>
         </div>
@@ -299,7 +299,7 @@ function ResultCard({ result, onCopy, copyState, showFormula, onToggleFormula }:
           >
             Schedule a sales call
           </a>
-          <button type="button" className="btn" onClick={onCopy}>
+          <button type="button" className="link-action" onClick={onCopy}>
             {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? 'Copy failed' : 'Copy this estimate'}
           </button>
         </div>
@@ -311,13 +311,13 @@ function ResultCard({ result, onCopy, copyState, showFormula, onToggleFormula }:
   // kind === 'ok'
   return (
     <div className="card card-ok">
-      <h3 id="calc-result-heading">
-        You'd save approximately <strong>{formatUsd(result.savings, { compact: true })}/year</strong>.
+      <h3 id="calc-result-heading" className="calc-hero-heading">
+        You'd save approximately <strong className="calc-hero-number">{formatUsd(result.savings, { compact: true })}/year</strong>
       </h3>
-      <p>
+      <p className="calc-hero-subtext">
         After subscribing to <strong>{result.bracket.name}</strong> at{' '}
         <strong>{result.bracket.priceLabel}</strong>,
-        net annual savings: <strong>{formatUsd(result.netSavings)}</strong>.
+        net annual savings: <strong className="calc-hero-net">{formatUsd(result.netSavings)}</strong>.
       </p>
 
       {result.warnings.length > 0 && (
@@ -334,13 +334,13 @@ function ResultCard({ result, onCopy, copyState, showFormula, onToggleFormula }:
       )}
 
       <div className="card-ctas">
-        <a className="btn btn-primary" href="/trial">
+        <a className="btn btn-brand" href="/trial">
           Start a 30-day trial
         </a>
-        <a className="btn" href="https://github.com/beshu-tech/deltaglider_proxy">
+        <a className="link-action" href="https://github.com/beshu-tech/deltaglider_proxy">
           Run the OSS build
         </a>
-        <button type="button" className="btn btn-tertiary" onClick={onCopy}>
+        <button type="button" className="link-action" onClick={onCopy}>
           {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? 'Copy failed' : 'Copy this estimate'}
         </button>
       </div>
@@ -348,7 +348,9 @@ function ResultCard({ result, onCopy, copyState, showFormula, onToggleFormula }:
       <BreakdownTable lines={result.lines} />
 
       <details className="formula" open={showFormula} onToggle={onToggleFormula}>
-        <summary>Show your work</summary>
+        <summary>
+          <span>Show your work</span>
+        </summary>
         <Formula />
       </details>
     </div>
@@ -363,8 +365,8 @@ function BreakdownTable({ lines }: { lines: BreakdownLine[] }) {
       <thead>
         <tr>
           <th></th>
-          <th>Today</th>
-          <th>With DeltaGlider</th>
+          <th className="col-today">Today</th>
+          <th className="col-dgp">With DeltaGlider</th>
         </tr>
       </thead>
       <tbody>
@@ -374,8 +376,8 @@ function BreakdownTable({ lines }: { lines: BreakdownLine[] }) {
           return (
             <tr key={line.label} className={isSubtotal ? 'subtotal' : ''}>
               <th scope="row">{line.label}</th>
-              <td>{fmt(line.today)}</td>
-              <td>{fmt(line.dgp)}</td>
+              <td className="col-today">{fmt(line.today)}</td>
+              <td className="col-dgp">{fmt(line.dgp)}</td>
             </tr>
           );
         })}

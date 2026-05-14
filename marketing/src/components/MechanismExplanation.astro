@@ -3,7 +3,7 @@
 // The 614× single-file reduction is the proof.
 ---
 
-<section class="mechanism">
+<section class="mechanism fade-up delay-1">
   <span class="section-eyebrow">The proof</span>
   <h2>Why xdelta3 works on ZIP files</h2>
 
@@ -41,24 +41,34 @@
 
   .mechanism-stat {
     margin: 2rem 0;
-    padding: 1.5rem 1.75rem;
-    background: var(--brand-soft);
-    border: 1px solid var(--teal-200);
-    border-radius: 8px;
+    padding: 2rem;
+    background: var(--bg-card);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--rule);
+    border-radius: 12px;
     max-width: var(--measure-wide);
     display: flex;
     align-items: center;
     gap: 1.5rem;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  }
+
+  .mechanism-stat:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 15px 35px -10px rgba(25, 230, 203, 0.15);
+    border-color: var(--brand-soft);
   }
 
   .stat-number {
     font-family: var(--font-mono);
     font-size: clamp(2.5rem, 5vw, 3.5rem);
     font-weight: 700;
-    color: var(--brand-dark);
+    color: var(--brand);
     line-height: 1;
     flex-shrink: 0;
     letter-spacing: -0.04em;
+    text-shadow: 0 0 20px rgba(25, 230, 203, 0.3);
   }
 
   .stat-label {
