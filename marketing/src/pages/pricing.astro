@@ -1,0 +1,267 @@
+---
+// /pricing — v5 plan §4.5.
+// Static for Week 1; the calculator React island ships Week 2.
+// The static tier table is the source of truth that the calculator
+// will reflect via brackets.ts (single SSOT, see v5 §5.6).
+
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout
+  title="Pricing — DeltaGlider"
+  description="Open source GPL-3.0 forever. Production support from $10k/year, scaling with your stored footprint. Calculator (week 2) shows your annual savings live."
+>
+  <section class="shell hero">
+    <h1>What does DeltaGlider save you?</h1>
+
+    <p class="hero-lede">
+      Type the numbers from your current AWS S3 bill. Get an honest
+      answer in 30 seconds. No email required.
+    </p>
+  </section>
+
+  <div class="shell">
+    <section id="calculator" class="calculator-placeholder">
+      <h2>Savings calculator</h2>
+      <div class="placeholder-card">
+        <p>
+          <strong>Coming next week.</strong> The dynamic savings
+          calculator is being built — it takes your current TB
+          footprint, regions, and storage cost, and tells you what
+          you'd save per year with DeltaGlider plus which production-
+          support bracket you'd land in.
+        </p>
+        <p>
+          In the meantime, the static tier table below is exact. If
+          you want a custom estimate before the calculator ships,
+          email
+          <a href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Sizing%20estimate">contact@beshu.tech</a>
+          with your TB-on-AWS today and we'll do the math by hand.
+        </p>
+      </div>
+    </section>
+
+    <section class="tiers">
+      <h2>What you'd pay</h2>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Tier</th>
+            <th>Price</th>
+            <th>What you get</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Open Source</strong></td>
+            <td>Free, GPL-3.0</td>
+            <td>
+              Full product. No footprint cap. Self-host. Community
+              Slack + GitHub.
+            </td>
+          </tr>
+          <tr>
+            <td><strong>Production support trial</strong></td>
+            <td>Free, 30 days</td>
+            <td>
+              Direct engineering Slack, response SLA, one architecture
+              review call. See <a href="/trial">/trial</a>.
+            </td>
+          </tr>
+          <tr>
+            <td><strong>Production support — Starter</strong></td>
+            <td>$10k/year</td>
+            <td>
+              Up to 10 TB stored footprint. Eng Slack + 4h
+              business-hours response SLA.
+            </td>
+          </tr>
+          <tr>
+            <td><strong>Production support — Growth</strong></td>
+            <td>$30k/year</td>
+            <td>
+              10–50 TB stored footprint. Same SLA + quarterly review
+              call.
+            </td>
+          </tr>
+          <tr>
+            <td><strong>Production support — Scale</strong></td>
+            <td>$60k/year</td>
+            <td>
+              50–250 TB stored footprint. 1h response SLA, monthly
+              review, named eng contact.
+            </td>
+          </tr>
+          <tr>
+            <td><strong>Production support — Enterprise</strong></td>
+            <td>Talk to sales</td>
+            <td>
+              250 TB+, multi-region, custom SLA, dedicated channel.
+            </td>
+          </tr>
+          <tr>
+            <td><strong>Commercial license</strong></td>
+            <td>Talk to sales</td>
+            <td>
+              For embedding DeltaGlider in a proprietary product, or
+              removing the GPL-3.0 obligation. Pricing depends on use
+              case, not footprint.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="meter">
+      <h2>What we mean by "stored footprint"</h2>
+
+      <p>
+        Stored footprint = compressed bytes physically stored on your
+        backend across all DeltaGlider-managed buckets, measured at
+        month-end. This is the number DeltaGlider already reports at
+        <code>/_/stats</code>. Not source/logical bytes. Not
+        ingress/egress. Storage-layer replicas (whatever your backend
+        does under the hood) don't count.
+      </p>
+
+      <p>
+        We don't collect telemetry. You self-report at renewal; we
+        cross-check via the <code>/_/stats</code> endpoint if you give
+        us read access during the conversation.
+      </p>
+    </section>
+
+    <section class="commercial">
+      <h2>When does someone need a commercial license?</h2>
+
+      <p>
+        DeltaGlider is GPL-3.0. Most users — including internal
+        infrastructure at any company size — use the OSS build freely
+        with no obligation. You need a commercial license only if:
+      </p>
+
+      <ul>
+        <li>
+          You're embedding DeltaGlider in a proprietary product you
+          distribute to customers, AND you can't (or don't want to)
+          satisfy GPL-3.0's source-availability obligations
+        </li>
+        <li>
+          Your legal team requires the GPL obligation removed for any
+          other reason
+        </li>
+      </ul>
+
+      <p>
+        If you're a SaaS or platform running DeltaGlider on your own
+        infrastructure for your own apps, the OSS build is fine
+        forever. Production support is the relationship you buy, not a
+        license.
+      </p>
+
+      <p>
+        →
+        <a href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Commercial%20license%20inquiry">
+          Talk to sales
+        </a>
+      </p>
+    </section>
+
+    <section class="faq">
+      <h2>Frequently asked</h2>
+
+      <h3>Why is Starter $10k? That feels high for "support."</h3>
+      <p>
+        It's not just support — it's an SLA on critical infrastructure
+        plus direct Slack access to the senior engineers who wrote the
+        proxy. At your scale (typically 1–10 TB stored footprint = 100
+        TB+ of source artifacts), the savings calculator (Week 2) will
+        show annual savings in the $30–60k range. $10k lands in a
+        defensible range relative to the value delivered.
+      </p>
+
+      <h3>What happens if I exceed my bracket?</h3>
+      <p>
+        Measured at renewal, not mid-year. If you're at 12 TB stored
+        footprint at renewal, you renew at Growth. No surprise
+        invoices.
+      </p>
+
+      <h3>What about shrinking?</h3>
+      <p>
+        Same — you renew at a lower bracket and pay less. Brackets are
+        a relationship tier, not a usage meter.
+      </p>
+
+      <h3>Replication doubles my footprint — am I being double-counted?</h3>
+      <p>
+        No. We count logical compressed bytes managed by DeltaGlider.
+        Storage-layer replicas don't count.
+      </p>
+
+      <h3>Why don't you publish the Enterprise price?</h3>
+      <p>
+        Because Enterprise deals genuinely vary — multi-region SLA
+        shape, named-eng-contact attribution, custom audit/compliance
+        attachments. The $60k Scale price is the anchor below;
+        Enterprise is a conversation, not a row in a table.
+      </p>
+
+      <h3>I'm at 0 TB today — do I still get the trial?</h3>
+      <p>
+        Yes. The trial is bracket-agnostic. Try the relationship
+        before committing to a bracket. <a href="/trial">/trial</a>
+      </p>
+
+      <h3>How do I get a real compression number on my own data?</h3>
+      <p>
+        Run <code>docker run deltaglider/proxy</code> against your own
+        bucket and read the Delta Efficiency Panel at
+        <code>/_/admin/diagnostics/delta-efficiency</code>. No data
+        leaves your network. Or talk to us and we'll help you set it
+        up.
+      </p>
+    </section>
+
+    <section class="cta">
+      <h2>Get started</h2>
+
+      <div class="hero-ctas">
+        <a href="/trial" class="btn btn-primary">Start a 30-day trial</a>
+        <a href="/docs/quickstart" class="btn">Try the OSS build</a>
+        <a
+          href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Sales%20inquiry"
+          class="btn"
+        >
+          Talk to sales
+        </a>
+      </div>
+    </section>
+  </div>
+</BaseLayout>
+
+<style>
+  .calculator-placeholder,
+  .tiers,
+  .meter,
+  .commercial,
+  .faq,
+  .cta {
+    margin: 3rem 0;
+  }
+
+  .placeholder-card {
+    background: var(--bg-soft);
+    border: 1px dashed var(--rule);
+    border-radius: 6px;
+    padding: 1.5rem;
+    max-width: var(--measure-wide);
+  }
+
+  .faq h3 {
+    margin-top: 1.5rem;
+    font-size: 1.05rem;
+    color: var(--ink-soft);
+  }
+</style>

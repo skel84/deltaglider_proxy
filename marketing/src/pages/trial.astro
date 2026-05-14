@@ -1,0 +1,202 @@
+---
+// /trial — v5 plan §4.6.
+// 30-day production support trial. The software is GPL-3.0 and
+// free regardless; the trial is for the support relationship
+// (eng Slack + SLA + arch review call). Frame C: trial the
+// relationship, not the software.
+
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout
+  title="30-day production support trial — DeltaGlider"
+  description="Try the relationship. Direct engineering Slack, response SLA, one architecture review call. The software stays free regardless — it's GPL-3.0."
+>
+  <section class="shell hero">
+    <h1>30-day production support trial.</h1>
+
+    <p class="hero-lede">
+      Try the relationship. The software is free regardless.
+    </p>
+
+    <p>
+      DeltaGlider is GPL-3.0 — you can run the OSS build forever
+      without paying us. The trial isn't for the software. It's for the
+      support relationship: direct Slack access to Beshu Tech's 10
+      senior engineers, a response SLA, and one architecture review
+      call.
+    </p>
+
+    <p>Free for 30 days. No credit card. No auto-conversion.</p>
+
+    <div class="hero-ctas">
+      <a
+        href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Production%20support%20trial"
+        class="btn btn-primary"
+      >
+        Start the trial
+      </a>
+      <a href="/docs/quickstart" class="btn">Try the OSS build first</a>
+    </div>
+  </section>
+
+  <div class="shell">
+    <section class="included">
+      <h2>What's included for 30 days</h2>
+
+      <ul>
+        <li>
+          Direct engineering Slack channel with named contacts on the
+          Beshu Tech side
+        </li>
+        <li>
+          4h business-hours response SLA on questions and issues
+        </li>
+        <li>
+          One 60-minute architecture review call: we look at your
+          deployment, point out what's standard, what's risky, what's
+          suboptimal, and what's outright broken
+        </li>
+        <li>
+          Migration sizing if you're moving an existing bucket
+        </li>
+        <li>
+          Tactical Slack help during your first cutover window if you
+          want us on call
+        </li>
+      </ul>
+    </section>
+
+    <section class="not-included">
+      <h2>What we don't do during the trial</h2>
+
+      <ul>
+        <li>
+          We don't get root on your infrastructure. The trial is async
+          help, not managed services.
+        </li>
+        <li>
+          We don't sign DPAs / MSAs for the trial itself. If you need
+          those, they come with a paid contract — and that's a separate
+          sales conversation.
+        </li>
+        <li>
+          We don't auto-bill you on day 31. Conversion is your decision
+          and an explicit step.
+        </li>
+      </ul>
+    </section>
+
+    <section class="schedule">
+      <h2>What the 30 days actually look like</h2>
+
+      <p>
+        <strong>Day 0.</strong> You email
+        <a href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Production%20support%20trial">contact@beshu.tech</a>
+        with subject "DeltaGlider — Production support trial." We
+        respond within 1 business day with a Slack invite and a
+        scheduling link for the arch review call.
+      </p>
+
+      <p>
+        <strong>Days 1–7.</strong> Slack onboarding. We learn your
+        deployment shape, the workload, the storage backend, your
+        SLOs.
+      </p>
+
+      <p>
+        <strong>Days 8–14.</strong> Architecture review call (60 min).
+        Output: a short written summary of recommendations, in your
+        shared channel.
+      </p>
+
+      <p>
+        <strong>Days 15–29.</strong> Ongoing Slack support. You ask
+        questions, file issues, get answers from the senior engineers
+        who wrote the code.
+      </p>
+
+      <p>
+        <strong>Day 30.</strong> Conversion conversation. You either:
+      </p>
+
+      <ol>
+        <li>
+          Sign a paid Production Support contract (Starter $10k,
+          Growth $30k, or Scale $60k depending on your stored
+          footprint), or
+        </li>
+        <li>
+          Thank us, exit the trial, and keep using the OSS build for
+          free. Your data is yours, your deployment is yours, nothing
+          changes on your side.
+        </li>
+      </ol>
+    </section>
+
+    <section class="why">
+      <h2>Why this isn't a software trial</h2>
+
+      <p>
+        The software is GPL-3.0. There's nothing to gate, no time-locked
+        feature flag, no expiring license key. Gating the software would
+        be (a) impossible because it's open source, (b) hostile because
+        it would force you to fork the project, (c) pointless because
+        the whole pitch is "this is critical infra you can self-host
+        forever."
+      </p>
+
+      <p>
+        So the trial is the support relationship. Trying us out for 30
+        days is the cheapest way for both sides to find out if we're a
+        fit.
+      </p>
+    </section>
+
+    <section class="not-right">
+      <h2>When the trial isn't right for you</h2>
+
+      <ul>
+        <li>
+          You haven't deployed DeltaGlider yet — start with
+          <a href="/docs/quickstart">/docs/quickstart</a> first. There's
+          no point trialing support for software you haven't even
+          tried.
+        </li>
+        <li>
+          You need 24/7 on-call coverage — the trial is business-hours
+          only. 24/7 is part of paid Enterprise contracts.
+        </li>
+        <li>
+          You need a contract signed before any interaction — fine,
+          skip the trial, talk to sales directly.
+        </li>
+      </ul>
+    </section>
+
+    <section class="cta">
+      <h2>Start your trial</h2>
+
+      <div class="hero-ctas">
+        <a
+          href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Production%20support%20trial"
+          class="btn btn-primary"
+        >
+          Email contact@beshu.tech
+        </a>
+        <a href="/docs/quickstart" class="btn">Try the OSS build first</a>
+      </div>
+    </section>
+  </div>
+</BaseLayout>
+
+<style>
+  .included,
+  .not-included,
+  .schedule,
+  .why,
+  .not-right,
+  .cta {
+    margin: 3rem 0;
+  }
+</style>

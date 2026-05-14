@@ -1,0 +1,155 @@
+---
+// /regulated — v5 plan §4.3.
+// Encryption + key custody story for regulated buyers (banks,
+// gov, research). Beshu customer-segment block above the fold,
+// full testimonials, technical sections, 4-week evaluation
+// framework. Dropped consultancy CTA per v5; routes to commercial
+// license + production support instead.
+
+import BaseLayout from '../layouts/BaseLayout.astro';
+import TestimonialsBlock from '../components/TestimonialsBlock.astro';
+import CustomerSegmentBlock from '../components/CustomerSegmentBlock.astro';
+---
+
+<BaseLayout
+  title="DeltaGlider for regulated buyers — encrypt-before-the-backend on cheap S3-compatible storage"
+  description="AES-256-GCM encryption before objects hit the bucket. Your key stays in your runtime. The backend sees ciphertext. Built by Beshu Tech, in production at CERN, the European Parliament, and 2× of the S&P 500 top 5."
+>
+  <section class="shell hero">
+    <h1>Use cheap S3-compatible storage without giving the provider your data.</h1>
+
+    <p class="hero-lede">
+      DeltaGlider encrypts every object with AES-256-GCM before it
+      reaches the bucket. Your encryption key lives in your runtime;
+      the storage provider — Hetzner, Wasabi, Cloudflare, an offshore
+      mirror — sees ciphertext only.
+    </p>
+
+    <p>
+      Built by <a href="https://beshu.tech">Beshu Tech</a> — 10 senior
+      engineers, since 2017. Same team behind
+      <a href="https://readonlyrest.com">ReadonlyREST</a> (Elasticsearch
+      security) and Anaphora (dashboard-to-PDF reporting), in production
+      at:
+    </p>
+  </section>
+
+  <div class="shell">
+    <CustomerSegmentBlock />
+
+    <TestimonialsBlock />
+
+    <section class="encryption">
+      <h2>How the encryption works</h2>
+
+      <ul>
+        <li>AES-256-GCM, per-object IV</li>
+        <li>
+          Encryption key supplied at process start (env var or
+          KMS-fetched secret); never written to disk by the proxy
+        </li>
+        <li>
+          Backend (S3, Hetzner, Wasabi, etc.) sees ciphertext only
+        </li>
+        <li>
+          Bucket-level key rotation supported; old objects re-encrypted
+          via a background job
+        </li>
+        <li>
+          Audit trail of every encrypt/decrypt operation in the
+          structured stdout stream
+        </li>
+      </ul>
+    </section>
+
+    <section class="key-custody">
+      <h2>How key custody stays in your runtime</h2>
+
+      <ul>
+        <li>
+          Proxy runs in YOUR VPC / on YOUR Kubernetes / on YOUR bare
+          metal
+        </li>
+        <li>Encryption key never leaves the proxy process</li>
+        <li>Backend credentials never leave the proxy process</li>
+        <li>No phone-home, no telemetry, no SaaS dependency</li>
+        <li>Source code is GPL-3.0 — your security team can read every line</li>
+      </ul>
+    </section>
+
+    <section class="not-claiming">
+      <h2>What we don't claim</h2>
+
+      <ul>
+        <li>
+          <strong>"SOC 2 compliant"</strong> — DeltaGlider produces audit
+          logs you can ship into a SOC-2-attested SIEM. The proxy itself
+          is software, not a compliance regime.
+        </li>
+        <li>
+          <strong>"FIPS 140-3 validated"</strong> — we use ring/aes-gcm
+          crates which use OpenSSL or platform crypto. If you need FIPS,
+          ship the FIPS-validated crypto layer underneath us.
+        </li>
+        <li>
+          <strong>"GDPR-compliant"</strong> — DeltaGlider supports
+          right-to-be-forgotten propagation via replication-delete and
+          lifecycle expiration. The compliance regime is your problem;
+          the technical primitives are ours.
+        </li>
+      </ul>
+    </section>
+
+    <section class="evaluation">
+      <h2>How a regulated buyer evaluates DeltaGlider</h2>
+
+      <p><strong>Week 1.</strong> Code review. The proxy is open
+      source (GPL-3.0). The encryption module is in
+      <code>src/storage/encrypting.rs</code>. The IAM model is in
+      <code>src/iam/</code>. The admin API surface is in
+      <code>src/api/admin/</code>. Your security team's questions:
+      <a href="mailto:contact@beshu.tech">contact@beshu.tech</a>.</p>
+
+      <p><strong>Week 2.</strong> Dev-environment deployment. Point a
+      test bucket at the proxy. Run your existing security automation
+      against it (key rotation, audit log validation, IdP integration
+      smoke).</p>
+
+      <p><strong>Week 3.</strong> Small production pilot on one
+      non-critical bucket.</p>
+
+      <p><strong>Week 4.</strong> Full deployment plan with Beshu
+      engineering support — via the 30-day production support trial.</p>
+    </section>
+
+    <section class="cta">
+      <h2>Talk to sales</h2>
+
+      <p>
+        Buying for a regulated environment? Talk to us about a
+        commercial license and production support. Both are tailored
+        to your jurisdiction, audit posture, and procurement workflow.
+      </p>
+
+      <div class="hero-ctas">
+        <a
+          href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Regulated%20buyer%20inquiry"
+          class="btn btn-primary"
+        >
+          Email contact@beshu.tech
+        </a>
+        <a href="/trial" class="btn">Start with the 30-day trial</a>
+      </div>
+    </section>
+  </div>
+</BaseLayout>
+
+<style>
+  .encryption,
+  .key-custody,
+  .not-claiming,
+  .evaluation,
+  .cta {
+    margin: 3rem 0;
+  }
+</style>

@@ -1,0 +1,294 @@
+---
+// /case-studies/readonlyrest-builds — v5 plan §4.4.
+// Simone narrates the in-progress migration first-person.
+// This is the most important page on the site: it's where the
+// engineering credibility lives. The bug log IS the proof.
+
+import BaseLayout from '../../layouts/BaseLayout.astro';
+---
+
+<BaseLayout
+  title="Migrating ReadonlyREST's 1.71 TB build catalog off AWS S3 — in progress"
+  description="Engineering retrospective: 145 versions, 8 years of release history, ~103,088 objects. ~$9 in EC2 compute so far. Per-version compression results and the bug log."
+>
+  <section class="shell hero">
+    <h1>Migrating ReadonlyREST's build catalog off AWS S3 — in progress</h1>
+
+    <p class="byline">By Simone Scarduzio, founder, Beshu Tech</p>
+
+    <p class="hero-lede">
+      I'm migrating Beshu Tech's own ReadonlyREST build catalog — 145
+      versions, 8 years of release history, ~103,088 objects, 1.71 TB
+      on AWS S3 (eu-west-1) — to Hetzner Object Storage (hel1) via
+      DeltaGlider. This page is the engineering retrospective: what
+      worked, what broke, what I fixed.
+    </p>
+
+    <p>
+      Final compression ratio will be published when the full migration
+      completes (next week or two as of writing).
+    </p>
+  </section>
+
+  <div class="shell">
+    <section class="why">
+      <h2>Why migrate at all</h2>
+
+      <p>
+        Versioned artifact storage compounds. The same set of Kibana
+        plugin variants is uploaded for every release across 8 years
+        of 1.12.x → 1.69.0. Most of the bytes are identical between
+        versions. Storing each release as a full copy is paying to
+        store the same bytes hundreds of times.
+      </p>
+
+      <p>
+        I picked Hetzner Object Storage as the destination because it's
+        the cheapest S3-compatible option that fits the migration
+        shape: cold-tier-friendly pricing, EU jurisdiction, and no
+        enterprise sales motion — which is fine for this use case.
+        Beshu Tech has no partnership with Hetzner; this is a vendor
+        choice, not a sponsored decision.
+      </p>
+    </section>
+
+    <section class="shape">
+      <h2>Migration shape</h2>
+
+      <ul>
+        <li>
+          <strong>Source:</strong>
+          <code>s3://readonlyrest-data/build/</code> (AWS S3, eu-west-1)
+        </li>
+        <li>
+          <strong>Destination:</strong>
+          <code>s3://beshu/ror/builds/</code> (Hetzner, hel1)
+        </li>
+        <li>
+          <strong>Runner:</strong> single <code>t4g.medium</code> EC2
+          in eu-west-1 (intra-region read = no AWS egress charge)
+        </li>
+        <li>
+          <strong>Pipeline per version:</strong>
+          <code>aws s3 sync</code> → merge
+          <code>enterprise/free/pro/*</code> into
+          <code>legacy/</code> →
+          <code>deltaglider cp -r</code> to Hetzner
+        </li>
+        <li>
+          <strong>Cold storage:</strong> older 99 versions were on
+          Glacier Deep Archive; restored via Bulk tier (~$2 total).
+          ~$9 in EC2 compute so far.
+        </li>
+      </ul>
+    </section>
+
+    <section class="results">
+      <h2>Per-version results so far (verified, SHA-256 round-tripped)</h2>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Version</th>
+            <th>Source size</th>
+            <th>Stored size</th>
+            <th>Compression</th>
+            <th>Verdict</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1.69.0 (warm-path)</td>
+            <td>2,866 MB</td>
+            <td>32.4 MB</td>
+            <td>88.5×</td>
+            <td>Excellent</td>
+          </tr>
+          <tr>
+            <td>1.38.0 (warm-path, multi-shape)</td>
+            <td>13,795 MB</td>
+            <td>3,355 MB</td>
+            <td>4.1×</td>
+            <td>Fair</td>
+          </tr>
+          <tr>
+            <td>1.17.1 (cold from Glacier)</td>
+            <td>26.5 MB</td>
+            <td>6.87 MB</td>
+            <td>3.8×</td>
+            <td>Small dataset</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        The 1.38.0 result is publishable as-is because it tells the
+        truth: the legacy deltaspace mixes ES 6/7/8 Kibana plugins —
+        structurally dissimilar artifacts. Root deltaspace compressed
+        15.2×; legacy deltaspace only 2.7×. The Delta Efficiency Panel
+        correctly classifies legacy as "Fair, near Poor." Useful
+        signal for an operator who wants to fix it.
+      </p>
+    </section>
+
+    <section class="bugs">
+      <h2>What broke and how I fixed it</h2>
+
+      <p>
+        Real migrations don't go in a straight line. Here's what
+        tripped me:
+      </p>
+
+      <h3>Bug 1: deltaglider CLI hardcoded <code>/tmp</code></h3>
+
+      <p>
+        The Python deltaglider 6.1.1 CLI hardcoded <code>/tmp</code>
+        for working files. <code>/tmp</code> on my EC2 was
+        <code>tmpfs</code>, 1.9 GB. Mid-large-version migration: out
+        of space.
+      </p>
+
+      <p>
+        Fix: patched <code>client.py</code> + <code>main.py</code>
+        in-place to honor <code>os.environ.get("TMPDIR")</code>.
+        Upstreaming the fix.
+      </p>
+
+      <h3>Bug 2: 30 GB EBS too small</h3>
+
+      <p>
+        Staging 13 GB of source + xdelta3 temp files + downloaded
+        archive + staging area = busted the 30 GB EBS at the first
+        multi-GB version.
+      </p>
+
+      <p>
+        Fix: grew EBS to 100 GB. Cost difference: ~$8/month for the
+        migration window. Cheap.
+      </p>
+
+      <h3>Bug 3: <code>pipefail + head</code> silent kill</h3>
+
+      <p>
+        My migration script had <code>set -o pipefail</code> and piped
+        deltaglider output through
+        <code>grep -E ... | head -200</code>. After 200 matched lines,
+        <code>head</code> closed the pipe. <code>pipefail</code> made
+        the script exit. Migration silently aborted mid-upload.
+      </p>
+
+      <p>
+        Fix: dropped the <code>| head</code>. Logs are slightly
+        noisier but the script doesn't lie about whether it succeeded.
+      </p>
+
+      <h3>Bug 4: Traefik 60s read timeout</h3>
+
+      <p>
+        Production Coolify deployment had Traefik with the default
+        <code>respondingTimeouts.readTimeout = 60s</code>. Cross-
+        internet uploads of multi-GB files hit exactly 60s and got
+        killed with a 502.
+      </p>
+
+      <p>
+        Fix: set Traefik <code>readTimeout</code> to 30m. Documented
+        the gotcha in <a href="/docs/troubleshooting">/docs/troubleshooting</a>
+        because every reverse-proxy default is wrong for large S3
+        uploads.
+      </p>
+    </section>
+
+    <section class="verification">
+      <h2>How I'm verifying the migration is correct</h2>
+
+      <p>For every migrated version:</p>
+
+      <ol>
+        <li>
+          SHA-256 of the source object (computed by
+          <code>aws s3api head-object</code>)
+        </li>
+        <li>
+          SHA-256 of the round-tripped object via the DeltaGlider
+          proxy (GET, hash, compare)
+        </li>
+        <li>
+          Manifest check: same object count, same total source size
+        </li>
+      </ol>
+
+      <p>
+        No exceptions logged so far. Bit-perfect round-trip on every
+        sampled object (root, legacy, universal deltaspaces).
+      </p>
+    </section>
+
+    <section class="final">
+      <h2>Final ratio</h2>
+
+      <p>
+        Published when the full 145-version migration completes. The
+        mix of "Excellent" newer versions and "Fair" older cross-major
+        versions means the average will be somewhere between 10× and
+        50×. Watch this page.
+      </p>
+    </section>
+
+    <section class="reproducibility">
+      <h2>Reproducibility</h2>
+
+      <p>
+        When the migration completes, this page will include:
+      </p>
+
+      <ul>
+        <li>The migration script (open source)</li>
+        <li>The per-version manifest (CSV)</li>
+        <li>The SHA-256 verification script</li>
+        <li>A tarball with raw results so anyone can verify</li>
+      </ul>
+
+      <p>
+        This is the kind of case study that's hard to fake. That's the
+        point.
+      </p>
+    </section>
+
+    <section class="cta">
+      <h2>Try the same migration on your data</h2>
+
+      <div class="hero-ctas">
+        <a href="/pricing#calculator" class="btn btn-primary">See what it'd save you</a>
+        <a href="/trial" class="btn">Start a 30-day trial</a>
+        <a href="/docs/quickstart" class="btn">Try the OSS build</a>
+      </div>
+    </section>
+  </div>
+</BaseLayout>
+
+<style>
+  .byline {
+    color: var(--ink-soft);
+    font-style: italic;
+    margin-top: -0.5rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .why,
+  .shape,
+  .results,
+  .bugs,
+  .verification,
+  .final,
+  .reproducibility,
+  .cta {
+    margin: 3rem 0;
+  }
+
+  .bugs h3 {
+    margin-top: 2rem;
+    font-size: 1.1rem;
+    color: var(--ink-soft);
+  }
+</style>
