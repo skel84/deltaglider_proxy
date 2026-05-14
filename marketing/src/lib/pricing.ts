@@ -18,10 +18,13 @@ export interface CalculatorInputs {
   /** Storage cost per GB per month, in USD. */
   costPerGbMonthUsd: number;
   /**
-   * Compression ratio. Default 10×. Slider lets the visitor override.
-   * Conservative — geometric mean of verified ReadonlyREST migration
-   * data points (4.1× and 88.5×) is ~19×; we round down to 10× as a
-   * defensible underpromise per v5 plan §1.
+   * Compression ratio (multiplier — 10 = 10×, i.e. 90% bytes saved).
+   * Default 10×. The UI presents this as a percentage of bytes saved
+   * ("90%") rather than a multiplier; the math here keeps the
+   * multiplier form because `storedFootprint = sourceTb / ratio` is
+   * the natural way to express it. Conservative defensible default
+   * per v5 plan §1; verified ReadonlyREST migration ratios so far
+   * are 74%, 76%, 99% bytes saved.
    */
   compressionRatio: number;
   /** Annual data growth as a decimal (0.30 = 30%/yr). */
@@ -196,7 +199,10 @@ export function buildMarkdown(inputs: CalculatorInputs, result: CalculatorResult
   lines.push(`- Current artifact footprint: ${formatTb(inputs.sourceTb)}`);
   lines.push(`- Regions: ${inputs.regions}`);
   lines.push(`- Storage cost: $${inputs.costPerGbMonthUsd}/GB/month`);
-  lines.push(`- Compression ratio (assumed): ${inputs.compressionRatio}×`);
+  // Show both ratio (engineering mental model) and % bytes saved (CFO mental
+  // model) — the markdown is meant to be shared with both audiences.
+  const pctSaved = Math.round((1 - 1 / inputs.compressionRatio) * 100);
+  lines.push(`- Compression: ${inputs.compressionRatio}× ratio (${pctSaved}% bytes saved)`);
   lines.push(`- Annual growth: ${Math.round(inputs.annualGrowthRate * 100)}%`);
   lines.push('');
 

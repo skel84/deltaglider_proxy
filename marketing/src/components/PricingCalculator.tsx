@@ -19,13 +19,26 @@ import {
 } from '../lib/pricing';
 
 // Default slider positions per v5 plan §5.3.
+// compressionRatio stays a multiplier internally so the math module
+// (pricing.ts) and its 22 tests don't change. The UI converts to/from
+// "% bytes saved" at the input/display boundary only.
 const DEFAULTS: CalculatorInputs = {
   sourceTb: 30,
   regions: 2,
   costPerGbMonthUsd: 0.023,
-  compressionRatio: 10,
+  compressionRatio: 10, // = 90% bytes saved
   annualGrowthRate: 0.30,
 };
+
+// % bytes saved ↔ compression ratio. Math is unchanged underneath; the
+// UI just speaks the % language because it's easier for non-engineers.
+//   50% saved → 2× ratio
+//   90% saved → 10× ratio  (default)
+//   99% saved → 100× ratio
+const PCT_SAVED_MIN = 50;
+const PCT_SAVED_MAX = 99;
+const pctSavedToRatio = (pct: number): number => 1 / (1 - pct / 100);
+const ratioToPctSaved = (ratio: number): number => (1 - 1 / ratio) * 100;
 
 const COST_SHORTCUTS = [
   { label: 'AWS Standard', value: 0.023 },
@@ -156,27 +169,28 @@ export default function PricingCalculator() {
             <>
               <div className="field">
                 <label htmlFor="calc-ratio">
-                  Compression ratio
-                  <span className="field-value">{inputs.compressionRatio.toFixed(1)}×</span>
+                  Bytes saved
+                  <span className="field-value">
+                    {Math.round(ratioToPctSaved(inputs.compressionRatio))}%
+                  </span>
                 </label>
                 <input
                   id="calc-ratio"
                   type="range"
-                  min={0.3}
-                  max={2}
-                  step={0.05}
-                  value={Math.log10(inputs.compressionRatio)}
+                  min={PCT_SAVED_MIN}
+                  max={PCT_SAVED_MAX}
+                  step={1}
+                  value={Math.round(ratioToPctSaved(inputs.compressionRatio))}
                   onChange={(e) =>
                     update({
-                      compressionRatio:
-                        Math.round(Math.pow(10, parseFloat(e.target.value)) * 10) / 10,
+                      compressionRatio: pctSavedToRatio(parseFloat(e.target.value)),
                     })
                   }
-                  aria-label="Compression ratio (logarithmic, 2× to 100×)"
+                  aria-label="Bytes saved by compression (50% to 99%)"
                 />
                 <p className="field-help">
                   Conservative default. Verified ReadonlyREST migration ratios so far:
-                  3.8×, 4.1×, 88.5×. Run the OSS build's Delta Efficiency Panel on
+                  74%, 76%, 99%. Run the OSS build's Delta Efficiency Panel on
                   your bucket for a real number.
                 </p>
               </div>
@@ -311,7 +325,7 @@ function ResultCard({ result, onCopy, copyState, showFormula, onToggleFormula }:
           {result.warnings.map((w) => (
             <li key={w} className="warning-chip">
               {w === 'lowCompressionRatio' &&
-                'Your data compresses below 3× — DeltaGlider may not be the right fit. Run the OSS build + Delta Efficiency Panel on your own data to verify.'}
+                'Your data compresses below 67% bytes saved — DeltaGlider may not be the right fit. Run the OSS build + Delta Efficiency Panel on your own data to verify.'}
               {w === 'cheapBackendAlready' &&
                 "You're already on cheap object storage — savings will be smaller, but data sovereignty and lock-in benefits still apply."}
             </li>
