@@ -498,6 +498,201 @@ pub(super) fn requires_restart_warnings(
     out
 }
 
+// === Credential preservation primitives ===
+//
+// The admin API has TWO write paths that update `Config`: the full-document
+// `POST /config/apply` (handled in `document_level.rs`) and the per-section
+// `PUT /config/section/:name` (handled in `section_level.rs`). Both must
+// implement the same contract for runtime-credential preservation:
+//
+//   1. Redacted GET → edit non-secret fields → PUT must NOT silently
+//      clear credentials that were redacted out of the GET response.
+//      → preserve the runtime value when the incoming half is None.
+//
+//   2. Asymmetric SigV4 pairs are NEVER cross-wired: if the operator set
+//      exactly one half of `(access_key_id, secret_access_key)`, we
+//      refuse to fill the other from runtime. Filling would produce a
+//      superficially-authenticated state that silently fails at signature
+//      verification. We emit a warning instead, so the operator can
+//      supply the missing half.
+//
+//   3. Backend type-flips (S3 ↔ Filesystem) drop credentials and emit a
+//      warning so the operator notices.
+//
+//   4. Named backends that disappear from the new config (rename or
+//      removal) drop their credentials silently — we warn so a GitOps
+//      round-trip doesn't lose state without surfacing it.
+//
+// These functions are the single source of truth for that contract.
+// Both write paths MUST call them; do not inline the logic in handlers.
+
+/// Preserve a SigV4-style credential pair from `old` into `new` when both
+/// halves are absent in the incoming doc. If the operator set exactly one
+/// half we refuse to fill the other and emit a warning.
+///
+/// `label` is the human-readable owner of the pair, used in the warning
+/// text. Examples: `"proxy-level"`, `"primary backend"`, `"backend 'foo'"`.
+pub(super) fn preserve_sigv4_pair(
+    new_akid: &mut Option<String>,
+    new_sk: &mut Option<String>,
+    old_akid: &Option<String>,
+    old_sk: &Option<String>,
+    label: &str,
+    warnings: &mut Vec<String>,
+) {
+    match (&*new_akid, &*new_sk) {
+        (None, None) => {
+            *new_akid = old_akid.clone();
+            *new_sk = old_sk.clone();
+        }
+        (Some(_), Some(_)) => {}
+        (Some(_), None) => {
+            warnings.push(format!(
+                "{} credentials are asymmetric in the applied YAML (access_key_id set, secret_access_key missing) — not cross-wiring the runtime secret; authentication will fail until both are supplied",
+                label
+            ));
+        }
+        (None, Some(_)) => {
+            warnings.push(format!(
+                "{} credentials are asymmetric in the applied YAML (secret_access_key set, access_key_id missing) — not cross-wiring the runtime key id; authentication will fail until both are supplied",
+                label
+            ));
+        }
+    }
+}
+
+/// Preserve credentials on the PRIMARY backend across a config swap.
+///
+/// Cases handled:
+/// * S3 → S3: same-mode preservation via `preserve_sigv4_pair`.
+/// * S3 → Filesystem: type-flip drops creds; warns if old had any.
+/// * Filesystem → S3: warns if the operator supplied no creds in the
+///   new doc (relying on env / instance creds).
+/// * Filesystem → Filesystem: no creds to preserve.
+pub(super) fn preserve_primary_backend_creds(
+    incoming: &mut crate::config::Config,
+    current: &crate::config::Config,
+    warnings: &mut Vec<String>,
+) {
+    use crate::config::BackendConfig;
+    match (&mut incoming.backend, &current.backend) {
+        (
+            BackendConfig::S3 {
+                access_key_id: new_akid,
+                secret_access_key: new_sk,
+                ..
+            },
+            BackendConfig::S3 {
+                access_key_id: old_akid,
+                secret_access_key: old_sk,
+                ..
+            },
+        ) => {
+            preserve_sigv4_pair(new_akid, new_sk, old_akid, old_sk, "primary backend", warnings);
+        }
+        (
+            BackendConfig::Filesystem { .. },
+            BackendConfig::S3 {
+                access_key_id: old_akid,
+                secret_access_key: old_sk,
+                ..
+            },
+        ) if old_akid.is_some() || old_sk.is_some() => {
+            warnings.push(
+                "primary backend switched from S3 to filesystem — previous S3 credentials are dropped".to_string(),
+            );
+        }
+        (
+            BackendConfig::S3 {
+                access_key_id: new_akid,
+                secret_access_key: new_sk,
+                ..
+            },
+            BackendConfig::Filesystem { .. },
+        ) if new_akid.is_none() && new_sk.is_none() => {
+            warnings.push(
+                "primary backend switched from filesystem to S3 but incoming YAML has no credentials — the new backend will rely on instance / env credentials only".to_string(),
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Preserve credentials on NAMED backends across a config swap.
+///
+/// Matches old → new entries by `name`. Type-flips drop creds with a
+/// warning. Vanished backends (renamed or removed) also warn so a GitOps
+/// round-trip doesn't lose state without surfacing it.
+pub(super) fn preserve_named_backends_creds(
+    incoming: &mut crate::config::Config,
+    current: &crate::config::Config,
+    warnings: &mut Vec<String>,
+) {
+    use crate::config::BackendConfig;
+    let old_by_name: std::collections::HashMap<&str, &BackendConfig> = current
+        .backends
+        .iter()
+        .map(|n| (n.name.as_str(), &n.backend))
+        .collect();
+    let new_names: std::collections::HashSet<String> =
+        incoming.backends.iter().map(|n| n.name.clone()).collect();
+
+    for new_named in &mut incoming.backends {
+        let old_backend = old_by_name.get(new_named.name.as_str());
+        match (&mut new_named.backend, old_backend) {
+            (
+                BackendConfig::S3 {
+                    access_key_id: new_akid,
+                    secret_access_key: new_sk,
+                    ..
+                },
+                Some(BackendConfig::S3 {
+                    access_key_id: old_akid,
+                    secret_access_key: old_sk,
+                    ..
+                }),
+            ) => {
+                preserve_sigv4_pair(
+                    new_akid,
+                    new_sk,
+                    old_akid,
+                    old_sk,
+                    &format!("backend '{}'", new_named.name),
+                    warnings,
+                );
+            }
+            (BackendConfig::S3 { .. }, Some(BackendConfig::Filesystem { .. }))
+            | (BackendConfig::Filesystem { .. }, Some(BackendConfig::S3 { .. })) => {
+                warnings.push(format!(
+                    "backend '{}' changed type — previous credentials are dropped",
+                    new_named.name
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    // Warn about backends that existed before and vanished (operator renamed
+    // or removed them); their creds cannot be preserved even if the new
+    // config has similarly-named replacements.
+    for old_named in &current.backends {
+        let had_creds = matches!(
+            &old_named.backend,
+            BackendConfig::S3 {
+                access_key_id: Some(_),
+                secret_access_key: Some(_),
+                ..
+            },
+        );
+        if had_creds && !new_names.contains(&old_named.name) {
+            warnings.push(format!(
+                "backend '{}' removed (or renamed) — its credentials are gone from runtime",
+                old_named.name
+            ));
+        }
+    }
+}
+
 /// Resolve the path the admin API should persist config changes to.
 ///
 /// Resolution order:

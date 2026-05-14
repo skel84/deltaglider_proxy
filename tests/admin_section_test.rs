@@ -1103,3 +1103,23 @@ async fn section_put_storage_buckets_are_merged_not_replaced() {
     assert!(policies["beta"].is_object(), "beta must survive");
     assert_eq!(policies["gamma"]["quota_bytes"].as_u64().unwrap(), 2048);
 }
+
+// -------------------------------------------------------------------------
+// Cred-preservation parity with the document-PUT path. After the cred-
+// preservation refactor (mod.rs::preserve_sigv4_pair +
+// preserve_*_backend_creds), both write paths share the SAME primitives
+// so behavior cannot drift.
+//
+// IMPORTANT scope note: section-PUT operates on a merge-patch starting
+// from the FULL current config — unlike document-PUT, which operates on
+// an operator-supplied full doc that may legitimately omit a secret.
+// Consequence: section-PUT does NOT naturally hit the asymmetric-SigV4
+// case from operator input alone; the runtime secret is already in the
+// merge base. The shared helpers are still invoked so that if some
+// future code path supplied a partial Config to section-PUT (e.g. via
+// the body literally containing `secret_access_key: null`), the
+// asymmetric warning would fire identically to the document path. That
+// future-proofing is the value of the shared helpers; the asymmetric
+// warning isn't reachable through the normal section-merge flow today.
+// -------------------------------------------------------------------------
+

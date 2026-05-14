@@ -339,33 +339,30 @@ async fn apply_section(
     // effectively a defensive no-op for that field.
     new_cfg.bootstrap_password_hash = old_cfg.bootstrap_password_hash.clone();
 
-    // STEP-1: the former global `encryption_key` field has been
-    // removed; per-backend encryption preservation (three-state
-    // semantics + hex validation + key_rotated diff) moves to
-    // Step 6 and runs inside `preserve_backend_secrets` for every
-    // entry in `new_cfg.backends` plus the singleton
-    // `new_cfg.backend_encryption`. For now, Step 1 accepts the
-    // new shape verbatim — validation reports from Config::check
-    // surface in the dry-run warnings and the Apply dialog.
-    // Top-level SigV4 creds (the legacy bootstrap key pair living on
-    // `Config` directly) are preserved when the incoming value is
-    // None. Explicit rotation — setting a new value — still works;
-    // only the null-on-both-halves case triggers preservation. This
-    // is the same both-or-neither contract `preserve_sigv4_pair`
-    // implements on the document-level path.
-    if new_cfg.access_key_id.is_none() && new_cfg.secret_access_key.is_none() {
-        new_cfg.access_key_id = old_cfg.access_key_id.clone();
-        new_cfg.secret_access_key = old_cfg.secret_access_key.clone();
-    }
-    // Backend creds: preserve per entry. The sectioned `storage`
-    // replacement drops these via redaction; restore from old when
-    // missing.
-    preserve_backend_secrets(&mut new_cfg.backend, &old_cfg.backend);
-    for new_named in &mut new_cfg.backends {
-        if let Some(old_named) = old_cfg.backends.iter().find(|n| n.name == new_named.name) {
-            preserve_backend_secrets(&mut new_named.backend, &old_named.backend);
-        }
-    }
+    // STEP-1: cred preservation. Uses the SAME shared helpers as
+    // `apply_config_doc` (see `super::preserve_sigv4_pair`,
+    // `preserve_primary_backend_creds`, `preserve_named_backends_creds`
+    // in `mod.rs`). Both write paths MUST stay in lockstep on the
+    // contract: redaction-round-trip safe, asymmetric SigV4 refuses
+    // to cross-wire (warns instead), backend type-flips and
+    // rename/removed-backends emit warnings.
+    //
+    // The encryption-key three-state semantics for the singleton +
+    // per-backend `encryption` fields run separately below (Step 6)
+    // because they need the raw JSON body to distinguish "absent"
+    // from "explicit null" — that distinction is lost after the
+    // merge-patch + collapse.
+    let mut cred_warnings: Vec<String> = Vec::new();
+    super::preserve_sigv4_pair(
+        &mut new_cfg.access_key_id,
+        &mut new_cfg.secret_access_key,
+        &old_cfg.access_key_id,
+        &old_cfg.secret_access_key,
+        "proxy-level",
+        &mut cred_warnings,
+    );
+    super::preserve_primary_backend_creds(&mut new_cfg, &old_cfg, &mut cred_warnings);
+    super::preserve_named_backends_creds(&mut new_cfg, &old_cfg, &mut cred_warnings);
 
     // Step 6: per-backend encryption key preservation. Three-state
     // semantics PER FIELD PER ENTRY:
@@ -400,41 +397,13 @@ async fn apply_section(
         }
     }
 
-    // R1: warn about named backends the operator's body dropped.
-    // `preserve_backend_secrets` only runs on backends present in
-    // `new_cfg.backends` — a backend that disappeared takes its
-    // creds with it silently. Mirror the document-level apply's
-    // "backend removed or renamed" warning so GitOps-style round-
-    // trips don't lose credential state without surfacing it.
-    let removed_warnings: Vec<String> = {
-        let new_names: std::collections::HashSet<&str> =
-            new_cfg.backends.iter().map(|n| n.name.as_str()).collect();
-        old_cfg
-            .backends
-            .iter()
-            .filter_map(|old_named| {
-                if new_names.contains(old_named.name.as_str()) {
-                    return None;
-                }
-                let had_creds = matches!(
-                    &old_named.backend,
-                    crate::config::BackendConfig::S3 {
-                        access_key_id: Some(_),
-                        secret_access_key: Some(_),
-                        ..
-                    },
-                );
-                if had_creds {
-                    Some(format!(
-                        "backend '{}' removed (or renamed) — its credentials are gone from runtime",
-                        old_named.name
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
+    // The `removed_warnings` name is preserved here for readability of the
+    // downstream call sites that thread it into `SectionApplyResponse`.
+    // It now carries the FULL cred-preservation warning bag
+    // (asymmetric SigV4, type-flips, renamed/removed backends) emitted
+    // by the shared helpers above — same warning surface the
+    // document-level apply path produces for equivalent edits.
+    let removed_warnings = cred_warnings;
 
     // Y1: normalise shorthand forms (bucket `public: true`, storage
     // `s3:`/`filesystem:` — anything `Config::normalize_shorthands`
@@ -944,42 +913,6 @@ fn apply_fingerprints_to_enc_json(
     }
     if let Some(fp) = fingerprint_secret(enc.legacy_key()) {
         obj.insert("legacy_key".to_string(), serde_json::Value::String(fp));
-    }
-}
-
-/// Preserve backend creds across a section round-trip.
-///
-/// Both `new` and `old` are S3 backends? Only when the incoming pair
-/// is both-None do we preserve the current creds — matches the
-/// "both-or-neither" contract on the top-level SigV4 pair. Asymmetric
-/// pairs (only `access_key_id` set, only `secret_access_key` set) are
-/// left as-is so the resulting config surfaces the user's exact
-/// intent — eventual auth failure is louder than silently cross-
-/// wiring.
-///
-/// Any other type pair (S3 ↔ filesystem, filesystem ↔ filesystem) is
-/// a no-op — filesystem backends carry no creds.
-fn preserve_backend_secrets(
-    new: &mut crate::config::BackendConfig,
-    old: &crate::config::BackendConfig,
-) {
-    if let (
-        crate::config::BackendConfig::S3 {
-            access_key_id: new_akid,
-            secret_access_key: new_sk,
-            ..
-        },
-        crate::config::BackendConfig::S3 {
-            access_key_id: old_akid,
-            secret_access_key: old_sk,
-            ..
-        },
-    ) = (new, old)
-    {
-        if new_akid.is_none() && new_sk.is_none() {
-            *new_akid = old_akid.clone();
-            *new_sk = old_sk.clone();
-        }
     }
 }
 
