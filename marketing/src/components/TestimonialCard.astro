@@ -1,0 +1,58 @@
+---
+// TestimonialCard.astro
+//
+// Single testimonial card with an explicit "About <product>" chip.
+// Per v5 plan §3.1: every card must carry product attribution
+// directly on the card. No reader can mistake these for DeltaGlider
+// testimonials — they are about Beshu's other products.
+
+interface Props {
+  /** Quote text. Will render verbatim inside <blockquote>. */
+  quote: string;
+  /** Author full name. */
+  name: string;
+  /** Author title + organization. */
+  title: string;
+  /** Which Beshu product the testimonial is about. Required. */
+  about: string;
+}
+
+const { quote, name, title, about } = Astro.props;
+---
+
+<article class="testimonial-card">
+  <span class="product-chip">About {about}</span>
+  <blockquote>
+    <p>{quote}</p>
+  </blockquote>
+  <p class="testimonial-byline">
+    <strong>{name}</strong><br />
+    <span class="testimonial-title">{title}</span>
+  </p>
+</article>
+
+<style>
+  .testimonial-card {
+    background: var(--bg-card);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 1.25rem 1.5rem;
+  }
+
+  .testimonial-card blockquote {
+    margin: 0 0 1rem 0;
+    border-left: none;
+    padding: 0;
+    color: var(--ink);
+  }
+
+  .testimonial-byline {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+  }
+
+  .testimonial-title {
+    color: var(--ink-faint);
+  }
+</style>

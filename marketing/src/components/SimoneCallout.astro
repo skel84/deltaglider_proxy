@@ -1,0 +1,43 @@
+---
+// SimoneCallout.astro
+//
+// "Built by / on the team's own production" callout for the homepage.
+// Per v5 plan §4.1 (soft Option B): different visual register from the
+// testimonial cards so the reader doesn't parse it as a fifth customer
+// testimonial. Names Simone as a real person with skin in the game
+// and routes to the case study.
+---
+
+<section class="simone-callout">
+  <p class="callout-leadin">— and on the team's own production:</p>
+  <p>
+    <strong>Simone Scarduzio</strong> (founder, Beshu Tech) is migrating
+    ReadonlyREST's 1.71 TB build catalog through DeltaGlider. The case
+    study includes the bugs we hit (TMPDIR hardcoded in upstream, Traefik
+    60s timeout, pipefail+head silent abort, EBS exhaustion) and how we
+    fixed them.
+  </p>
+  <p>
+    → <a href="/case-studies/readonlyrest-builds">Read the migration log</a>
+  </p>
+</section>
+
+<style>
+  .simone-callout {
+    margin: 3rem 0;
+    padding: 1.5rem;
+    border-left: 3px solid var(--accent);
+    background: var(--bg-soft);
+    max-width: var(--measure-wide);
+  }
+
+  .callout-leadin {
+    color: var(--ink-faint);
+    font-style: italic;
+    margin-top: 0;
+  }
+
+  .simone-callout p {
+    margin: 0.5rem 0;
+  }
+</style>

@@ -1,0 +1,54 @@
+---
+// CustomerSegmentBlock.astro
+//
+// "Since 2017, hundreds of remarkable organisations trusted us..."
+// — verbatim copy from readonlyrest.com per v5 plan §3.2.
+// Used on homepage and /regulated.
+---
+
+<section class="customer-segments">
+  <p class="segment-lede">
+    Since 2017, hundreds of remarkable organisations trusted us.
+    Customers that make us <strong>extra proud</strong>:
+  </p>
+  <ul class="segment-list">
+    <li>📈 <strong>2× in the S&amp;P 500 top 5</strong></li>
+    <li>🧸 <strong>2× Charities protecting children</strong></li>
+    <li>⚛️ <strong>3× Nuclear research institutions</strong></li>
+    <li>🇪🇺 <strong>2× European Union institutions</strong></li>
+    <li>👮‍♀️ <strong>Various government institutions</strong></li>
+  </ul>
+  <p class="segment-disclaimer">
+    Logos and customer references on this site reflect Beshu Tech's
+    customer base for ReadonlyREST. Their presence does not imply any
+    endorsement, sponsorship, or affiliation with DeltaGlider.
+  </p>
+</section>
+
+<style>
+  .customer-segments {
+    margin: 2.5rem 0;
+  }
+
+  .segment-lede {
+    font-size: 1.05rem;
+  }
+
+  .segment-list {
+    list-style: none;
+    padding-left: 0;
+    margin: 1rem 0;
+  }
+
+  .segment-list li {
+    margin: 0.4rem 0;
+    font-size: 1rem;
+  }
+
+  .segment-disclaimer {
+    margin-top: 1.5rem;
+    color: var(--ink-faint);
+    font-size: 0.85rem;
+    max-width: var(--measure);
+  }
+</style>

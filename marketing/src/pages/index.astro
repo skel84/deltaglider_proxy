@@ -1,15 +1,20 @@
 ---
-// Scaffold-stub homepage.
-// Replaced by the full v5 §4.1 homepage copy in the next commit.
-// Lives here so the Astro build has at least one page to render
-// and we can verify the deploy chain end-to-end.
+// Homepage — v5 plan §4.1.
+// Copy follows §7 principles: economy of words, simpler words,
+// active voice, concrete over abstract, no marketing-ese.
 
 import BaseLayout from '../layouts/BaseLayout.astro';
+import TestimonialsBlock from '../components/TestimonialsBlock.astro';
+import CustomerSegmentBlock from '../components/CustomerSegmentBlock.astro';
+import SimoneCallout from '../components/SimoneCallout.astro';
+import MechanismExplanation from '../components/MechanismExplanation.astro';
+import WorkloadFitTable from '../components/WorkloadFitTable.astro';
+import ComparisonTable from '../components/ComparisonTable.astro';
 ---
 
 <BaseLayout
   title="DeltaGlider — S3-compatible storage compression"
-  description="Storage compression for S3, behind the same S3 API your apps already use. Open source (GPL-3.0). Built by Beshu Tech."
+  description="Storage compression for S3, behind the same S3 API your apps already use. Open source, GPL-3.0. Built by Beshu Tech, 10 senior engineers since 2017."
 >
   <section class="shell hero">
     <h1>Storage compression for S3, behind the same S3 API.</h1>
@@ -17,15 +22,17 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     <p class="hero-lede">
       Versioned binaries — CI artifacts, plugin catalogs, builds,
       backups, ML model lineages — stored as xdelta3 deltas on the
-      bucket. Apps unchanged. Stored bytes typically drop 10×–100×
+      bucket. Apps unchanged. Stored bytes typically drop 10× to 100×
       on the right workload shape.
     </p>
 
     <p>
-      Open source (GPL-3.0). Built by <a href="https://beshu.tech">Beshu Tech</a> —
-      10 senior engineers, since 2017. Same team behind
+      Open source (GPL-3.0). Built by <a href="https://beshu.tech">Beshu Tech</a>
+      — 10 senior engineers, since 2017. Same team behind
       <a href="https://readonlyrest.com">ReadonlyREST</a> (Elasticsearch
-      security) and Anaphora (dashboard-to-PDF reporting).
+      security, flagship) and Anaphora (dashboard-to-PDF reporting), in
+      production at banks, nuclear research institutions, European
+      Union institutions, and 2× of the S&amp;P 500 top 5.
     </p>
 
     <div class="hero-ctas">
@@ -35,15 +42,167 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     </div>
   </section>
 
-  <section class="shell">
-    <p style="color: var(--ink-faint); font-size: 0.9rem; margin-top: 2rem;">
-      <em>
-        This is the scaffold homepage. Full copy from the v5 marketing plan
-        ships in the next commit. The point of this stub is to verify the
-        Astro build, GitHub Pages deploy, custom domain (deltaglider.com),
-        and link-graph all work end-to-end before investing in the long-
-        form copy.
-      </em>
-    </p>
-  </section>
+  <div class="shell">
+    <TestimonialsBlock />
+
+    <SimoneCallout />
+
+    <CustomerSegmentBlock />
+
+    <MechanismExplanation />
+
+    <WorkloadFitTable />
+
+    <section class="in-progress">
+      <h2>In progress: ReadonlyREST's own build catalog → Hetzner</h2>
+
+      <p>
+        Sample so far: a 1.69.0 plugin version compressed <strong>88.5×</strong>
+        (2,866 MB → 32.4 MB), bit-perfect SHA-256 round-trip through the
+        proxy. About <strong>$9 in EC2 compute</strong> and ~$2 in
+        Glacier Bulk-tier retrieval for the migration so far.
+      </p>
+
+      <p>
+        The full migration covers 145 versions, 8 years of release
+        history. Final results published as a reproducible case study
+        when complete.
+      </p>
+
+      <p>
+        → <a href="/case-studies/readonlyrest-builds">Methodology, sample numbers, raw data</a>
+      </p>
+    </section>
+
+    <section class="architecture">
+      <h2>How it fits in your stack</h2>
+
+      <p>
+        DeltaGlider is an S3-compatible proxy. Your apps speak SigV4 to
+        it. It speaks SigV4 to your bucket. On PUT, it stores either an
+        xdelta3 delta against the deltaspace reference or a passthrough
+        copy, whichever is smaller. On GET, it reconstructs byte-for-byte
+        and streams. The client sees ordinary S3.
+      </p>
+    </section>
+
+    <section class="operator-surface">
+      <h2>Beyond compression — the operator surface</h2>
+
+      <ul>
+        <li>
+          Per-user S3 credentials, ABAC permissions (AWS-IAM grammar via
+          <code>iam-rs</code>), OAuth/OIDC group mapping, encrypted
+          SQLCipher config DB.
+        </li>
+        <li>
+          Replication rules between buckets/backends — run-now,
+          pause/resume, history, optional delete-replication.
+        </li>
+        <li>
+          AES-256-GCM at-rest encryption, per-object IV. Encryption key
+          stays in your runtime; the backend sees ciphertext.
+        </li>
+        <li>
+          Lifecycle expiration, event outbox with retries/webhooks, soft
+          per-bucket quotas (including <code>quota=0</code> freeze for
+          migration windows), Prometheus metrics, in-memory audit ring
+          plus structured stdout for SIEM shipping.
+        </li>
+        <li>
+          Delta efficiency diagnostic panel — one-click scan flags
+          prefixes where the reference baseline produces wasted bytes.
+        </li>
+        <li>
+          Pre-auth admission chain — <code>deny</code>/<code>reject</code>/
+          <code>allow-anonymous</code> rules evaluated BEFORE auth.
+          <code>config trace</code> shows exactly which rule fired and
+          why.
+        </li>
+      </ul>
+
+      <p>→ <a href="/docs/reference">Reference docs</a></p>
+    </section>
+
+    <section class="accountability">
+      <h2>Accountability</h2>
+
+      <p>
+        Beshu Tech's 10 senior engineers wrote DeltaGlider; they're the
+        ones who answer your support tickets. No outsourced first-line.
+        No AI chatbot. Email <a href="mailto:contact@beshu.tech">contact@beshu.tech</a>
+        and the response comes from someone whose name is in <code>git log</code>.
+      </p>
+    </section>
+
+    <section class="xray">
+      <h2>Correctness x-ray, May 2026</h2>
+
+      <p>
+        A focused audit by five specialised investigators (concurrency,
+        auth, storage, HTTP/wire, error handling) surfaced 10 distinct
+        correctness bugs across the proxy. All fixed; each pinned by a
+        regression test. 769 unit tests in <code>cargo test --lib</code>,
+        +23 added during the audit. Clippy <code>-D warnings</code>
+        clean. Bug-by-bug write-up in
+        <a href="https://github.com/beshu-tech/deltaglider_proxy/blob/main/CHANGELOG.md">CHANGELOG.md</a>.
+      </p>
+    </section>
+
+    <ComparisonTable />
+
+    <section class="next">
+      <h2>Where to read next</h2>
+
+      <ul>
+        <li>
+          SaaS or platform team with versioned-artifact storage costs:
+          <a href="/saas">/saas</a>
+        </li>
+        <li>
+          Regulated data, encryption-at-rest with local key custody:
+          <a href="/regulated">/regulated</a>
+        </li>
+        <li>
+          Pricing + savings calculator: <a href="/pricing">/pricing</a>
+        </li>
+        <li>
+          30-day production support trial: <a href="/trial">/trial</a>
+        </li>
+      </ul>
+    </section>
+
+    <section class="quickstart">
+      <h2>Get started</h2>
+
+      <pre><code>docker run -p 9000:9000 \
+  -e DGP_BACKEND=s3 \
+  -e DGP_S3_ENDPOINT=https://your-backend \
+  -e AWS_ACCESS_KEY_ID=... \
+  -e AWS_SECRET_ACCESS_KEY=... \
+  ghcr.io/beshu-tech/deltaglider_proxy:latest</code></pre>
+
+      <p>
+        Then point your S3 SDK at <code>http://localhost:9000</code>.
+        Same SigV4. Same buckets. Same workflow.
+      </p>
+
+      <p>
+        → <a href="/docs/quickstart">Full quickstart</a> ·
+        <a href="https://github.com/beshu-tech/deltaglider_proxy">GitHub</a>
+      </p>
+    </section>
+  </div>
 </BaseLayout>
+
+<style>
+  .in-progress,
+  .architecture,
+  .operator-surface,
+  .accountability,
+  .xray,
+  .next,
+  .quickstart {
+    margin: 3rem 0;
+  }
+</style>

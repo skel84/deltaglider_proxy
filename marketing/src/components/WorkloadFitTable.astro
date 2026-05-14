@@ -1,0 +1,66 @@
+---
+// WorkloadFitTable.astro
+//
+// "Will it work on your data?" honesty table from v5 plan §4.1.
+// The point is self-disqualification: tell people NOT to use DeltaGlider
+// when their data won't compress. That earns trust.
+---
+
+<section class="workload-fit">
+  <h2>Will it work on your data?</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Your data looks like</th>
+        <th>Expected</th>
+        <th>Recommend</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>CI artifacts, build catalogs, plugin marketplaces</td>
+        <td>10–100×</td>
+        <td>✅ Yes</td>
+      </tr>
+      <tr>
+        <td>DB dumps, daily backups, ML model variants</td>
+        <td>5–50×</td>
+        <td>✅ Yes</td>
+      </tr>
+      <tr>
+        <td>Container layers, Maven / PyPI mirrors</td>
+        <td>10–50×</td>
+        <td>✅ Yes</td>
+      </tr>
+      <tr>
+        <td>Random user uploads, encrypted blobs, raw video</td>
+        <td>1–2×</td>
+        <td>❌ Use plain S3</td>
+      </tr>
+      <tr>
+        <td>Append-only logs, streaming telemetry</td>
+        <td>1×</td>
+        <td>❌ Use plain S3</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p class="workload-note">
+    Self-disqualify or self-qualify here. We'd rather you find out now
+    than after deployment.
+  </p>
+</section>
+
+<style>
+  .workload-fit {
+    margin: 3rem 0;
+  }
+
+  .workload-note {
+    color: var(--ink-soft);
+    font-style: italic;
+    font-size: 0.95rem;
+    max-width: var(--measure);
+  }
+</style>

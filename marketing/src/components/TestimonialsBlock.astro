@@ -1,0 +1,82 @@
+---
+// TestimonialsBlock.astro
+//
+// The four ReadonlyREST testimonials, with the v5 plan §3.1 framing
+// line on top. Section heading is the long-and-explicit version so
+// no skimming reader can misread these as DeltaGlider endorsements.
+
+import TestimonialCard from './TestimonialCard.astro';
+
+const testimonials = [
+  {
+    quote:
+      "Our largest shared cluster [...] consolidates about 17 different use cases on the same hardware, lowering the total cost.",
+    name: 'Ulrich Schwickerath',
+    title: 'Physicist, IT department, CERN',
+    about: 'ReadonlyREST',
+  },
+  {
+    quote:
+      'ReadonlyREST Enterprise is one of the few software I use or used professionally, and I would recommend it 200%.',
+    name: 'Pierre Chesneau',
+    title: 'Solution Architect, Top French network operator',
+    about: 'ReadonlyREST',
+  },
+  {
+    quote:
+      "I baked ReadonlyREST Free into SEC455 SIEM Design and Implementation. I'm openly recommending it to students and highlighting its features.",
+    name: 'Justin Henderson',
+    title: 'GSE, SANS Instructor, CEO, H/A Security Solutions',
+    about: 'ReadonlyREST',
+  },
+  {
+    quote:
+      'ReadonlyREST was quick and easy to implement, that gave us more time to spend on other important tasks.',
+    name: 'Frederic Hosmann',
+    title: 'Responsible of Platforms and Automation, Creos S.A.',
+    about: 'ReadonlyREST',
+  },
+];
+---
+
+<section class="testimonials">
+  <h2>What Beshu Tech's customers say about our other products</h2>
+
+  <p class="testimonials-framing">
+    None of these quotes are about DeltaGlider — it's a new product.
+    They are about <a href="https://readonlyrest.com">ReadonlyREST</a>,
+    Beshu Tech's flagship since 2017. We include them because the team
+    that wrote the software behind these quotes is the same team
+    writing DeltaGlider.
+  </p>
+
+  <div class="testimonials-grid">
+    {testimonials.map((t) => <TestimonialCard {...t} />)}
+  </div>
+</section>
+
+<style>
+  .testimonials {
+    margin: 3rem 0;
+  }
+
+  .testimonials-framing {
+    max-width: var(--measure);
+    color: var(--ink-soft);
+    font-size: 1rem;
+  }
+
+  .testimonials-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1rem;
+    margin-top: 1.5rem;
+  }
+
+  @media (min-width: 768px) {
+    .testimonials-grid {
+      grid-template-columns: 1fr 1fr;
+      gap: 1.25rem;
+    }
+  }
+</style>
