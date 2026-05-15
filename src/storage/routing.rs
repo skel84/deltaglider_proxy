@@ -17,7 +17,9 @@ use futures::stream::BoxStream;
 
 use crate::types::FileMetadata;
 
-use super::traits::{BucketListing, DelegatedListResult, StorageBackend, StorageError};
+use super::traits::{
+    BucketListing, DelegatedListResult, LiteScanResult, StorageBackend, StorageError,
+};
 
 /// Route entry: maps a virtual bucket to a backend and optional real bucket name.
 #[derive(Debug, Clone)]
@@ -501,6 +503,14 @@ impl StorageBackend for RoutingBackend {
         prefix: &str,
     ) -> Result<Vec<FileMetadata>, StorageError> {
         route_existing!(self, bucket, scan_deltaspace, prefix)
+    }
+
+    async fn scan_deltaspace_lite(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> Result<LiteScanResult, StorageError> {
+        route_existing!(self, bucket, scan_deltaspace_lite, prefix)
     }
 
     async fn list_deltaspaces(&self, bucket: &str) -> Result<Vec<String>, StorageError> {

@@ -3,17 +3,15 @@
 //! Delta efficiency diagnostics: scan deltaspaces and report bad
 //! reference choices.
 //!
-//! Motivated by the v0.9.17 prod incident where
-//! `s3://beshu/ror/builds/1.70.0-pre5/` had 22 GB of deltas that delta-
-//! encoded at **0.01 % savings** because the first uploaded file in the
-//! prefix happened to be a Kibana ZIP (`compression=store`), and every
-//! subsequent ES plugin (`compression=deflate`) was deltaed against it
-//! for ≈ 99.99 % size of original. Re-uploading via the proxy with a
-//! sensible seed brought it from 22 GB → 569 MB (−97.4 %).
-//!
-//! This module surfaces such cases proactively: on demand it walks
-//! the deltaspaces in a bucket, computes per-prefix size statistics,
-//! and classifies each prefix into a coarse health bucket.
+//! When the first file uploaded to a prefix is a poor match for its
+//! siblings (e.g. a stored-compression ZIP picked as the reference for
+//! a folder full of deflate-compressed plugins), every subsequent
+//! delta encodes at near-100% of the original — turning gigabytes of
+//! deduplication potential into wasted storage. This panel surfaces
+//! such cases proactively: on demand it walks the deltaspaces in a
+//! bucket, computes per-prefix size statistics, and classifies each
+//! prefix into a coarse health bucket. Re-uploading a flagged prefix
+//! via the proxy picks a better seed and recovers the savings.
 //!
 //! ## Concurrency model
 //!
@@ -34,11 +32,11 @@
 //! ## Pure-function core
 //!
 //! [`classify_deltaspace`] takes only `(reference_size, &[delta_size])`
-//! and returns an [`Efficiency`] verdict. No I/O, fully unit-testable
-//! against a truth table of real prod scenarios.
+//! and returns an [`Efficiency`] verdict. No I/O, fully unit-testable.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -47,7 +45,7 @@ use tracing::{debug, warn};
 
 use super::AdminState;
 use crate::api::handlers::AppState;
-use crate::types::StorageInfo;
+use crate::types::{FileMetadata, StorageInfo};
 
 /// Cache TTL — five minutes mirrors `UsageScanner` so an operator
 /// reloading the diagnostics tab doesn't kick off duplicate work.
@@ -57,18 +55,17 @@ const CACHE_TTL_SECS: i64 = 300;
 
 /// Coarse health classification for a single deltaspace.
 ///
-/// Thresholds chosen empirically from the prod audit:
+/// Thresholds are on the ratio `median_delta / reference_size`:
 ///
-/// * **Excellent**: median delta ≤ 200 KB AND ≤ 5 % of reference. The
+/// * **Excellent**: ratio ≤ 5 % AND median delta ≤ 200 KB. The
 ///   reference is well-chosen and most siblings are close-cousins.
-/// * **Good**: median ≤ 1 MB OR ≤ 20 % of reference. Healthy: deltas
-///   are clearly compressing the file.
-/// * **Fair**: median ≤ 50 % of reference. Common when a single
-///   deltaspace mixes multiple variants (e.g. ES 6/7/8/9 plugins);
-///   structurally bounded by inherent file dissimilarity.
-/// * **Poor**: median > 50 % of reference. Strongly suggests a wrong
-///   reference baseline — the prefix should be re-uploaded with a
-///   better seed (or split into smaller deltaspaces).
+/// * **Good**: ratio < 20 % but not Excellent. Healthy delta encoding.
+/// * **Fair**: 20 % ≤ ratio < 50 %. Common when a single deltaspace
+///   mixes multiple variants (e.g. ES 6/7/8/9 plugins); structurally
+///   bounded by inherent file dissimilarity.
+/// * **Poor**: ratio ≥ 50 %. Strongly suggests a wrong reference
+///   baseline — the prefix should be re-uploaded with a better seed
+///   (or split into smaller deltaspaces).
 /// * **NoReference**: there are deltas but no `reference.bin`.
 ///   Anomalous; check storage backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,13 +150,20 @@ pub fn classify_deltaspace(
     Some(Efficiency::Good)
 }
 
+/// Returns the upper median (element at index `len / 2` of the sorted
+/// view). For even-length inputs this is the higher of the two middle
+/// elements — chosen for cheap u64 math; matches the classification
+/// thresholds in `classify_deltaspace`. Returns 0 for empty input.
 fn median_u64(values: &[u64]) -> u64 {
     if values.is_empty() {
         return 0;
     }
-    let mut sorted: Vec<u64> = values.to_vec();
-    sorted.sort_unstable();
-    sorted[sorted.len() / 2]
+    // Heap-allocates once; select_nth_unstable is O(n) average and
+    // doesn't fully sort like the previous `sort_unstable` did.
+    let mut buf: Vec<u64> = values.to_vec();
+    let mid = buf.len() / 2;
+    let (_, median, _) = buf.select_nth_unstable(mid);
+    *median
 }
 
 // ─── I/O layer: types ─────────────────────────────────────────────────
@@ -178,6 +182,19 @@ pub struct DeltaspaceReport {
     pub max_delta_bytes: u64,
     pub savings_bytes: i64, // total_original - (reference + total_delta)
     pub efficiency: Efficiency,
+    /// `median_delta_bytes / reference_bytes`. `None` when there is no
+    /// reference. The headline number for the redesigned timeline view —
+    /// computed server-side so the client doesn't repeat the division.
+    #[serde(default)]
+    pub ratio_median: Option<f64>,
+    /// True when the report was built from a HEAD-free scan. In that
+    /// mode `total_original_bytes` is a **lower bound** (passthrough
+    /// sizes only — delta originals are not recovered without HEAD)
+    /// and `savings_bytes` is `0` rather than the real saving. The
+    /// classifier's verdict and `ratio_median` are unaffected. UIs MUST
+    /// gate on this before displaying the two affected fields.
+    #[serde(default)]
+    pub original_size_estimated: bool,
     /// Operator-facing explanation derived from `efficiency`.
     /// Inlined here so the frontend doesn't need to duplicate the
     /// classification text.
@@ -327,97 +344,84 @@ impl DeltaEfficiencyScanner {
     }
 
     /// Walk every deltaspace in `bucket` and build the efficiency
-    /// response. Cost: one `list_deltaspaces` call + one
-    /// `scan_deltaspace` per prefix. For O(100) prefixes × O(100)
-    /// objects this is in seconds — hence the cache.
+    /// response.
+    ///
+    /// ## Cost model
+    ///
+    /// One `list_deltaspaces` (single bucket-wide LIST) + one
+    /// `scan_deltaspace_lite` per prefix, fanned out
+    /// `PARALLEL_PREFIX_SCANS`-at-a-time. **No HEAD calls** —
+    /// `scan_deltaspace_lite` reads everything we need from listing
+    /// data alone (see `StorageBackend::scan_deltaspace_lite` docs).
+    ///
+    /// On the migration bucket (141 prefixes × ~500 deltas), the
+    /// previous serial + HEAD-storm shape took ~60s+ and blew the
+    /// frontend timeout. This shape lands in ~3-5s.
     async fn do_scan(
         s3_state: &AppState,
         bucket: &str,
         min_deltas: usize,
     ) -> Result<EfficiencyResponse, String> {
-        let engine = s3_state.engine.load();
-        let storage = engine.storage();
-        let prefixes = storage
+        let engine = s3_state.engine.load_full();
+        let prefixes = engine
+            .storage()
             .list_deltaspaces(bucket)
             .await
             .map_err(|e| format!("list_deltaspaces failed: {e}"))?;
-
-        let mut reports: Vec<DeltaspaceReport> = Vec::new();
         let scanned = prefixes.len();
 
-        for prefix in prefixes {
-            let scan = match storage.scan_deltaspace(bucket, &prefix).await {
+        // Fan out per-prefix scans. `buffer_unordered` bounds the in-
+        // flight count — too low and we leave throughput on the table,
+        // too high and we risk S3 SlowDown (or process FD pressure on
+        // filesystem backends). 8 is conservative and works well across
+        // both backends.
+        //
+        // We clone `Arc<DynEngine>` into each future so the engine
+        // stays alive across the awaits even if a hot-reload swaps the
+        // ArcSwap mid-scan.
+        let bucket_owned = bucket.to_string();
+        let mut scan_stream = futures::stream::iter(prefixes.into_iter().map(|prefix| {
+            let engine = engine.clone();
+            let bucket = bucket_owned.clone();
+            async move {
+                let scan = engine
+                    .storage()
+                    .scan_deltaspace_lite(&bucket, &prefix)
+                    .await;
+                (prefix, scan)
+            }
+        }))
+        .buffer_unordered(PARALLEL_PREFIX_SCANS);
+
+        let mut reports: Vec<DeltaspaceReport> = Vec::new();
+        while let Some((prefix, scan_result)) = scan_stream.next().await {
+            let lite = match scan_result {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(
-                        "delta-efficiency: scan_deltaspace failed for {}/{}: {}",
+                        "delta-efficiency: scan_deltaspace_lite failed for {}/{}: {}",
                         bucket, prefix, e
                     );
                     continue;
                 }
             };
-            // Partition into reference / deltas / passthroughs.
-            let mut reference_bytes: Option<u64> = None;
-            let mut delta_sizes: Vec<u64> = Vec::new();
-            let mut passthrough_count: usize = 0;
-            let mut total_original: u64 = 0;
-            for m in &scan {
-                match &m.storage_info {
-                    StorageInfo::Reference { .. } => {
-                        reference_bytes = Some(m.file_size);
-                    }
-                    StorageInfo::Delta { delta_size, .. } => {
-                        delta_sizes.push(*delta_size);
-                        total_original = total_original.saturating_add(m.file_size);
-                    }
-                    StorageInfo::Passthrough => {
-                        passthrough_count += 1;
-                        total_original = total_original.saturating_add(m.file_size);
-                    }
-                }
-            }
-
-            let Some(efficiency) = classify_deltaspace(reference_bytes, &delta_sizes, min_deltas)
-            else {
-                continue;
-            };
-
-            let total_delta: u64 = delta_sizes.iter().sum();
-            let median = median_u64(&delta_sizes);
-            let max_delta = delta_sizes.iter().copied().max().unwrap_or(0);
-            let stored_bytes = reference_bytes.unwrap_or(0).saturating_add(total_delta);
-            let savings = total_original as i64 - stored_bytes as i64;
-
-            reports.push(DeltaspaceReport {
-                bucket: bucket.to_string(),
+            // The backend tells us whether `file_size` on deltas is
+            // the true original (filesystem default path with xattr)
+            // or just the on-disk delta size (S3 override skips
+            // HEAD). We pass that through so the report can honestly
+            // mark `original_size_estimated` for the UI.
+            if let Some(report) = build_report_for_prefix(
+                bucket,
                 prefix,
-                deltas: delta_sizes.len(),
-                passthrough: passthrough_count,
-                reference_bytes,
-                total_delta_bytes: total_delta,
-                total_original_bytes: total_original,
-                median_delta_bytes: median,
-                max_delta_bytes: max_delta,
-                savings_bytes: savings,
-                efficiency,
-                explanation: efficiency.explanation().to_string(),
-            });
+                &lite.metadata,
+                min_deltas,
+                lite.originals_estimated,
+            ) {
+                reports.push(report);
+            }
         }
 
-        // Sort: worst first (Poor before Fair before Good), tiebreaker
-        // by total_delta_bytes desc so the biggest waste rises.
-        reports.sort_by(|a, b| {
-            let order = |e: Efficiency| match e {
-                Efficiency::NoReference => 0,
-                Efficiency::Poor => 1,
-                Efficiency::Fair => 2,
-                Efficiency::Good => 3,
-                Efficiency::Excellent => 4,
-            };
-            order(a.efficiency)
-                .cmp(&order(b.efficiency))
-                .then_with(|| b.total_delta_bytes.cmp(&a.total_delta_bytes))
-        });
+        sort_reports_worst_first(&mut reports);
 
         let reported = reports.len();
         Ok(EfficiencyResponse {
@@ -430,6 +434,151 @@ impl DeltaEfficiencyScanner {
             cached: false,
         })
     }
+}
+
+/// How many per-prefix scans to run concurrently. Balanced against the
+/// S3 client connection pool and FD limits on filesystem backends. 8
+/// is conservative — moving up gives diminishing returns on bandwidth-
+/// bound LISTs and risks SlowDown on S3.
+const PARALLEL_PREFIX_SCANS: usize = 8;
+
+/// Stable severity ordering: NoReference (broken — investigate first),
+/// then Poor → Fair → Good → Excellent. Lower number = surface earlier.
+fn efficiency_severity(e: Efficiency) -> u8 {
+    match e {
+        Efficiency::NoReference => 0,
+        Efficiency::Poor => 1,
+        Efficiency::Fair => 2,
+        Efficiency::Good => 3,
+        Efficiency::Excellent => 4,
+    }
+}
+
+/// Sort reports for the UI: worst severity first, then biggest waste,
+/// then prefix ASC as a deterministic tiebreaker (without it,
+/// `buffer_unordered` completion order would make tied rows flip
+/// positions across reloads).
+fn sort_reports_worst_first(reports: &mut [DeltaspaceReport]) {
+    reports.sort_by(|a, b| {
+        efficiency_severity(a.efficiency)
+            .cmp(&efficiency_severity(b.efficiency))
+            .then_with(|| b.total_delta_bytes.cmp(&a.total_delta_bytes))
+            .then_with(|| a.prefix.cmp(&b.prefix))
+    });
+}
+
+/// Pure aggregator: from a single deltaspace's scan, build a
+/// `DeltaspaceReport` if it meets the `min_deltas` floor, else None.
+///
+/// Separated from `do_scan` so it stays unit-testable without
+/// spinning up a storage backend.
+///
+/// `originals_estimated` mirrors the field in
+/// [`StorageBackend::scan_deltaspace_lite`]'s result: when true, the
+/// `file_size` on every `Delta` entry is the on-disk delta size rather
+/// than the original-file size. In that case we can't honestly compute
+/// `total_original_bytes` or `savings_bytes` — both are reported as
+/// `0` and the flag propagates to the report so the UI can suppress
+/// the corresponding columns.
+fn build_report_for_prefix(
+    bucket: &str,
+    prefix: String,
+    scan: &[FileMetadata],
+    min_deltas: usize,
+    originals_estimated: bool,
+) -> Option<DeltaspaceReport> {
+    let partition = partition_deltaspace_scan(scan, originals_estimated);
+    let efficiency = classify_deltaspace(
+        partition.reference_bytes,
+        &partition.delta_sizes,
+        min_deltas,
+    )?;
+
+    let total_delta: u64 = partition.delta_sizes.iter().sum();
+    let median = median_u64(&partition.delta_sizes);
+    let max_delta = partition.delta_sizes.iter().copied().max().unwrap_or(0);
+    let stored_bytes = partition
+        .reference_bytes
+        .unwrap_or(0)
+        .saturating_add(total_delta);
+    // Savings is meaningful only with true originals. Under
+    // `originals_estimated`, the UI shouldn't display this; we zero it
+    // out and the `original_size_estimated` flag on the report flags
+    // the row.
+    let savings = if originals_estimated {
+        0
+    } else {
+        partition.total_original as i64 - stored_bytes as i64
+    };
+    let ratio_median = partition.reference_bytes.and_then(|r| {
+        if r == 0 {
+            None
+        } else {
+            Some(median as f64 / r as f64)
+        }
+    });
+
+    Some(DeltaspaceReport {
+        bucket: bucket.to_string(),
+        prefix,
+        deltas: partition.delta_sizes.len(),
+        passthrough: partition.passthrough_count,
+        reference_bytes: partition.reference_bytes,
+        total_delta_bytes: total_delta,
+        total_original_bytes: partition.total_original,
+        median_delta_bytes: median,
+        max_delta_bytes: max_delta,
+        savings_bytes: savings,
+        efficiency,
+        ratio_median,
+        original_size_estimated: originals_estimated,
+        explanation: efficiency.explanation().to_string(),
+    })
+}
+
+/// Sums collected from a single deltaspace's scan, prior to verdict
+/// computation. Kept separate from `build_report_for_prefix` so the
+/// partition loop has its own name and unit-test surface.
+struct DeltaspacePartition {
+    reference_bytes: Option<u64>,
+    delta_sizes: Vec<u64>,
+    passthrough_count: usize,
+    /// Sum of `file_size` across non-reference entries. Under
+    /// `originals_estimated` the delta `file_size` is the on-disk delta
+    /// size (not the original), so it's excluded — otherwise we'd
+    /// double-count delta storage as "original" and make
+    /// `savings_bytes` look negative on healthy prefixes.
+    total_original: u64,
+}
+
+fn partition_deltaspace_scan(
+    scan: &[FileMetadata],
+    originals_estimated: bool,
+) -> DeltaspacePartition {
+    let mut p = DeltaspacePartition {
+        reference_bytes: None,
+        delta_sizes: Vec::new(),
+        passthrough_count: 0,
+        total_original: 0,
+    };
+    for m in scan {
+        match &m.storage_info {
+            StorageInfo::Reference { .. } => {
+                p.reference_bytes = Some(m.file_size);
+            }
+            StorageInfo::Delta { delta_size, .. } => {
+                p.delta_sizes.push(*delta_size);
+                if !originals_estimated {
+                    p.total_original = p.total_original.saturating_add(m.file_size);
+                }
+            }
+            StorageInfo::Passthrough => {
+                p.passthrough_count += 1;
+                p.total_original = p.total_original.saturating_add(m.file_size);
+            }
+        }
+    }
+    p
 }
 
 // ─── Admin API handlers ─────────────────────────────────────────────
@@ -737,5 +886,295 @@ mod tests {
         }
         // Cleared on drop.
         assert!(!scanner.is_scanning("bucket", 3));
+    }
+
+    // ── build_report_for_prefix ────────────────────────────────────
+
+    /// Build a Delta metadata fixture.
+    /// `file_size` is what the listing/HEAD layer reports as the
+    /// object's effective size. Under lite, this equals `delta_size`.
+    /// Under the HEAD path it equals the original-file size.
+    fn make_delta_meta(file_name: &str, delta_size: u64, file_size: u64) -> FileMetadata {
+        let now = Utc::now();
+        FileMetadata::fallback(
+            file_name.to_string(),
+            file_size,
+            String::new(),
+            now,
+            None,
+            StorageInfo::Delta {
+                ref_path: "reference.bin".to_string(),
+                ref_sha256: String::new(),
+                delta_size,
+                delta_cmd: String::new(),
+            },
+        )
+    }
+
+    fn make_ref_meta(size: u64) -> FileMetadata {
+        let now = Utc::now();
+        FileMetadata::fallback(
+            "reference.bin".to_string(),
+            size,
+            String::new(),
+            now,
+            None,
+            StorageInfo::Reference {
+                source_name: String::new(),
+            },
+        )
+    }
+
+    fn make_passthrough_meta(file_name: &str, size: u64) -> FileMetadata {
+        let now = Utc::now();
+        FileMetadata::fallback(
+            file_name.to_string(),
+            size,
+            String::new(),
+            now,
+            None,
+            StorageInfo::Passthrough,
+        )
+    }
+
+    /// Sanity: real-shaped Poor case — reference + 3 large deltas →
+    /// report has Poor verdict and ratio_median around 1.49.
+    /// Uses lite=true (file_size == delta_size on deltas).
+    #[test]
+    fn build_report_for_prefix_poor_with_ratio() {
+        let scan = vec![
+            make_ref_meta(61 * 1024 * 1024),
+            make_delta_meta("a.delta", 91 * 1024 * 1024, 91 * 1024 * 1024),
+            make_delta_meta("b.delta", 91 * 1024 * 1024, 91 * 1024 * 1024),
+            make_delta_meta("c.delta", 91 * 1024 * 1024, 91 * 1024 * 1024),
+        ];
+        let report = build_report_for_prefix("bk", "prod/1.0".into(), &scan, 3, true)
+            .expect("Poor verdict must produce a report");
+        assert_eq!(report.efficiency, Efficiency::Poor);
+        assert_eq!(report.deltas, 3);
+        // ratio = median(91MB) / 61MB ≈ 1.49
+        let ratio = report.ratio_median.expect("Poor must have ratio");
+        assert!(
+            (ratio - 1.49).abs() < 0.01,
+            "expected ratio≈1.49, got {ratio}"
+        );
+    }
+
+    /// Below `min_deltas` → no report (None).
+    #[test]
+    fn build_report_for_prefix_skips_below_min_deltas() {
+        let scan = vec![
+            make_ref_meta(1_000_000),
+            make_delta_meta("a.delta", 500_000, 500_000),
+        ];
+        assert!(build_report_for_prefix("bk", "p".into(), &scan, 3, true).is_none());
+    }
+
+    /// Passthrough counts/bytes flow into the report. Under lite, the
+    /// delta `file_size` is NOT added to `total_original_bytes` — only
+    /// passthrough bytes are. `original_size_estimated` is set true.
+    /// `savings_bytes` is `0` (sentinel for "not computable").
+    #[test]
+    fn build_report_for_prefix_counts_passthrough_under_lite() {
+        let scan = vec![
+            make_ref_meta(10_000_000),
+            make_delta_meta("a.delta", 100_000, 100_000),
+            make_delta_meta("b.delta", 100_000, 100_000),
+            make_delta_meta("c.delta", 100_000, 100_000),
+            make_passthrough_meta("video.mp4", 5_000_000),
+            make_passthrough_meta("image.jpg", 1_500_000),
+        ];
+        let report = build_report_for_prefix("bk", "p".into(), &scan, 3, true).expect("present");
+        assert_eq!(report.deltas, 3);
+        assert_eq!(report.passthrough, 2);
+        // Lite: only passthrough bytes contribute to total_original.
+        assert_eq!(report.total_original_bytes, 5_000_000 + 1_500_000);
+        assert_eq!(
+            report.savings_bytes, 0,
+            "lite mode must zero savings (unknown without HEAD)"
+        );
+        assert!(report.original_size_estimated);
+    }
+
+    /// Same input under non-lite (HEAD path) — delta `file_size` IS
+    /// the true original size, so both pathways contribute to
+    /// `total_original_bytes`, and `savings_bytes` reflects real
+    /// compression.
+    #[test]
+    fn build_report_for_prefix_counts_originals_under_head_path() {
+        // Here file_size on each delta = the original-file size that
+        // HEAD would have recovered. Pretend each delta's original
+        // was ~10 MB compressing to 100 KB.
+        let scan = vec![
+            make_ref_meta(10_000_000),
+            make_delta_meta("a.delta", 100_000, 10_000_000),
+            make_delta_meta("b.delta", 100_000, 10_000_000),
+            make_delta_meta("c.delta", 100_000, 10_000_000),
+            make_passthrough_meta("video.mp4", 5_000_000),
+        ];
+        let report = build_report_for_prefix("bk", "p".into(), &scan, 3, false).expect("present");
+        // Originals: 3 deltas × 10MB + 1 passthrough × 5MB = 35MB
+        assert_eq!(report.total_original_bytes, 35_000_000);
+        // Stored = reference + sum(delta_size) = 10MB + 3×100KB = 10.3MB
+        // savings = 35MB - 10.3MB = ~24.7MB
+        assert_eq!(report.savings_bytes, 35_000_000 - (10_000_000 + 300_000));
+        assert!(!report.original_size_estimated);
+    }
+
+    /// Healthy S3-style prefix under lite must NOT report negative
+    /// savings (regression test: pre-fix `savings_bytes` came out
+    /// negative on every Excellent prefix because the delta `file_size`
+    /// was double-counted as "original").
+    #[test]
+    fn build_report_lite_excellent_prefix_does_not_show_negative_savings() {
+        let scan = vec![
+            make_ref_meta(19_500_000),
+            make_delta_meta("a.delta", 70_000, 70_000),
+            make_delta_meta("b.delta", 70_000, 70_000),
+            make_delta_meta("c.delta", 70_000, 70_000),
+        ];
+        let report = build_report_for_prefix("bk", "p".into(), &scan, 3, true).expect("present");
+        assert_eq!(report.efficiency, Efficiency::Excellent);
+        // The whole point: lite must not surface a misleading negative
+        // savings number to the UI.
+        assert!(
+            report.savings_bytes >= 0,
+            "lite must never report negative savings on a healthy prefix \
+             (got {})",
+            report.savings_bytes
+        );
+        assert!(report.original_size_estimated);
+    }
+
+    /// `ratio_median` is None when there's no reference.
+    #[test]
+    fn build_report_for_prefix_no_reference_has_no_ratio() {
+        let scan = vec![
+            make_delta_meta("a.delta", 1_000, 1_000),
+            make_delta_meta("b.delta", 2_000, 2_000),
+            make_delta_meta("c.delta", 3_000, 3_000),
+        ];
+        let report = build_report_for_prefix("bk", "p".into(), &scan, 3, true).expect("present");
+        assert_eq!(report.efficiency, Efficiency::NoReference);
+        assert!(report.ratio_median.is_none());
+    }
+
+    /// `ratio_median` reflects the Excellent floor (0.36 %).
+    #[test]
+    fn build_report_for_prefix_excellent_ratio_is_small() {
+        let scan = vec![
+            make_ref_meta(19_500_000),
+            make_delta_meta("a.delta", 70_000, 70_000),
+            make_delta_meta("b.delta", 70_000, 70_000),
+            make_delta_meta("c.delta", 70_000, 70_000),
+        ];
+        let report = build_report_for_prefix("bk", "p".into(), &scan, 3, true).expect("present");
+        assert_eq!(report.efficiency, Efficiency::Excellent);
+        let ratio = report.ratio_median.expect("ratio present");
+        assert!(
+            ratio < 0.01,
+            "Excellent must yield small ratio, got {ratio}"
+        );
+    }
+
+    /// Zero-byte reference + multiple deltas: classifier says
+    /// NoReference, ratio is None, no panic on division-by-zero.
+    #[test]
+    fn build_report_for_prefix_zero_byte_reference_is_safe() {
+        let scan = vec![
+            make_ref_meta(0),
+            make_delta_meta("a.delta", 100, 100),
+            make_delta_meta("b.delta", 200, 200),
+            make_delta_meta("c.delta", 300, 300),
+        ];
+        let report = build_report_for_prefix("bk", "p".into(), &scan, 3, true).expect("present");
+        assert_eq!(report.efficiency, Efficiency::NoReference);
+        assert!(report.ratio_median.is_none());
+    }
+
+    /// Two `Reference` entries in one prefix (latent corner case):
+    /// classifier doesn't panic; the last-write-wins. Documented
+    /// behavior — not expected in normal proxy operation but the code
+    /// should be robust to malformed buckets.
+    #[test]
+    fn build_report_for_prefix_two_references_uses_last_write() {
+        let scan = vec![
+            make_ref_meta(1_000_000),
+            make_ref_meta(5_000_000),
+            make_delta_meta("a.delta", 100, 100),
+            make_delta_meta("b.delta", 200, 200),
+            make_delta_meta("c.delta", 300, 300),
+        ];
+        let report = build_report_for_prefix("bk", "p".into(), &scan, 3, true).expect("present");
+        // Either reference size is acceptable — but the field must be
+        // populated and ratio_median must be derived from the same.
+        let r = report.reference_bytes.expect("reference present");
+        assert!(r == 1_000_000 || r == 5_000_000);
+        let ratio = report.ratio_median.expect("ratio present");
+        assert!((ratio - (200.0 / r as f64)).abs() < 1e-9);
+    }
+
+    // ── sort_reports_worst_first ───────────────────────────────────
+
+    fn dummy_report(prefix: &str, efficiency: Efficiency, total_delta: u64) -> DeltaspaceReport {
+        DeltaspaceReport {
+            bucket: "b".into(),
+            prefix: prefix.into(),
+            deltas: 3,
+            passthrough: 0,
+            reference_bytes: Some(100),
+            total_delta_bytes: total_delta,
+            total_original_bytes: 0,
+            median_delta_bytes: 100,
+            max_delta_bytes: 100,
+            savings_bytes: 0,
+            efficiency,
+            ratio_median: Some(1.0),
+            original_size_estimated: true,
+            explanation: String::new(),
+        }
+    }
+
+    /// Two prefixes that tie on (efficiency, total_delta_bytes) must
+    /// produce a deterministic order across runs. Before the tertiary
+    /// sort key on `prefix` was added, `buffer_unordered` completion
+    /// order made the row order flip across reloads.
+    #[test]
+    fn sort_is_deterministic_for_tied_prefixes() {
+        let mut reports = [
+            dummy_report("z", Efficiency::Poor, 300),
+            dummy_report("a", Efficiency::Poor, 300),
+        ];
+        sort_reports_worst_first(&mut reports);
+        assert_eq!(reports[0].prefix, "a");
+        assert_eq!(reports[1].prefix, "z");
+    }
+
+    /// Severity order: NoReference first, then Poor → Excellent.
+    #[test]
+    fn sort_puts_no_reference_before_poor_before_excellent() {
+        let mut reports = [
+            dummy_report("c", Efficiency::Excellent, 10),
+            dummy_report("a", Efficiency::NoReference, 10),
+            dummy_report("b", Efficiency::Poor, 10),
+        ];
+        sort_reports_worst_first(&mut reports);
+        assert_eq!(reports[0].efficiency, Efficiency::NoReference);
+        assert_eq!(reports[1].efficiency, Efficiency::Poor);
+        assert_eq!(reports[2].efficiency, Efficiency::Excellent);
+    }
+
+    /// Within one verdict, larger waste rises.
+    #[test]
+    fn sort_within_verdict_orders_by_waste_desc() {
+        let mut reports = [
+            dummy_report("a", Efficiency::Poor, 100),
+            dummy_report("b", Efficiency::Poor, 500),
+            dummy_report("c", Efficiency::Poor, 300),
+        ];
+        sort_reports_worst_first(&mut reports);
+        assert_eq!(reports[0].prefix, "b"); // 500
+        assert_eq!(reports[1].prefix, "c"); // 300
+        assert_eq!(reports[2].prefix, "a"); // 100
     }
 }

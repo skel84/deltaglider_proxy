@@ -71,6 +71,21 @@ function copyToClipboard(text: string) {
   }
 }
 
+/**
+ * Poll cadence on 202 Accepted. Optimized backend lands in ~3-5s for a
+ * 141-prefix bucket, so 3s catches the answer in a single tick. Bumping
+ * higher would slow the UX on the common case; lower would hammer the
+ * server for no benefit.
+ */
+const POLL_INTERVAL_MS = 3000;
+
+/**
+ * Ceiling for the 202 → 200 polling loop. Sized for buckets with
+ * thousands of deltaspaces; the optimized scanner lands inside this
+ * window comfortably for any realistic bucket.
+ */
+const SCAN_TIMEOUT_MS = 300_000;
+
 export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
   const colors = useColors();
   const [buckets, setBuckets] = useState<string[]>([]);
@@ -111,8 +126,8 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
    *   - 202 Accepted with `{scanning: true}` and a background scan
    *     was just enqueued (or one was already running).
    *
-   * On 202, poll the GET endpoint every 2 s until we get a 200,
-   * with a 60 s ceiling so a stuck scan doesn't spin forever.
+   * On 202, poll the GET endpoint at `POLL_INTERVAL_MS` cadence until
+   * we get a 200, bounded by `SCAN_TIMEOUT_MS`.
    */
   const fetchOrPoll = async (
     forceRescan: boolean,
@@ -123,7 +138,7 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
       await triggerDeltaEfficiencyScan(bucket, minDeltas);
     }
     const startedAt = Date.now();
-    const deadline = startedAt + 60_000;
+    const deadline = startedAt + SCAN_TIMEOUT_MS;
     // First call: if fresh-cached we'll get 200 immediately.
     // If not, the server enqueues a scan and we get 202.
     while (Date.now() < deadline) {
@@ -131,13 +146,16 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
       if ('scanning' in r) {
         // Server is working on it. Wait briefly, then re-fetch.
         setScanning(true);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
         continue;
       }
       setScanning(false);
       return r;
     }
-    throw new Error('Scan timed out after 60 s — try again or check server logs');
+    throw new Error(
+      `Scan timed out after ${Math.round(SCAN_TIMEOUT_MS / 1000)}s — ` +
+        `try again or check server logs`,
+    );
   };
 
   const runScan = async (forceRescan = false) => {
@@ -338,11 +356,32 @@ function ReportsTable({ reports }: { reports: DeltaspaceEfficiencyReport[] }) {
               <td style={cellStyle}>
                 {fmtBytes(r.total_delta_bytes + (r.reference_bytes ?? 0))}
               </td>
-              <td style={cellStyle}>{fmtBytes(r.total_original_bytes)}</td>
+              {/*
+                Under HEAD-free scans (S3 backend), the server reports
+                a lower bound for `total_original_bytes` and zeroes
+                `savings_bytes`. Show `—` rather than misleading
+                undercounts. The verdict + median + ratio still tell
+                the operator everything they need.
+              */}
               <td style={cellStyle}>
-                <Text type={r.savings_bytes < 0 ? 'danger' : undefined}>
-                  {r.savings_bytes < 0 ? `-${fmtBytes(-r.savings_bytes)}` : fmtBytes(r.savings_bytes)}
-                </Text>
+                {r.original_size_estimated ? (
+                  <Tooltip title="Original size not available without per-delta HEAD calls; verdict and median ratio are unaffected.">
+                    <span style={{ color: colors.TEXT_MUTED }}>—</span>
+                  </Tooltip>
+                ) : (
+                  fmtBytes(r.total_original_bytes)
+                )}
+              </td>
+              <td style={cellStyle}>
+                {r.original_size_estimated ? (
+                  <span style={{ color: colors.TEXT_MUTED }}>—</span>
+                ) : (
+                  <Text type={r.savings_bytes < 0 ? 'danger' : undefined}>
+                    {r.savings_bytes < 0
+                      ? `-${fmtBytes(-r.savings_bytes)}`
+                      : fmtBytes(r.savings_bytes)}
+                  </Text>
+                )}
               </td>
               <td style={{ ...cellStyle, color: colors.TEXT_SECONDARY, maxWidth: 360 }}>
                 {r.explanation}

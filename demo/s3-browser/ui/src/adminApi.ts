@@ -1590,11 +1590,37 @@ export interface DeltaspaceEfficiencyReport {
   passthrough: number;
   reference_bytes: number | null;
   total_delta_bytes: number;
+  /**
+   * Under the HEAD-free scan path (S3 backend), this is a **lower
+   * bound** — only passthrough sizes contribute, because delta original
+   * sizes require a HEAD call to recover. Check `original_size_estimated`
+   * before displaying as a real "original" total.
+   */
   total_original_bytes: number;
   median_delta_bytes: number;
   max_delta_bytes: number;
+  /**
+   * `total_original - (reference + total_delta)`. `0` when
+   * `original_size_estimated` is true (we have no honest original to
+   * subtract from). UIs MUST gate on `original_size_estimated` before
+   * rendering this as a savings figure — otherwise healthy S3
+   * deltaspaces appear to have "negative savings".
+   */
   savings_bytes: number;
   efficiency: DeltaEfficiency;
+  /**
+   * `median_delta_bytes / reference_bytes`. `null` when there's no
+   * reference. Server-computed so the timeline view (redesigned panel)
+   * can plot this directly without repeating the division.
+   */
+  ratio_median: number | null;
+  /**
+   * True when the report was built from a HEAD-free scan. In that
+   * case `total_original_bytes` is a lower bound and `savings_bytes`
+   * is `0` (sentinel for "unknown"). The efficiency verdict and
+   * `ratio_median` are unaffected.
+   */
+  original_size_estimated: boolean;
   explanation: string;
 }
 

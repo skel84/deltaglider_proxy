@@ -49,7 +49,7 @@
 //! Objects with `dg-encrypted: aes-256-gcm-chunked-v1` → chunked decrypt.
 //! Objects without the marker → returned as-is (backward compatible).
 
-use super::traits::{DelegatedListResult, StorageBackend, StorageError};
+use super::traits::{DelegatedListResult, LiteScanResult, StorageBackend, StorageError};
 use crate::types::FileMetadata;
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -1474,6 +1474,9 @@ impl<B: StorageBackend + Send + Sync> StorageBackend for EncryptingBackend<B> {
     }
     async fn scan_deltaspace(&self, b: &str, p: &str) -> Result<Vec<FileMetadata>, StorageError> {
         self.inner.scan_deltaspace(b, p).await
+    }
+    async fn scan_deltaspace_lite(&self, b: &str, p: &str) -> Result<LiteScanResult, StorageError> {
+        self.inner.scan_deltaspace_lite(b, p).await
     }
     async fn list_deltaspaces(&self, b: &str) -> Result<Vec<String>, StorageError> {
         self.inner.list_deltaspaces(b).await

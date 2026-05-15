@@ -332,6 +332,42 @@ pub trait StorageBackend: Send + Sync {
         prefix: &str,
     ) -> Result<Vec<FileMetadata>, StorageError>;
 
+    /// Cheap variant of [`scan_deltaspace`] for diagnostics-only callers
+    /// that don't need exact `original_size` for delta files.
+    ///
+    /// On S3, `scan_deltaspace` fires a bounded-parallel HEAD storm to
+    /// recover the original-file size of every `.delta` from user
+    /// metadata. For a bucket with N prefixes × M deltas/prefix, that's
+    /// N×M HEADs on top of N LISTs. The delta-efficiency scanner only
+    /// needs delta sizes (already in the listing) + the reference size
+    /// (also in the listing), not original sizes — so it can skip the
+    /// HEAD storm entirely.
+    ///
+    /// Backends that don't HEAD anyway (e.g. filesystem reads xattr
+    /// inline) inherit the default impl which delegates to
+    /// `scan_deltaspace` and reports `originals_estimated: false`
+    /// because xattr already supplies the original sizes.
+    ///
+    /// `originals_estimated: true` in the returned struct means that
+    /// for delta entries `file_size` is the **on-disk delta size**, not
+    /// the original — callers should not derive "savings" or "original
+    /// total" from it. The classifier's median-ratio verdict is
+    /// unaffected either way (it uses `StorageInfo::Delta.delta_size`,
+    /// which is the same number across both shapes).
+    async fn scan_deltaspace_lite(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> Result<LiteScanResult, StorageError> {
+        // Default: HEAD-based path supplies real originals, so the
+        // caller can trust file_size on deltas.
+        let metadata = self.scan_deltaspace(bucket, prefix).await?;
+        Ok(LiteScanResult {
+            metadata,
+            originals_estimated: false,
+        })
+    }
+
     /// List all deltaspace prefixes within a bucket
     async fn list_deltaspaces(&self, bucket: &str) -> Result<Vec<String>, StorageError>;
 
@@ -394,6 +430,23 @@ pub struct DelegatedListResult {
     pub common_prefixes: Vec<String>,
     pub is_truncated: bool,
     pub next_continuation_token: Option<String>,
+}
+
+/// Result from [`StorageBackend::scan_deltaspace_lite`].
+///
+/// `originals_estimated` tells the caller whether `file_size` on the
+/// returned `FileMetadata` entries with `StorageInfo::Delta` is the
+/// **original-file size** (false — caller can compute true savings) or
+/// the **on-disk delta size** (true — caller must suppress
+/// "savings"/"original total" displays to avoid misleading negative
+/// numbers).
+///
+/// The classifier verdict and median-ratio are unaffected either way:
+/// they're computed from `StorageInfo::Delta.delta_size`, which both
+/// shapes populate identically from listing data.
+pub struct LiteScanResult {
+    pub metadata: Vec<FileMetadata>,
+    pub originals_estimated: bool,
 }
 
 /// Generate the blanket `impl StorageBackend for Box<dyn StorageBackend>`
@@ -595,6 +648,13 @@ macro_rules! impl_storage_backend_for_box {
                 prefix: &str,
             ) -> Result<Vec<FileMetadata>, StorageError> {
                 (**self).scan_deltaspace(bucket, prefix).await
+            }
+            async fn scan_deltaspace_lite(
+                &self,
+                bucket: &str,
+                prefix: &str,
+            ) -> Result<LiteScanResult, StorageError> {
+                (**self).scan_deltaspace_lite(bucket, prefix).await
             }
             async fn list_deltaspaces(&self, bucket: &str) -> Result<Vec<String>, StorageError> {
                 (**self).list_deltaspaces(bucket).await
