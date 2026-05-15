@@ -8,8 +8,20 @@ import { useColors } from '../ThemeContext';
 import type { FolderSizeState } from '../useComputeSize';
 import { getPreviewMode } from './filePreviewMode';
 import { canRequestPrefixUsageScan, isVirtualFolderPrefix } from '../permissions';
+import { usePersistedPageSize } from '../usePersistedPageSize';
+import { describeVisibleRange } from '../paginationLabels';
 
 const { Text } = Typography;
+
+/**
+ * Allowed object-table page sizes, smallest → largest. The S3 LIST
+ * pagination returns up to 1000 keys per upstream page, so anything
+ * here fits inside a single round trip even when the bucket is well
+ * past the in-memory cap (`MAX_LIST_PAGES` in s3client.ts).
+ */
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 250, 500] as const;
+const DEFAULT_PAGE_SIZE = 100;
+const PAGE_SIZE_STORAGE_KEY = 'dg-object-table-page-size';
 
 interface Props {
   objects: S3Object[];
@@ -63,7 +75,11 @@ export default function ObjectTable({
   const { token } = theme.useToken();
   const { TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, ACCENT_BLUE, ACCENT_AMBER, ACCENT_PURPLE, STORAGE_TYPE_COLORS, STORAGE_TYPE_DEFAULT } = useColors();
 
-  const PAGE_SIZE = 100;
+  const [pageSize, setPageSize] = usePersistedPageSize(
+    PAGE_SIZE_STORAGE_KEY,
+    DEFAULT_PAGE_SIZE,
+    PAGE_SIZE_OPTIONS,
+  );
   const [currentPage, setCurrentPage] = useState(1);
 
   // Guard against rapid folder clicks (issue #4)
@@ -80,11 +96,11 @@ export default function ObjectTable({
   useEffect(() => { setCurrentPage(1); }, [prefix]);
 
   // Compute visible file keys for the current page and request HEAD enrichment
-  const enrichPage = useCallback((page: number) => {
+  const enrichPage = useCallback((page: number, size: number) => {
     const folderRows = folders.length;
     const allRows = folderRows + objects.length;
-    const start = (page - 1) * PAGE_SIZE;
-    const end = Math.min(page * PAGE_SIZE, allRows);
+    const start = (page - 1) * size;
+    const end = Math.min(page * size, allRows);
     const fileKeys: string[] = [];
     for (let i = start; i < end; i++) {
       if (i >= folderRows) {
@@ -94,10 +110,20 @@ export default function ObjectTable({
     if (fileKeys.length > 0) onEnrichKeys(fileKeys);
   }, [folders.length, objects, onEnrichKeys]);
 
-  // Enrich when page changes or objects load
+  // Enrich when page or page-size changes or objects load
   useEffect(() => {
-    if (objects.length > 0) enrichPage(currentPage);
-  }, [currentPage, objects, enrichPage]);
+    if (objects.length > 0) enrichPage(currentPage, pageSize);
+  }, [currentPage, pageSize, objects, enrichPage]);
+
+  // Page-size change resets the operator to page 1 — otherwise
+  // "page 5 of 25-per-page" becomes nonsense after switching to 250.
+  const handlePageSizeChange = useCallback(
+    (next: number) => {
+      setPageSize(next);
+      setCurrentPage(1);
+    },
+    [setPageSize],
+  );
 
   // Auto-populate folder sizes from cached scanner results
   useEffect(() => {
@@ -354,12 +380,27 @@ export default function ObjectTable({
           rowKey="key"
           showSorterTooltip={false} /* Ant Design 6 rc-table renders sort tooltips inline in <th>, causing layout shift */
           pagination={{
-            pageSize: PAGE_SIZE,
+            pageSize,
             current: currentPage,
-            onChange: (page) => setCurrentPage(page),
-            showSizeChanger: false,
+            onChange: (page, nextPageSize) => {
+              if (nextPageSize !== pageSize) {
+                handlePageSizeChange(nextPageSize);
+              } else {
+                setCurrentPage(page);
+              }
+            },
+            showSizeChanger: true,
+            pageSizeOptions: PAGE_SIZE_OPTIONS.map(String),
             size: 'small',
-            hideOnSinglePage: true,
+            // The size selector stays visible even on a single page so
+            // operators can dial down (e.g. from 250 → 25) to surface
+            // pagination they may not realise is one switch away.
+            // AntD hides the entire pagination bar — including the
+            // size changer — when `hideOnSinglePage` is true, so we
+            // leave it false here.
+            hideOnSinglePage: false,
+            showTotal: (totalCount, range) =>
+              `${range[0].toLocaleString()}–${range[1].toLocaleString()} of ${totalCount.toLocaleString()}`,
           }}
           size="small"
           sticky
@@ -396,7 +437,12 @@ export default function ObjectTable({
         />
       )}
 
-      {/* Status bar */}
+      {/* Status bar — single source of truth for the visible-range
+          summary, mirrored to assistive tech via `aria-live`. AntD's
+          pagination `showTotal` puts the same range next to the page
+          buttons; the status bar repeats it so screen readers
+          announce page/size changes even when the user's focus is on
+          the page-size dropdown. */}
       <div
         role="status"
         aria-live="polite"
@@ -407,7 +453,7 @@ export default function ObjectTable({
         }}
       >
         <Text style={{ fontSize: 12, color: TEXT_MUTED, fontFamily: "var(--font-mono)" }}>
-          {totalItems} {totalItems === 1 ? 'item' : 'items'}
+          {describeVisibleRange(totalItems, currentPage, pageSize)}
         </Text>
       </div>
     </div>

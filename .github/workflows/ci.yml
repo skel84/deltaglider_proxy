@@ -445,11 +445,12 @@ jobs:
       # ── Blocking: Knip detects unused files, deps, and exports. ──
       - name: Knip (dead code / unused deps)
         run: cd demo/s3-browser/ui && npm run knip
-      - name: Node regression scripts (permissions + storage paths)
+      - name: Node regression scripts (permissions + storage paths + page size)
         run: |
           cd demo/s3-browser/ui
           npm run test:permissions
           npm run test:storage-path
+          npm run test:page-size
       - name: npm audit
         run: cd demo/s3-browser/ui && npm audit --audit-level=high || true  # warn-only
 
