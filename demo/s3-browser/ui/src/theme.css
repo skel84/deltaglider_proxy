@@ -6,6 +6,23 @@
   --font-mono: 'JetBrains Mono', monospace;
 }
 
+/*
+ * Reserve the vertical-scrollbar gutter unconditionally.
+ *
+ * AntD's underlying `rc-util` injects a body-level scroll-lock style
+ * (`overflow-y: hidden; width: calc(100% - <scrollbarWidth>px)`) every
+ * time a portalled popup mounts — including the Pagination's
+ * page-size <Select>, not just modals/drawers. With the default
+ * `scrollbar-gutter: auto`, flipping `overflow-y` between `visible`
+ * and `hidden` reclaims/reserves the scrollbar gutter on each open/
+ * close, jittering the layout by ~5-6px. Stable gutter pins the
+ * column whether or not anything toggles overflow, so the lock has
+ * no visible effect.
+ */
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   margin: 0;
   -webkit-font-smoothing: antialiased;

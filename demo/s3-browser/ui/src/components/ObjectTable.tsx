@@ -10,6 +10,7 @@ import { getPreviewMode } from './filePreviewMode';
 import { canRequestPrefixUsageScan, isVirtualFolderPrefix } from '../permissions';
 import { usePersistedPageSize } from '../usePersistedPageSize';
 import { describeVisibleRange } from '../paginationLabels';
+import SimpleSelect from './SimpleSelect';
 
 const { Text } = Typography;
 
@@ -373,6 +374,18 @@ export default function ObjectTable({
           style={{ lineHeight: 0, marginBottom: 0 }}
         />
       )}
+      {/*
+        AntD's Pagination size-changer (a portalled <Select>) triggers
+        @rc-component/portal's useScrollLocker the moment its dropdown
+        opens, injecting `body { overflow-y: hidden; width: calc(100%
+        - 6px) }`. On a 600-row table the body is scrolling, so the
+        width compensation kicks in and the layout shakes 5-6 px on
+        every open/close. Wrapping in a custom getPopupContainer
+        didn't help in practice — AntD popups have multiple portal
+        paths and one of them still hit body. We avoid the entire
+        problem by disabling AntD's size-changer and rendering our
+        own SimpleSelect (portal-free, no rc-util) in the status bar.
+      */}
       <div style={{ flex: 1, overflow: 'auto' }}>
         <Table<RowData>
           columns={columns}
@@ -382,22 +395,15 @@ export default function ObjectTable({
           pagination={{
             pageSize,
             current: currentPage,
-            onChange: (page, nextPageSize) => {
-              if (nextPageSize !== pageSize) {
-                handlePageSizeChange(nextPageSize);
-              } else {
-                setCurrentPage(page);
-              }
-            },
-            showSizeChanger: true,
-            pageSizeOptions: PAGE_SIZE_OPTIONS.map(String),
+            onChange: (page) => setCurrentPage(page),
+            // Size changer disabled — we render our own SimpleSelect
+            // in the status bar below.
+            showSizeChanger: false,
             size: 'small',
-            // The size selector stays visible even on a single page so
-            // operators can dial down (e.g. from 250 → 25) to surface
-            // pagination they may not realise is one switch away.
-            // AntD hides the entire pagination bar — including the
-            // size changer — when `hideOnSinglePage` is true, so we
-            // leave it false here.
+            // Keep pagination bar visible even when one page fits all
+            // (so operators see "X items" with no pager) — the size
+            // changer is rendered separately, so this only affects
+            // the prev/next buttons + page numbers.
             hideOnSinglePage: false,
             showTotal: (totalCount, range) =>
               `${range[0].toLocaleString()}–${range[1].toLocaleString()} of ${totalCount.toLocaleString()}`,
@@ -443,18 +449,55 @@ export default function ObjectTable({
           buttons; the status bar repeats it so screen readers
           announce page/size changes even when the user's focus is on
           the page-size dropdown. */}
+      {/*
+        Footer row: aria-live range readout on the left, page-size
+        SimpleSelect on the right. Our own SimpleSelect avoids the
+        AntD/rc-util portal entirely, so opening it can't trigger the
+        scroll-locker that shook the layout when we used the built-in
+        Pagination size-changer.
+      */}
       <div
-        role="status"
-        aria-live="polite"
         style={{
-          padding: '10px 20px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 16,
+          padding: '8px 20px',
           borderTop: `1px solid ${token.colorBorderSecondary}`,
           flexShrink: 0,
         }}
       >
-        <Text style={{ fontSize: 12, color: TEXT_MUTED, fontFamily: "var(--font-mono)" }}>
-          {describeVisibleRange(totalItems, currentPage, pageSize)}
-        </Text>
+        <div role="status" aria-live="polite" style={{ flex: 1, minWidth: 0 }}>
+          <Text style={{ fontSize: 12, color: TEXT_MUTED, fontFamily: 'var(--font-mono)' }}>
+            {describeVisibleRange(totalItems, currentPage, pageSize)}
+          </Text>
+        </div>
+        <label
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 12,
+            color: TEXT_MUTED,
+            fontFamily: 'var(--font-ui)',
+            flexShrink: 0,
+          }}
+        >
+          <span>Rows per page</span>
+          <SimpleSelect
+            size="small"
+            value={String(pageSize)}
+            onChange={(v) => {
+              const n = Number(v);
+              if (Number.isFinite(n)) handlePageSizeChange(n);
+            }}
+            options={PAGE_SIZE_OPTIONS.map((n) => ({
+              value: String(n),
+              label: String(n),
+            }))}
+            style={{ width: 84 }}
+          />
+        </label>
       </div>
     </div>
   );

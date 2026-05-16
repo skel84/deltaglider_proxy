@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useColors } from '../ThemeContext';
 import { useEscapeKey, useOnClickOutside } from '../useDocumentEvent';
 import { useFixedOverlayPosition } from '../useFixedOverlayPosition';
@@ -33,9 +33,18 @@ export default function SimpleSelect({ value, onChange, options, placeholder, al
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const triggerRef = useRef<HTMLDivElement>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const pos = useFixedOverlayPosition(triggerRef, open);
+  // Track the overlay element as state so `useFixedOverlayPosition`
+  // re-runs when the dropdown mounts and can flip above the trigger
+  // when there's no room below. The callback ref also feeds
+  // `dropdownRef` for `useOnClickOutside`.
+  const [overlayEl, setOverlayEl] = useState<HTMLDivElement | null>(null);
+  const setOverlay = useCallback((el: HTMLDivElement | null) => {
+    dropdownRef.current = el;
+    setOverlayEl(el);
+  }, []);
+  const pos = useFixedOverlayPosition(triggerRef, open, { overlayEl });
 
   const selected = options.find(o => o.value === value);
   const isSmall = size === 'small';
@@ -99,7 +108,7 @@ export default function SimpleSelect({ value, onChange, options, placeholder, al
       {/* Dropdown overlay — fixed position, measured from trigger rect */}
       {open && (
         <div
-          ref={dropdownRef}
+          ref={setOverlay}
           style={{
             position: 'fixed',
             top: pos.top,
