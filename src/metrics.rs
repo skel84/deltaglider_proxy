@@ -496,11 +496,11 @@ pub async fn http_metrics_middleware(
 
     metrics
         .http_requests_total
-        .with_label_values(&[&method, &status, operation])
+        .with_label_values(&[method.as_str(), status.as_str(), operation])
         .inc();
     metrics
         .http_request_duration_seconds
-        .with_label_values(&[&method, operation])
+        .with_label_values(&[method.as_str(), operation])
         .observe(duration);
 
     // Record response size from Content-Length if available
