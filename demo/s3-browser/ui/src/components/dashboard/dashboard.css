@@ -39,3 +39,39 @@
   min-height: 0;
   min-width: 0;
 }
+
+/* Subtle pulse for the per-row "scanning" dot on the Analytics tab
+ * (BucketRow live SSE indicator). Low-amplitude so multiple rows
+ * scanning in sequence don't feel chaotic. */
+@keyframes dgScanPulse {
+  0%   { opacity: 0.35; transform: scale(1.0); }
+  50%  { opacity: 1.0;  transform: scale(1.3); }
+  100% { opacity: 0.35; transform: scale(1.0); }
+}
+
+/* Slow breath behind the HeroSavingsPanel hero number — Vercel/Linear
+ * style. Just a gentle opacity ripple on the radial-gradient haze so
+ * the static % number doesn't feel dead between count-ups. */
+@keyframes dgHeroHazePulse {
+  0%   { opacity: 0.6; }
+  50%  { opacity: 1.0; }
+  100% { opacity: 0.6; }
+}
+
+/* Diagonal drift on the saved-portion dot pattern — gives the
+ * "absence" texture a faint sense of motion so the eye sticks on it
+ * for a beat without being noisy. Translate at sub-pixel speed. */
+@keyframes dgBarGrain {
+  0%   { background-position: 0 0; }
+  100% { background-position: 60px 30px; }
+}
+
+/* Honour user setting: kill all dashboard-decoration animations when
+ * the OS-level reduced-motion preference is on. Functional animations
+ * (count-up via JS) gate themselves separately at the component layer. */
+@media (prefers-reduced-motion: reduce) {
+  .panel-chart-edge,
+  [data-dg-animated] {
+    animation: none !important;
+  }
+}

@@ -2,7 +2,83 @@
 
 ## Unreleased
 
-## v0.9.18 — 2026-05-10
+### Added
+
+- **Bucket-wide scan endpoint with persistent on-disk cache**, backing
+  the dashboard's headline totals. Replaces the old `/_/stats` path
+  that capped at 1,000 objects per scan — useless on any real bucket
+  (a 1.4 TB Hetzner bucket with 79k objects reported "1,000+" and
+  guessed savings off the first kilobyte). New
+  `GET /_/api/admin/diagnostics/scan/status[?bucket=X]` returns the
+  cached map (or single bucket); `POST …/scan/start` kicks a
+  paginated walk; `POST …/scan/stop` cancels; `DELETE …/scan` forgets
+  a cached result; `GET …/scan/stream?bucket=X` opens an SSE feed of
+  per-page progress (`objects`, `original_bytes`, `stored_bytes`,
+  `pages_done`, `has_more`). Results persist to
+  `.deltaglider_scans/<bucket>.json` with a schema-version field —
+  results survive proxy restart, no TTL, regenerate on deserialise
+  failure. Per-bucket scan handle backed by `tokio::sync::watch` +
+  `CancellationToken`; the scan continues to completion even after
+  every SSE subscriber disconnects (useful for long PB-scale walks
+  left running overnight). 6 unit tests cover persistence, corrupted-
+  file recovery, version-mismatch rejection, and bucket-name
+  sanitisation against `..` / `/` traversal.
+
+- **"Money shot" Analytics dashboard redesign.** The four flat KPI
+  cards (Total storage · Space saved · Savings % · Est. monthly
+  savings) collapse into one 12-col `HeroSavingsPanel` showing
+  storage saved at billboard scale with a count-up animation on
+  first visit per session (`sessionStorage` gate, honours
+  `prefers-reduced-motion`), a scale-accurate kept-vs-saved bar
+  echoing the hero ratio, a dollar savings line with cost-rate
+  preset popover, and a cache-age footer line ("Newest scan 47 s
+  ago · Oldest 3 h 12 m ago · 2 buckets excluded"). Single new
+  dependency: `motion@^12` for the orchestrated count-up + bar-grow
+  animation (~5 KB initial, ~30 KB lazy). Below the hero, the old
+  "Storage by bucket" recharts stacked bar — which collapsed to a
+  single line when one bucket dwarfed the rest — is replaced by a
+  **Bucket fleet** view where every bucket gets a full-width ratio
+  bar plus a thin scale-relative footprint bar underneath, so even
+  tiny buckets are legible. The dead "Scan progress" + "Compression
+  opportunities" panels (empty 90% of the time) become a **By the
+  numbers** insights grid (largest bucket / biggest single saving /
+  best & worst ratio / total objects / avg ratio) and a
+  **Compression effectiveness** radial gauge with explicit
+  tier-breakdown (Excellent ≥ 50 %, Good 20–49 %, Low < 20 %, None
+  0 %, N/A < 2 objects). The gauge value is *bytes-weighted* — a
+  1.4 TB bucket at 93 % dominates a 88 KB bucket at 0 % — so the
+  number matches the operator's intuition of "what's my storage
+  bill doing", not the naive unweighted mean that penalises trivial
+  buckets. Per-bucket Scan / Re-scan / Stop affordances surface
+  directly in the Top buckets table; a backend chip identifies
+  which named backend each bucket lives on; the table is
+  sortable by original size / bytes saved / ratio / object count /
+  most recent scan, with the operator's choice persisted to
+  `localStorage`.
+
+- **Delta-efficiency per-prefix "verify" deep dive.** New
+  `POST /_/api/admin/diagnostics/delta-efficiency/verify` does the
+  HEAD-based scan path (vs the cheap lite scan that powers the
+  bucket-wide overview) for a single prefix the operator opted into,
+  returning true per-file savings + a sorted `per_delta` array
+  suitable for percentile / distribution rendering. Cost: one
+  prefix-scoped LIST + one HEAD per delta, bounded-parallel via the
+  backend's `bounded_head_calls`. Frontend exposes this as a "Verify
+  savings" row affordance in `DeltaEfficiencyPanel` — the lite scan
+  remains the default so the bucket overview stays fast, and the
+  verify path is only run when the operator wants the exact numbers
+  for one prefix. 5 unit tests pin the response shape and the
+  sorting invariant.
+
+### Changed
+
+- **Monitoring-tab refresh controls hidden on Analytics.** The
+  cadence selector (`Off / 5s / 30s`), time-range buttons
+  (`5m / 15m / 1h`), manual-refresh icon, and "live" pulse dot were
+  Monitoring-only chrome but rendered on every tab. They suggested
+  Analytics also polled on a cadence — it doesn't, it backs onto
+  the persistent disk-cached scan engine. `DashboardToolbar` now
+  gates that row on `view === 'monitoring'`.
 
 ### Added
 

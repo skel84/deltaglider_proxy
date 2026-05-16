@@ -190,11 +190,14 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         // Usage scanner
         .route("/_/api/admin/usage/scan", post(admin::scan_usage))
         .route("/_/api/admin/usage", get(admin::get_usage))
-        // Delta-efficiency diagnostics: scan a bucket's deltaspaces and
-        // surface prefixes whose reference baseline is producing
-        // too-large deltas (the v0.9.17 1.70.0-pre5 incident shape).
-        // GET returns cached result if fresh (5-min TTL), or 202 +
-        // background scan kicked off. POST forces a re-scan.
+        // Delta-efficiency diagnostics: scan a bucket's deltaspaces
+        // and surface prefixes whose reference baseline is producing
+        // larger deltas than expected. GET returns the cached result
+        // if fresh (5-min TTL), or 202 + a background scan kicked off
+        // (the lite path — no HEAD storm). POST /scan forces a fresh
+        // bulk re-scan. POST /verify is the per-prefix opt-in deep
+        // dive: HEAD-fetches originals so the response carries true
+        // savings rather than the lite proxy ratio.
         .route(
             "/_/api/admin/diagnostics/delta-efficiency",
             get(admin::get_delta_efficiency),
@@ -202,6 +205,43 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         .route(
             "/_/api/admin/diagnostics/delta-efficiency/scan",
             post(admin::post_delta_efficiency_scan),
+        )
+        .route(
+            "/_/api/admin/diagnostics/delta-efficiency/verify",
+            post(admin::verify_delta_efficiency),
+        )
+        // Bucket-wide object scan that backs the dashboard headline.
+        // - GET /scan/status?bucket=X (or no bucket → all-buckets map)
+        //   returns the cached/in-flight state. Powers initial render.
+        // - POST /scan/start?bucket=X kicks off a scan (idempotent).
+        // - POST /scan/stop?bucket=X cancels a running scan.
+        // - DELETE /scan?bucket=X drops the persisted result so the UI
+        //   reverts to "never scanned".
+        // - GET /scan/stream?bucket=X is the SSE progress feed; opening
+        //   the stream implicitly starts a scan if none is running.
+        // Results persist to `.deltaglider_scans/<bucket>.json` and
+        // survive proxy restarts. No TTL — S3 data is write-mostly, so
+        // the UI surfaces the scan's age and lets the operator
+        // re-scan on demand.
+        .route(
+            "/_/api/admin/diagnostics/scan/status",
+            get(admin::get_scan_status),
+        )
+        .route(
+            "/_/api/admin/diagnostics/scan/start",
+            post(admin::post_scan_start),
+        )
+        .route(
+            "/_/api/admin/diagnostics/scan/stop",
+            post(admin::post_scan_stop),
+        )
+        .route(
+            "/_/api/admin/diagnostics/scan",
+            axum::routing::delete(admin::delete_scan),
+        )
+        .route(
+            "/_/api/admin/diagnostics/scan/stream",
+            get(admin::get_scan_stream),
         )
         // Audit log viewer — recent ring of structured audit entries.
         // Read-only; no corresponding mutation route. Session-gated

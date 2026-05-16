@@ -674,6 +674,175 @@ pub async fn post_delta_efficiency_scan(
     )
 }
 
+// ─── Per-prefix verified scan (HEAD-based, opt-in) ──────────────────
+
+/// Per-delta breakdown returned by [`verify_delta_efficiency`].
+/// Suitable for percentile / distribution displays in the UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifiedDelta {
+    pub key: String,
+    pub original_size: u64,
+    pub delta_size: u64,
+    /// `delta_size / original_size` — the true compression ratio per
+    /// file. Different from the lite-scan's `delta / reference`
+    /// proxy: this one says "the encoded delta took X% of the
+    /// original file". Lower is better; > 1 means xdelta3 made the
+    /// file bigger.
+    pub ratio: f64,
+}
+
+/// Result returned by `POST /_/api/admin/diagnostics/delta-efficiency/verify`.
+/// All sizes are in bytes; `true_savings_bytes` is signed so the
+/// frontend can render "−860 MB lost" the same way as "+5.83 GB saved".
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifyResponse {
+    pub bucket: String,
+    pub prefix: String,
+    pub reference_bytes: Option<u64>,
+    pub deltas: usize,
+    pub passthrough_count: usize,
+    pub total_original_bytes: u64,
+    pub total_stored_bytes: u64,
+    pub true_savings_bytes: i64,
+    /// `1 − total_stored / total_original` as a fraction. `None` when
+    /// `total_original == 0` (would otherwise divide by zero).
+    pub compression_ratio: Option<f64>,
+    /// Per-delta breakdown — sorted ascending by `ratio` so the UI's
+    /// p10 / p50 / p90 picks fall on the right indices without
+    /// re-sorting client-side.
+    pub per_delta: Vec<VerifiedDelta>,
+}
+
+#[derive(Deserialize)]
+pub struct VerifyRequest {
+    pub bucket: String,
+    pub prefix: String,
+}
+
+/// `POST /_/api/admin/diagnostics/delta-efficiency/verify` — operator
+/// "deep dive" affordance for ONE prefix. Calls the HEAD-based
+/// `scan_deltaspace` (NOT the lite path) so we recover exact original
+/// sizes from per-delta user metadata, then computes true savings.
+///
+/// Cost: one prefix-scoped LIST + one HEAD per delta in the prefix
+/// (bounded-parallel via `bounded_head_calls` inside the backend).
+/// On the migration bucket's largest prefix (~700 deltas) this is
+/// ~700 HEADs, ~1-2 s wall-clock at 64-way concurrency. Tolerable
+/// because it's per-row opt-in, not bulk.
+///
+/// Why not enable this by default? See [`scan_deltaspace_lite`]'s
+/// docstring — for a 308-prefix bucket, the bulk version is ~70k
+/// HEADs and times out. This endpoint surfaces the trade explicitly:
+/// the operator pays the cost only when they want true numbers for
+/// a specific prefix.
+pub async fn verify_delta_efficiency(
+    State(state): State<Arc<AdminState>>,
+    Json(req): Json<VerifyRequest>,
+) -> impl IntoResponse {
+    let engine = state.s3_state.engine.load_full();
+    let scan = match engine
+        .storage()
+        .scan_deltaspace(&req.bucket, &req.prefix)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                "delta-efficiency verify failed for {}/{}: {}",
+                req.bucket, req.prefix, e
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let response = build_verify_response(&req.bucket, &req.prefix, &scan);
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Pure aggregator over a HEAD-resolved scan. Same shape as
+/// [`build_report_for_prefix`] but trusts `m.file_size` on deltas as
+/// the original size (the HEAD path populates it from user metadata).
+///
+/// Separated so it can be unit-tested without standing up a backend.
+fn build_verify_response(bucket: &str, prefix: &str, scan: &[FileMetadata]) -> VerifyResponse {
+    let mut reference_bytes: Option<u64> = None;
+    let mut per_delta: Vec<VerifiedDelta> = Vec::new();
+    let mut passthrough_count: usize = 0;
+    let mut passthrough_bytes: u64 = 0;
+    let mut total_original: u64 = 0;
+    let mut total_delta_stored: u64 = 0;
+
+    for m in scan {
+        match &m.storage_info {
+            StorageInfo::Reference { .. } => {
+                reference_bytes = Some(m.file_size);
+            }
+            StorageInfo::Delta { delta_size, .. } => {
+                let original = m.file_size;
+                let delta = *delta_size;
+                total_original = total_original.saturating_add(original);
+                total_delta_stored = total_delta_stored.saturating_add(delta);
+                let ratio = if original == 0 {
+                    // Pathological — a 0-byte original. Treat as
+                    // ratio 0 so it doesn't blow out percentile sorts.
+                    0.0
+                } else {
+                    delta as f64 / original as f64
+                };
+                per_delta.push(VerifiedDelta {
+                    key: m.original_name.clone(),
+                    original_size: original,
+                    delta_size: delta,
+                    ratio,
+                });
+            }
+            StorageInfo::Passthrough => {
+                passthrough_count += 1;
+                passthrough_bytes = passthrough_bytes.saturating_add(m.file_size);
+                total_original = total_original.saturating_add(m.file_size);
+            }
+        }
+    }
+
+    // Stored = reference (if present) + sum(delta_size) + passthrough
+    // bytes. Passthroughs cost their own size to store.
+    let total_stored = reference_bytes
+        .unwrap_or(0)
+        .saturating_add(total_delta_stored)
+        .saturating_add(passthrough_bytes);
+    let true_savings = total_original as i64 - total_stored as i64;
+    let compression_ratio = if total_original == 0 {
+        None
+    } else {
+        Some(1.0 - (total_stored as f64 / total_original as f64))
+    };
+
+    // Sort per_delta by ratio ascending so the UI gets percentile
+    // picks for free at indices [n*0.1], [n*0.5], [n*0.9].
+    per_delta.sort_by(|a, b| {
+        a.ratio
+            .partial_cmp(&b.ratio)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    VerifyResponse {
+        bucket: bucket.to_string(),
+        prefix: prefix.to_string(),
+        reference_bytes,
+        deltas: per_delta.len(),
+        passthrough_count,
+        total_original_bytes: total_original,
+        total_stored_bytes: total_stored,
+        true_savings_bytes: true_savings,
+        compression_ratio,
+        per_delta,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1192,5 +1361,119 @@ mod tests {
         assert_eq!(reports[0].prefix, "b"); // 500
         assert_eq!(reports[1].prefix, "c"); // 300
         assert_eq!(reports[2].prefix, "a"); // 100
+    }
+
+    // ── build_verify_response (HEAD-path aggregator) ───────────────
+
+    /// Healthy prefix: originals 10 MB each, deltas 100 KB each.
+    /// True savings = (3 × 10 MB) − (10 MB ref + 3 × 100 KB) = 19.7 MB.
+    /// compression_ratio ≈ (1 − 10.3MB / 30MB) ≈ 0.657.
+    #[test]
+    fn verify_response_computes_true_savings_on_healthy_prefix() {
+        let scan = vec![
+            make_ref_meta(10_000_000),
+            make_delta_meta("a", 100_000, 10_000_000),
+            make_delta_meta("b", 100_000, 10_000_000),
+            make_delta_meta("c", 100_000, 10_000_000),
+        ];
+        let r = build_verify_response("bk", "p", &scan);
+        assert_eq!(r.deltas, 3);
+        assert_eq!(r.total_original_bytes, 30_000_000);
+        // 10MB reference + 3 × 100KB deltas + 0 passthrough = 10.3MB
+        assert_eq!(r.total_stored_bytes, 10_000_000 + 300_000);
+        // 30MB − 10.3MB = 19.7MB
+        assert_eq!(r.true_savings_bytes, 30_000_000 - (10_000_000 + 300_000));
+        // 1 − 10.3/30 = 0.657
+        let ratio = r.compression_ratio.expect("non-zero original");
+        assert!(
+            (ratio - 0.657).abs() < 0.005,
+            "expected compression_ratio≈0.657, got {ratio}"
+        );
+        // Per-delta ratios all equal (100K/10M = 0.01).
+        for d in &r.per_delta {
+            assert!((d.ratio - 0.01).abs() < 1e-9);
+        }
+    }
+
+    /// Pathological prefix: deltas are LARGER than originals
+    /// (xdelta3 lost). True savings should be negative — that's the
+    /// "you'd be better off without DG" signal.
+    #[test]
+    fn verify_response_signals_negative_savings_when_xdelta_lost() {
+        // 5 originals @ 1 MB each → 5 MB total. Each delta is 1.5 MB.
+        // Ref is 800 KB. Stored = 800K + 5×1.5M = 8.3 MB > 5 MB.
+        let scan = vec![
+            make_ref_meta(800_000),
+            make_delta_meta("a", 1_500_000, 1_000_000),
+            make_delta_meta("b", 1_500_000, 1_000_000),
+            make_delta_meta("c", 1_500_000, 1_000_000),
+            make_delta_meta("d", 1_500_000, 1_000_000),
+            make_delta_meta("e", 1_500_000, 1_000_000),
+        ];
+        let r = build_verify_response("bk", "p", &scan);
+        assert_eq!(r.total_original_bytes, 5_000_000);
+        assert_eq!(r.total_stored_bytes, 800_000 + 5 * 1_500_000);
+        assert!(
+            r.true_savings_bytes < 0,
+            "expected negative savings, got {}",
+            r.true_savings_bytes
+        );
+        let ratio = r.compression_ratio.expect("present");
+        assert!(
+            ratio < 0.0,
+            "expected negative compression_ratio, got {ratio}"
+        );
+    }
+
+    /// Per-delta array is sorted ascending by ratio so the UI can
+    /// pick percentiles from indices directly.
+    #[test]
+    fn verify_response_sorts_per_delta_by_ratio_ascending() {
+        // Three deltas with widely different ratios:
+        //   a: 100K / 10M = 0.01  (excellent)
+        //   b: 5M  / 10M = 0.5   (poor)
+        //   c: 500K / 10M = 0.05 (good)
+        let scan = vec![
+            make_ref_meta(10_000_000),
+            make_delta_meta("a", 100_000, 10_000_000),
+            make_delta_meta("b", 5_000_000, 10_000_000),
+            make_delta_meta("c", 500_000, 10_000_000),
+        ];
+        let r = build_verify_response("bk", "p", &scan);
+        assert_eq!(r.per_delta.len(), 3);
+        assert_eq!(r.per_delta[0].key, "a"); // 0.01
+        assert_eq!(r.per_delta[1].key, "c"); // 0.05
+        assert_eq!(r.per_delta[2].key, "b"); // 0.5
+    }
+
+    /// Passthrough bytes count toward both `total_original_bytes`
+    /// AND `total_stored_bytes` (they're stored as-is, no compression).
+    #[test]
+    fn verify_response_handles_passthrough_correctly() {
+        let scan = vec![
+            make_ref_meta(1_000_000),
+            make_delta_meta("a", 50_000, 1_000_000),
+            make_delta_meta("b", 50_000, 1_000_000),
+            make_delta_meta("c", 50_000, 1_000_000),
+            make_passthrough_meta("vid.mp4", 8_000_000),
+        ];
+        let r = build_verify_response("bk", "p", &scan);
+        assert_eq!(r.deltas, 3);
+        assert_eq!(r.passthrough_count, 1);
+        // Originals: 3 × 1MB + 8MB = 11MB
+        assert_eq!(r.total_original_bytes, 11_000_000);
+        // Stored: 1MB ref + 3 × 50KB delta + 8MB passthrough = 9.15MB
+        assert_eq!(r.total_stored_bytes, 1_000_000 + 3 * 50_000 + 8_000_000);
+        assert!(r.true_savings_bytes > 0);
+    }
+
+    /// Zero-original edge: compression_ratio is None rather than a
+    /// NaN / Infinity panic.
+    #[test]
+    fn verify_response_zero_originals_returns_none_ratio() {
+        let scan = vec![make_ref_meta(1_000_000)];
+        let r = build_verify_response("bk", "p", &scan);
+        assert_eq!(r.total_original_bytes, 0);
+        assert!(r.compression_ratio.is_none());
     }
 }

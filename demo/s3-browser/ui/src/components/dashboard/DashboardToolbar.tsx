@@ -69,7 +69,12 @@ export default function DashboardToolbar({
           }}
         >
           {title}
-          <LivePulse cadence={cadence} loading={loading} colors={colors} />
+          {/* LivePulse is the Monitoring-tab "still polling" indicator;
+              Analytics doesn't poll so it'd just be a misleading
+              static dot. */}
+          {view === 'monitoring' && (
+            <LivePulse cadence={cadence} loading={loading} colors={colors} />
+          )}
         </div>
         {meta && (
           <div
@@ -96,36 +101,45 @@ export default function DashboardToolbar({
         colors={colors}
       />
 
-      {/* Time range + refresh controls */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Segmented
-          value={range}
-          options={[
-            { value: '5m', label: '5m' },
-            { value: '15m', label: '15m', disabled: true, hint: 'Requires persistent history' },
-            { value: '1h', label: '1h', disabled: true, hint: 'Requires persistent history' },
-          ]}
-          onChange={(v) => onRange(v as TimeRange)}
-          colors={colors}
-        />
-        <Segmented
-          value={cadence}
-          options={[
-            { value: 'off', label: 'Off' },
-            { value: '5s', label: '5s' },
-            { value: '30s', label: '30s' },
-          ]}
-          onChange={(v) => onCadence(v as RefreshCadence)}
-          colors={colors}
-        />
-        <Button
-          size="small"
-          icon={<ReloadOutlined spin={loading} />}
-          onClick={onManualRefresh}
-          style={{ borderRadius: 8 }}
-          title="Refresh now"
-        />
-      </div>
+      {/*
+        Time range + refresh controls are Monitoring-tab-only.
+        Analytics has its own Re-scan / Stop affordance in the scan-
+        status banner (the totals come from a persistent on-disk
+        cache, not a refresh poll). Showing the cadence selector on
+        Analytics suggested it controlled scan frequency — it
+        didn't, it controlled /_/metrics polling.
+      */}
+      {view === 'monitoring' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Segmented
+            value={range}
+            options={[
+              { value: '5m', label: '5m' },
+              { value: '15m', label: '15m', disabled: true, hint: 'Requires persistent history' },
+              { value: '1h', label: '1h', disabled: true, hint: 'Requires persistent history' },
+            ]}
+            onChange={(v) => onRange(v as TimeRange)}
+            colors={colors}
+          />
+          <Segmented
+            value={cadence}
+            options={[
+              { value: 'off', label: 'Off' },
+              { value: '5s', label: '5s' },
+              { value: '30s', label: '30s' },
+            ]}
+            onChange={(v) => onCadence(v as RefreshCadence)}
+            colors={colors}
+          />
+          <Button
+            size="small"
+            icon={<ReloadOutlined spin={loading} />}
+            onClick={onManualRefresh}
+            style={{ borderRadius: 8 }}
+            title="Refresh now"
+          />
+        </div>
+      )}
     </div>
   );
 }

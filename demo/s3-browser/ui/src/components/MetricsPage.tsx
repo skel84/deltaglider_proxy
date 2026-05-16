@@ -21,6 +21,7 @@ import { Typography, Spin, Progress } from 'antd';
 import { useColors } from '../ThemeContext';
 import { formatBytes } from '../utils';
 import AnalyticsSection from './AnalyticsSection';
+import BucketScanCard from './BucketScanCard';
 import { useAdminConfig } from '../queries/config';
 import {
   AreaChart, Area, BarChart, Bar, Cell,
@@ -149,25 +150,23 @@ interface Snapshot {
 
 const MAX_HISTORY = 60;
 
-interface StatsData {
-  total_objects: number;
-  total_original_size: number;
-  total_stored_size: number;
-  savings_percentage: number;
-  truncated: boolean;
-}
-
 interface Props { onBack: () => void; embedded?: boolean; }
 
 export default function MetricsPage({ onBack, embedded }: Props) {
   const colors = useColors();
   const [metricsMap, setMetricsMap] = useState<Map<string, ParsedMetric>>(new Map());
-  const [stats, setStats] = useState<StatsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cadence, setCadence] = useState<RefreshCadence>('5s');
   const [history, setHistory] = useState<Snapshot[]>([]);
+  // Action chrome for the BucketScanCard. The card itself decides
+  // what button to render (Scan / Re-scan / Stop) based on its own
+  // state; it projects it back here via `onRenderActions` so the
+  // surrounding Panel header carries it. `scanCardAccent` is reserved
+  // for future use (e.g. amber when results are >30 days old).
+  const [scanCardActions, setScanCardActions] = useState<React.ReactNode>(null);
+  const scanCardAccent: 'green' | 'amber' | null = null;
   const [activeView, setActiveView] = useState<'monitoring' | 'analytics'>(() => {
     const saved = localStorage.getItem('dg-metrics-view');
     return saved === 'analytics' ? 'analytics' : 'monitoring';
@@ -181,20 +180,11 @@ export default function MetricsPage({ onBack, embedded }: Props) {
 
   const tt = chartTooltipStyle(colors);
 
-  // Stats refresh — separate cadence (60s) because it's expensive.
-  const statsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const fetchStats = useCallback(async () => {
-    try {
-      const res = await fetch('/_/stats', { credentials: 'include' });
-      if (res.ok) setStats(await res.json());
-    } catch { /* non-blocking */ }
-  }, []);
-
-  useEffect(() => {
-    fetchStats();
-    statsTimerRef.current = setInterval(fetchStats, 60_000);
-    return () => { if (statsTimerRef.current) clearInterval(statsTimerRef.current); };
-  }, [fetchStats]);
+  // `/_/stats` is no longer fetched here — the new BucketScanCard
+  // backs onto the persistent bucket-scan engine, which has its own
+  // honest totals (no 1,000-object cap). The old endpoint is still
+  // mounted for backwards compatibility with external dashboards but
+  // is intentionally unused inside the app.
 
   const fetchMetrics = useCallback(async () => {
     setRefreshing(true);
@@ -336,30 +326,29 @@ export default function MetricsPage({ onBack, embedded }: Props) {
         <AnalyticsSection config={adminConfig} />
       ) : (
         <DashboardGrid>
-          {/* ── Row 1: KPI strip (4× stat, 3 cols each) ───────────── */}
+          {/* ── Row 1: KPI strip ───────────────────────────────────── */}
+          {/*
+            Headline objects + savings card. Backs onto the persistent
+            bucket-scan engine (one job per bucket, on-disk cache,
+            survives restarts). The Panel's `actions` slot hosts the
+            Scan / Stop / Re-scan button — the card pushes its current
+            chrome up via the `onRenderActions` callback so the panel
+            header stays the visual seam.
+          */}
           <Panel
-            title="Objects stored"
-            subtitle={stats?.truncated ? 'Sampled first 1,000 objects' : undefined}
-            colSpan={3}
+            title="Storage footprint"
+            subtitle="Honest totals from the on-disk scan cache"
+            colSpan={6}
+            accent={
+              scanCardAccent === 'green'
+                ? 'green'
+                : scanCardAccent === 'amber'
+                  ? 'amber'
+                  : undefined
+            }
+            actions={scanCardActions}
           >
-            <StatValue
-              value={stats ? `${fmtNum(stats.total_objects)}${stats.truncated ? '+' : ''}` : '—'}
-              hint={stats ? `${formatBytes(stats.total_original_size)}${stats.truncated ? '+' : ''} original data` : 'Loading…'}
-            />
-          </Panel>
-          <Panel
-            title="Storage savings"
-            colSpan={3}
-            accent={stats && stats.savings_percentage > 10 ? 'green' : undefined}
-          >
-            <StatValue
-              value={stats && stats.total_original_size > 0 ? stats.savings_percentage.toFixed(1) : '—'}
-              unit="%"
-              tone={stats && stats.savings_percentage > 10 ? 'good' : 'neutral'}
-              hint={stats && stats.total_original_size > 0
-                ? `${formatBytes(stats.total_original_size - stats.total_stored_size)} saved · ${formatBytes(stats.total_stored_size)} on disk`
-                : 'No data yet'}
-            />
+            <BucketScanCard onRenderActions={setScanCardActions} />
           </Panel>
           <Panel title="Total requests" colSpan={3}>
             <StatValue

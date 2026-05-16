@@ -6,6 +6,7 @@ mod audit;
 mod auth;
 pub(crate) mod backends;
 mod backup;
+mod bucket_scan;
 mod config;
 mod delta_efficiency;
 mod event_outbox;
@@ -44,6 +45,9 @@ pub use backends::{
     create_backend, create_bucket_on_backend, delete_backend, list_backends, list_bucket_origins,
 };
 pub use backup::{export_backup, import_backup};
+pub use bucket_scan::{
+    delete_scan, get_scan_status, get_scan_stream, post_scan_start, post_scan_stop, BucketScanner,
+};
 pub use config::{
     apply_config_doc, change_password, config_defaults, export_config, export_declarative_iam,
     get_config, get_section, put_section, recover_db, sync_now, test_s3_connection, trace_config,
@@ -54,7 +58,8 @@ pub use config::{
     TraceResolved, TraceResponse,
 };
 pub use delta_efficiency::{
-    get_delta_efficiency, post_delta_efficiency_scan, DeltaEfficiencyScanner,
+    get_delta_efficiency, post_delta_efficiency_scan, verify_delta_efficiency,
+    DeltaEfficiencyScanner,
 };
 pub use event_outbox::{
     list as event_outbox_list, requeue_many as event_outbox_requeue_many,
@@ -114,6 +119,11 @@ pub struct AdminState {
     /// gets instant cached reads on reload, and a "Re-scan" button
     /// kicks off a fresh background scan.
     pub delta_efficiency_scanner: Arc<delta_efficiency::DeltaEfficiencyScanner>,
+    /// Bucket-wide object scanner with persistent disk cache. Backs
+    /// the `/_/api/admin/diagnostics/scan/*` endpoints that produce
+    /// the honest dashboard headline numbers (total objects, total
+    /// bytes, savings %).
+    pub bucket_scanner: Arc<bucket_scan::BucketScanner>,
     /// Per-IP rate limiter for login endpoints and auth failures.
     pub rate_limiter: RateLimiter,
     /// S3 sync for the config database (None if DGP_CONFIG_SYNC_BUCKET is not set).

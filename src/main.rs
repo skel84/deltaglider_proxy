@@ -644,6 +644,9 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         delta_efficiency_scanner: Arc::new(
             deltaglider_proxy::api::admin::DeltaEfficiencyScanner::new(),
         ),
+        bucket_scanner: deltaglider_proxy::api::admin::BucketScanner::load(
+            std::path::PathBuf::from(".deltaglider_scans"),
+        ),
         rate_limiter,
         config_sync,
         config_db_mismatch,
