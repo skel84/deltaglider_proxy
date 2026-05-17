@@ -76,7 +76,11 @@ struct Cli {
     command: Option<Command>,
 }
 
-/// Top-level subcommands. Grows in later phases (admission, apply, …).
+/// Top-level subcommands. The `config` and `admission` families
+/// operate on the proxy's own config / request pipeline. The S3
+/// commands (`cp`, `ls`, `rm`, `stats`, `verify`) talk directly to an
+/// S3 endpoint and apply the same delta-storage layout the proxy
+/// uses — same toolchain, no Python deltaglider dependency.
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Configuration-file tooling (migrate, schema, apply, ...).
@@ -89,6 +93,8 @@ enum Command {
         #[command(subcommand)]
         action: AdmissionCommand,
     },
+    /// List S3 buckets or objects (AWS-CLI-shaped output).
+    Ls(deltaglider_proxy::cli::ls::LsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -236,6 +242,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 }
             },
+            // S3 subcommands are async — each owns its own tokio
+            // runtime so the proxy-startup path stays cold when the
+            // binary is invoked purely as a CLI.
+            Command::Ls(args) => run_cli_async(deltaglider_proxy::cli::ls::run(args.clone())),
         };
         std::process::exit(code);
     }
@@ -337,6 +347,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = runtime_builder.build()?;
 
     runtime.block_on(async_main(cli))
+}
+
+/// Run a single async CLI subcommand on its own small tokio runtime.
+/// The proxy's full runtime is heavyweight (blocking threads, the
+/// scheduler-monitor task, etc.); CLI commands need a one-off tokio
+/// runtime that exits with the process.
+fn run_cli_async<F: std::future::Future<Output = i32>>(fut: F) -> i32 {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt.block_on(fut),
+        Err(e) => {
+            eprintln!("error: failed to start tokio runtime: {e}");
+            deltaglider_proxy::cli::config::EXIT_IO
+        }
+    }
 }
 
 async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {

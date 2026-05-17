@@ -13,4 +13,5 @@ pub mod aws_creds;
 pub mod config;
 pub mod engine_factory;
 pub mod filter;
+pub mod ls;
 pub mod s3_url;
