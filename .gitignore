@@ -79,3 +79,6 @@ dgp-backup-*.zip
 .local-backup-v0.9.1/
 # Unpacked admin backups (secrets.json, config DB)
 .local-dgp-backup*/
+
+# Claude Code agent worktrees — must never be committed as gitlinks
+.claude/worktrees/
