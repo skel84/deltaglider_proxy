@@ -96,19 +96,39 @@ jobs:
       - name: cargo clippy (with sccache bypass + diagnostic capture)
         shell: bash
         env:
-          # Bypass sccache to rule out stale artifact corruption.
           RUSTC_WRAPPER: ""
         run: |
           set +e
-          rustc --version | tee /tmp/clippy.log
-          cargo --version | tee -a /tmp/clippy.log
-          echo "--- begin clippy ---" | tee -a /tmp/clippy.log
-          cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 | tee -a /tmp/clippy.log
+          # Write a heartbeat to step summary FIRST so we can at least
+          # confirm the step ran even if everything after fails.
+          {
+            echo "## Clippy diagnostic"
+            echo ""
+            echo "**Heartbeat:** step started at $(date -u)"
+            echo ""
+            echo "### Toolchain"
+            echo '```'
+            rustc --version 2>&1 || echo "rustc --version failed: $?"
+            cargo --version 2>&1 || echo "cargo --version failed: $?"
+            which cargo-clippy 2>&1 || echo "no cargo-clippy on PATH"
+            echo '```'
+            echo ""
+            echo "### Disk"
+            echo '```'
+            df -h /github /home /tmp 2>&1 | head -10 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 | tee /tmp/clippy.log
           rc=${PIPESTATUS[0]}
-          echo "## Clippy step diagnostic (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          tail -200 /tmp/clippy.log >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo ""
+            echo "### Clippy output (exit $rc)"
+            echo '```'
+            tail -200 /tmp/clippy.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
       - name: sccache stats (post)
         if: always()
