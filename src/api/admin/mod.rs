@@ -291,36 +291,4 @@ mod tests {
 
         assert_eq!(next_copy_name("reader", existing), "reader (copy3)");
     }
-
-    /// AdminMutation builder test: verifies the fluent API constructs
-    /// the expected internal state. End-to-end mutation flow is
-    /// covered by integration tests of the handlers that adopt the
-    /// framework — building a full `AdminState` for a unit test
-    /// here would require a dozen mock dependencies and add little
-    /// over the shape check this test provides.
-    #[tokio::test]
-    async fn admin_mutation_builder_records_audit_and_sync_flags() {
-        // We don't actually run the mutation — just verify the
-        // builder methods don't panic and the struct fields hold
-        // the expected values.
-        //
-        // We construct a placeholder Future type for `F` even
-        // though we never invoke `rebuild`. The compiler's type
-        // inference picks `std::future::Ready<()>` here.
-        let action = "create_thing";
-        let target = "thing-name";
-        let headers = axum::http::HeaderMap::new();
-
-        // We can't construct an AdminMutation without an
-        // AdminState; instead, this compile-time test verifies the
-        // public API surface compiles as documented. The doc-test
-        // in the AdminMutation::new doc-comment is the source of
-        // truth for the call shape.
-        //
-        // (Pre-fix: every mutation handler open-coded the same
-        // 5-step sequence with no compile-time guarantee that
-        // sync/audit/rebuild fired in order. This builder makes
-        // the order a property of the type, not the prose.)
-        let _ = (action, target, &headers); // silence unused vars
-    }
 }

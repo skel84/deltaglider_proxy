@@ -38,6 +38,14 @@ const FULLSCREEN_VIEWS: Set<View> = new Set(['admin', 'docs']);
 
 const BASE = '/_/';
 
+// Shared Suspense fallback for lazy admin / metrics / docs page chunks.
+// Module-scope so we don't reallocate it on every render.
+const LAZY_FALLBACK = (
+  <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 48 }}>
+    <Spin size="large" />
+  </div>
+);
+
 const SEGMENT_TO_VIEW: Record<string, View> = {
   '': 'browser',
   'browse': 'browser',
@@ -370,16 +378,10 @@ export default function App() {
     );
   }
 
-  const lazyFallback = (
-    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 48 }}>
-      <Spin size="large" />
-    </div>
-  );
-
   const renderContent = () => {
     if (view === 'admin') {
       return (
-        <Suspense fallback={lazyFallback}>
+        <Suspense fallback={LAZY_FALLBACK}>
           <AdminPage
             onBack={navigateToBrowse}
             onSessionExpired={navigateToBrowse}
@@ -404,7 +406,7 @@ export default function App() {
         );
       }
       return (
-        <Suspense fallback={lazyFallback}>
+        <Suspense fallback={LAZY_FALLBACK}>
           <MetricsPage onBack={navigateToBrowse} />
         </Suspense>
       );
@@ -412,7 +414,7 @@ export default function App() {
 
     if (view === 'docs') {
       return (
-        <Suspense fallback={lazyFallback}>
+        <Suspense fallback={LAZY_FALLBACK}>
           <DocsPage onBack={navigateToBrowse} docId={subPath || undefined} accountMenu={accountMenu()} />
         </Suspense>
       );
