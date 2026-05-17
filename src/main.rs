@@ -107,6 +107,8 @@ enum Command {
     GetBucketAcl(deltaglider_proxy::cli::bucket_acl::GetArgs),
     /// Update a bucket's ACL (canned-ACL or grant-* flags).
     PutBucketAcl(deltaglider_proxy::cli::bucket_acl::PutArgs),
+    /// Migrate a deltaspace between buckets / accounts via the engine.
+    Migrate(deltaglider_proxy::cli::migrate::MigrateArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -269,6 +271,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Command::PutBucketAcl(args) => {
                 run_cli_async(deltaglider_proxy::cli::bucket_acl::put_run(args.clone()))
+            }
+            Command::Migrate(args) => {
+                run_cli_async(deltaglider_proxy::cli::migrate::run(args.clone()))
             }
         };
         std::process::exit(code);
