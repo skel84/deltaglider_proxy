@@ -93,18 +93,22 @@ jobs:
         run: sccache --show-stats
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
-      - name: cargo clippy
+      - name: cargo clippy (with sccache bypass + diagnostic capture)
         shell: bash
+        env:
+          # Bypass sccache to rule out stale artifact corruption.
+          RUSTC_WRAPPER: ""
         run: |
           set +e
-          cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 | tee /tmp/clippy.log
+          rustc --version | tee /tmp/clippy.log
+          cargo --version | tee -a /tmp/clippy.log
+          echo "--- begin clippy ---" | tee -a /tmp/clippy.log
+          cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 | tee -a /tmp/clippy.log
           rc=${PIPESTATUS[0]}
-          if [ "$rc" -ne 0 ]; then
-            echo "## Clippy failure (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            tail -120 /tmp/clippy.log >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "## Clippy step diagnostic (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -200 /tmp/clippy.log >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit $rc
       - name: sccache stats (post)
         if: always()
