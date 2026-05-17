@@ -214,10 +214,16 @@ pub async fn recover_db(
     // bucket. This is an intentional behavior improvement: recover_db is a
     // brute-force-sensitive endpoint, and "no proxy headers → no rate
     // limiting" used to leave deployments without a reverse proxy exposed.
-    let guard = match crate::rate_limiter::RateLimitGuard::enter(
+    // Per-IP + per-account: recover_db gates DB decryption with the
+    // bcrypt hash that ALSO encrypts the config DB. A distributed
+    // attack against the same proxy's recovery flow could otherwise
+    // burn through the per-IP budget across a botnet — the
+    // "bootstrap" subject ties this back to the single account.
+    let guard = match crate::rate_limiter::RateLimitGuard::enter_with_account(
         &state.rate_limiter,
         &headers,
         connect_info.as_ref().map(|ci| ci.0.ip()),
+        "bootstrap",
         "recover_db",
     )
     .await

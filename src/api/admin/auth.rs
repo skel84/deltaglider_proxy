@@ -273,12 +273,15 @@ pub async fn login(
     req_headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    // Brute-force protection: the guard handles IP extraction, lockout
-    // check, progressive delay, and lockout-transition logging.
-    let guard = match crate::rate_limiter::RateLimitGuard::enter(
+    // Brute-force protection: per-IP cap (catches single-host noise)
+    // PLUS per-account cap (catches distributed credential stuffing
+    // against the bootstrap password — a botnet rotating IPs across
+    // a /16 can chew the per-IP budget freely without this).
+    let guard = match crate::rate_limiter::RateLimitGuard::enter_with_account(
         &state.rate_limiter,
         &req_headers,
         connect_info.as_ref().map(|ci| ci.0.ip()),
+        "bootstrap",
         "admin",
     )
     .await
@@ -606,10 +609,15 @@ pub async fn login_as(
     req_headers: HeaderMap,
     Json(body): Json<LoginAsRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let guard = crate::rate_limiter::RateLimitGuard::enter(
+    // Per-IP + per-account brute-force gate. Without the per-account
+    // bucket, a botnet rotating IPs could target a specific admin's
+    // access_key_id without any rate limit. The account dimension is
+    // the AKID being attempted.
+    let guard = crate::rate_limiter::RateLimitGuard::enter_with_account(
         &state.rate_limiter,
         &req_headers,
         connect_info.as_ref().map(|ci| ci.0.ip()),
+        &body.access_key_id,
         "login_as",
     )
     .await

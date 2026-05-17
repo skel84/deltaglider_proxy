@@ -526,6 +526,7 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         metrics: metrics.clone(),
         usage_scanner: usage_scanner.clone(),
         config_db: config_db.clone(),
+        form_post_replay: Arc::new(dashmap::DashMap::new()),
     });
 
     // --- Background monitors ---
