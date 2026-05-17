@@ -10,6 +10,7 @@
 //! their own module so help-text and argument shapes don't collide.
 
 pub mod aws_creds;
+pub mod bucket_acl;
 pub mod config;
 pub mod cp;
 pub mod engine_factory;

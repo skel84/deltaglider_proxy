@@ -160,7 +160,11 @@ async fn stats_three_modes_all_succeed() {
     let bucket = unique_bucket("modes");
     seed_delta_bucket(&bucket).await;
 
-    for mode in [("quick", true, false, false), ("sampled", false, true, false), ("detailed", false, false, true)] {
+    for mode in [
+        ("quick", true, false, false),
+        ("sampled", false, true, false),
+        ("detailed", false, false, true),
+    ] {
         let code = stats_run(stats_args(
             bucket.clone(),
             StatsOpts {
@@ -216,12 +220,7 @@ async fn stats_cache_roundtrips_through_s3() {
     assert_eq!(code, deltaglider_proxy::cli::config::EXIT_OK);
 
     // Cache file present.
-    let post = s3
-        .head_object()
-        .bucket(&bucket)
-        .key(cache_key)
-        .send()
-        .await;
+    let post = s3.head_object().bucket(&bucket).key(cache_key).send().await;
     assert!(post.is_ok(), "expected cache file after run, got {post:?}");
 
     // Second run should still succeed and read from cache. We can't

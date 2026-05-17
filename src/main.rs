@@ -103,6 +103,10 @@ enum Command {
     Stats(deltaglider_proxy::cli::stats::StatsArgs),
     /// Verify the integrity of a DeltaGlider-stored object (SHA256 round-trip).
     Verify(deltaglider_proxy::cli::verify::VerifyArgs),
+    /// Get a bucket's ACL (AWS-CLI shape).
+    GetBucketAcl(deltaglider_proxy::cli::bucket_acl::GetArgs),
+    /// Update a bucket's ACL (canned-ACL or grant-* flags).
+    PutBucketAcl(deltaglider_proxy::cli::bucket_acl::PutArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -259,6 +263,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Command::Stats(args) => run_cli_async(deltaglider_proxy::cli::stats::run(args.clone())),
             Command::Verify(args) => {
                 run_cli_async(deltaglider_proxy::cli::verify::run(args.clone()))
+            }
+            Command::GetBucketAcl(args) => {
+                run_cli_async(deltaglider_proxy::cli::bucket_acl::get_run(args.clone()))
+            }
+            Command::PutBucketAcl(args) => {
+                run_cli_async(deltaglider_proxy::cli::bucket_acl::put_run(args.clone()))
             }
         };
         std::process::exit(code);

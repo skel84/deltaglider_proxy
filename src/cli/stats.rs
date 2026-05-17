@@ -268,8 +268,7 @@ fn cache_key_for(mode: Mode) -> String {
 /// that pulls metadata back into the validation phase and defeats the
 /// "cheap LIST to validate cache" property.
 fn is_cache_valid(cached: &Validation, current: &Validation) -> bool {
-    cached.object_count == current.object_count
-        && cached.compressed_size == current.compressed_size
+    cached.object_count == current.object_count && cached.compressed_size == current.compressed_size
 }
 
 /// Pure: is this key one of our internal tooling artifacts that should
@@ -563,8 +562,7 @@ async fn write_cache(
     mode: Mode,
     doc: &CacheDoc,
 ) -> Result<(), String> {
-    let body =
-        serde_json::to_vec_pretty(doc).map_err(|e| format!("serialise cache doc: {e}"))?;
+    let body = serde_json::to_vec_pretty(doc).map_err(|e| format!("serialise cache doc: {e}"))?;
     let mut user_meta = HashMap::new();
     user_meta.insert("x-deltaglider-cache".to_string(), "true".to_string());
     // Tag with the same hint the proxy server already honours so the
