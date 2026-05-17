@@ -34,6 +34,10 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Verify tests/*.rs map to CI --test flags
         run: ./scripts/check-integration-tests-in-ci.sh
@@ -44,6 +48,10 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Every .rs file must have SPDX-License-Identifier
         run: ./scripts/check-spdx-headers.sh
@@ -57,6 +65,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: cargo fmt
         env:
@@ -72,6 +84,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: sccache stats (pre)
         run: sccache --show-stats
@@ -97,6 +113,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
@@ -121,6 +141,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install cargo-llvm-cov
         # binstall is fast (~5s) and the builder image may not ship it.
@@ -187,6 +211,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
@@ -296,6 +324,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
@@ -362,6 +394,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
@@ -385,6 +421,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Build demo UI + release binary
         env:
@@ -411,6 +451,10 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     continue-on-error: true
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: cargo audit
         env:
@@ -427,6 +471,10 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     continue-on-error: true  # warn-only until config stabilises
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install cargo-deny
         env:
@@ -446,6 +494,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install dependencies
         run: cd demo/s3-browser/ui && npm ci
@@ -481,6 +533,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       # ── Blocking: every .md under docs/product/ is registered in
       #    demo/s3-browser/ui/src/docs-imports.ts, and no dev docs
@@ -533,6 +589,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
