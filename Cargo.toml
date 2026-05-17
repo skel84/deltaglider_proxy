@@ -117,11 +117,13 @@ rusqlite = { version = "0.39.0", features = ["bundled-sqlcipher"] }
 iam-rs = "0.0.23"
 tower = { version = "0.5", features = ["limit"] }
 s3s = { version = "0.13.0", optional = true }
+# Recursive directory walker for `cli::cp -r` (local→s3 path). Also
+# used by tests that walk the filesystem backend tree.
+walkdir = "2"
 
 [dev-dependencies]
 tokio-test = "0.4"
 reqwest = { version = "0.12", features = ["json", "cookies", "multipart"] }
-walkdir = "2"
 # Already transitive via aws-sdk-s3; named here so storage/s3.rs unit
 # tests can construct `SdkError::service_error(...)` values directly
 # for the error-classification test battery. Pinned to a version range

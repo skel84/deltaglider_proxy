@@ -97,6 +97,8 @@ enum Command {
     Ls(deltaglider_proxy::cli::ls::LsArgs),
     /// Remove S3 objects (single-key or recursive prefix-delete).
     Rm(deltaglider_proxy::cli::rm::RmArgs),
+    /// Copy files between local paths and S3 with transparent delta compression.
+    Cp(deltaglider_proxy::cli::cp::CpArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -249,6 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // binary is invoked purely as a CLI.
             Command::Ls(args) => run_cli_async(deltaglider_proxy::cli::ls::run(args.clone())),
             Command::Rm(args) => run_cli_async(deltaglider_proxy::cli::rm::run(args.clone())),
+            Command::Cp(args) => run_cli_async(deltaglider_proxy::cli::cp::run(args.clone())),
         };
         std::process::exit(code);
     }

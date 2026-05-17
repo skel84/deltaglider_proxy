@@ -11,6 +11,7 @@
 
 pub mod aws_creds;
 pub mod config;
+pub mod cp;
 pub mod engine_factory;
 pub mod filter;
 pub mod ls;
