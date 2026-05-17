@@ -5,7 +5,12 @@
 //! Top-level shape: `deltaglider_proxy <subcommand> [args...]`.
 //!
 //! Each subcommand is a small dispatcher that borrows logic from the library
-//! crate. Later phases will add `admission trace`, `config apply`,
-//! `config show`, etc. — they all follow the same pattern introduced here.
+//! crate. The `config` and `admission` families live in `config.rs`; the
+//! AWS-CLI-shaped S3 commands (`cp`, `ls`, `rm`, `stats`, `verify`) each get
+//! their own module so help-text and argument shapes don't collide.
 
+pub mod aws_creds;
 pub mod config;
+pub mod engine_factory;
+pub mod filter;
+pub mod s3_url;
