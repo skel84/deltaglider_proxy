@@ -194,7 +194,7 @@ impl RateLimiter {
 ///
 /// TODO: add axum `ConnectInfo<SocketAddr>` support so the real peer IP is
 /// always available and proxy-header trust is unnecessary for rate limiting.
-fn trust_proxy_headers() -> bool {
+pub(crate) fn trust_proxy_headers() -> bool {
     crate::config::env_bool("DGP_TRUST_PROXY_HEADERS", false)
 }
 
