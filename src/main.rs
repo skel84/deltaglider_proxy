@@ -101,6 +101,8 @@ enum Command {
     Cp(deltaglider_proxy::cli::cp::CpArgs),
     /// Bucket statistics: original/stored bytes, savings %, deltaspace health.
     Stats(deltaglider_proxy::cli::stats::StatsArgs),
+    /// Verify the integrity of a DeltaGlider-stored object (SHA256 round-trip).
+    Verify(deltaglider_proxy::cli::verify::VerifyArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -255,6 +257,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Command::Rm(args) => run_cli_async(deltaglider_proxy::cli::rm::run(args.clone())),
             Command::Cp(args) => run_cli_async(deltaglider_proxy::cli::cp::run(args.clone())),
             Command::Stats(args) => run_cli_async(deltaglider_proxy::cli::stats::run(args.clone())),
+            Command::Verify(args) => {
+                run_cli_async(deltaglider_proxy::cli::verify::run(args.clone()))
+            }
         };
         std::process::exit(code);
     }

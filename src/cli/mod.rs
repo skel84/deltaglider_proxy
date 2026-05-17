@@ -18,3 +18,4 @@ pub mod ls;
 pub mod rm;
 pub mod s3_url;
 pub mod stats;
+pub mod verify;
