@@ -254,6 +254,7 @@ jobs:
             --test cli_s3_migrate_test \
             --test cli_s3_rm_test \
             --test cli_s3_stats_test \
+            --test cli_s3_sync_test \
             --test cli_s3_verify_test \
             --test config_sync_ha_test \
             --test config_sync_test \

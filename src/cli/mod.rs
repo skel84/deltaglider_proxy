@@ -20,4 +20,5 @@ pub mod migrate;
 pub mod rm;
 pub mod s3_url;
 pub mod stats;
+pub mod sync;
 pub mod verify;
