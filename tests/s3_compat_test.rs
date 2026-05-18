@@ -2965,6 +2965,139 @@ async fn test_form_post_rejects_success_action_redirect() {
     );
 }
 
+/// Form-POST with a 1MB body — pins the body-collection path for
+/// realistic payload sizes (not just the toy 5-byte tests). Helps
+/// catch regressions where the body-stream-to-Bytes conversion
+/// silently truncates or drops chunks.
+#[tokio::test]
+async fn test_form_post_with_1mb_body_round_trips() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+
+    let payload: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
+    let form = signed_post_form(bucket, "large/payload-1mb.bin", &payload, "blob.bin");
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204, "1MB form-POST must succeed");
+
+    let s3 = server.s3_client().await;
+    let got = s3
+        .get_object()
+        .bucket(bucket)
+        .key("large/payload-1mb.bin")
+        .send()
+        .await
+        .expect("uploaded object must exist");
+    let body = got.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body.len(), payload.len(), "round-tripped size must match");
+    assert_eq!(
+        body.as_ref(),
+        payload.as_slice(),
+        "round-tripped bytes must match (byte-exact)"
+    );
+}
+
+/// Form-POST with binary (non-UTF8) file content — multipart parsing
+/// must NOT treat the file body as text. Catches regressions where
+/// the parser tries to validate UTF-8 on a binary part.
+#[tokio::test]
+async fn test_form_post_with_binary_non_utf8_content() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+
+    let payload: Vec<u8> = vec![0x00, 0xFF, 0xC0, 0x80, 0x80, 0xFE, 0x00, 0xC3, 0x28];
+    let form = signed_post_form(bucket, "binary.bin", &payload, "x.bin");
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "binary content form-POST must succeed"
+    );
+    let s3 = server.s3_client().await;
+    let got = s3
+        .get_object()
+        .bucket(bucket)
+        .key("binary.bin")
+        .send()
+        .await
+        .unwrap()
+        .body
+        .collect()
+        .await
+        .unwrap()
+        .into_bytes();
+    assert_eq!(&got[..], payload.as_slice());
+}
+
+/// Form-POST with a file BIGGER than the policy's `content-length-range`
+/// upper bound. The policy permits [0, 10_485_760] (10 MB). A 12 MB
+/// file must be rejected — proves the policy enforcement is not
+/// bypassed on s3s.
+#[tokio::test]
+async fn test_form_post_rejects_payload_exceeding_policy_length_range() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+
+    let payload: Vec<u8> = vec![0u8; 12 * 1024 * 1024];
+    let form = signed_post_form(bucket, "too-big.bin", &payload, "big.bin");
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    // The exact error code path depends on whether the body limit
+    // layer (DefaultBodyLimit) intercepts first (would be 413) or
+    // the form-POST handler's policy check fires (would be 400
+    // with EntityTooLarge or similar). Both adapters may differ in
+    // which layer trips first. The critical contract is: REJECTED
+    // (not 2xx). Body-text checks are too brittle because the
+    // body-limit layer may close the connection mid-stream and
+    // return a near-empty XML stub before the handler can emit
+    // a structured error.
+    assert!(
+        (400..500).contains(&status),
+        "form-POST exceeding content-length-range must be rejected (4xx), got {}",
+        status
+    );
+
+    // Sanity: object should NOT exist on the bucket — that's the
+    // production safety contract.
+    let s3 = server.s3_client().await;
+    let head = s3
+        .head_object()
+        .bucket(bucket)
+        .key("too-big.bin")
+        .send()
+        .await;
+    assert!(
+        head.is_err(),
+        "rejected oversize POST must NOT have landed bytes on storage"
+    );
+}
+
 /// Response from a successful form-POST upload should carry the
 /// `ETag` header — operationally important for callers that want
 /// to verify the upload landed without a separate HEAD call.
