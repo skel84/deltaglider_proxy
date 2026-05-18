@@ -203,6 +203,11 @@ impl TestProxyServer {
             .env("DGP_S3_PATH_STYLE", "true")
             .env("DGP_BE_AWS_ACCESS_KEY_ID", MINIO_ACCESS_KEY)
             .env("DGP_BE_AWS_SECRET_ACCESS_KEY", MINIO_SECRET_KEY)
+            // Wave-1 SSRF guard rejects http://localhost endpoints by
+            // default; CI MinIO needs the opt-in. This survives the
+            // env_clear() above (parent env isn't propagated to the
+            // spawned proxy). See src/storage/s3.rs:244 for the gate.
+            .env("DGP_BACKEND_ALLOW_LOCAL", "true")
             .env("RUST_LOG", "deltaglider_proxy=debug")
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_file))
