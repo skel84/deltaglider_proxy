@@ -178,3 +178,104 @@ async fn migrate_copies_with_preserve_prefix() {
     cleanup(&src_bucket).await;
     cleanup(&dst_bucket).await;
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Resume after partial completion
+// ════════════════════════════════════════════════════════════════════
+//
+// The migrate command's headline feature is that it skips
+// already-copied keys on re-run — what saved us during the
+// Hetzner→AWS migration earlier in this session. We exercise it by
+// simulating a partially-completed migration: seed the source with
+// 3 files, pre-populate the destination with one of them as if a
+// prior migrate run had landed it, then run migrate and assert the
+// already-present file isn't re-copied (its sentinel body survives).
+
+#[tokio::test]
+async fn migrate_skips_already_present_objects_on_resume() {
+    skip_unless_minio!();
+    let src_bucket = unique_bucket("src");
+    let dst_bucket = unique_bucket("dst");
+    let s3 = common::minio_client().await;
+    s3.create_bucket().bucket(&src_bucket).send().await.unwrap();
+    s3.create_bucket().bucket(&dst_bucket).send().await.unwrap();
+
+    // Seed source with 3 files under `releases/`.
+    let tmp = tempfile::tempdir().unwrap();
+    for name in &["one.txt", "two.txt", "three.txt"] {
+        let f = tmp.path().join(name);
+        std::fs::write(&f, format!("contents of {name}").as_bytes()).unwrap();
+        assert_eq!(
+            cp_run(cp_args(
+                f.to_string_lossy().to_string(),
+                format!("s3://{src_bucket}/releases/{name}"),
+            ))
+            .await,
+            deltaglider_proxy::cli::config::EXIT_OK
+        );
+    }
+
+    // Simulate a previously-completed copy of `one.txt` by directly
+    // PUTing it onto the destination at the same effective prefix
+    // (`backup/releases/one.txt`) but with a SENTINEL body. If
+    // migrate re-copies it, the body changes; if migrate skips it
+    // (the correct resume behavior), the sentinel survives.
+    use aws_sdk_s3::primitives::ByteStream;
+    let sentinel: &[u8] = b"SENTINEL_PREVIOUSLY_MIGRATED";
+    s3.put_object()
+        .bucket(&dst_bucket)
+        .key("backup/releases/one.txt")
+        .body(ByteStream::from(sentinel.to_vec()))
+        .send()
+        .await
+        .unwrap();
+
+    // Run migrate. Default `--yes` is set in `migrate_args`.
+    let args = migrate_args(
+        format!("s3://{src_bucket}/releases/"),
+        format!("s3://{dst_bucket}/backup/"),
+    );
+    assert_eq!(
+        migrate_run(args).await,
+        deltaglider_proxy::cli::config::EXIT_OK
+    );
+
+    // Assert that `one.txt` on dst still contains the sentinel (NOT
+    // the source's content) — migrate must have skipped it.
+    let one_body = s3
+        .get_object()
+        .bucket(&dst_bucket)
+        .key("backup/releases/one.txt")
+        .send()
+        .await
+        .unwrap()
+        .body
+        .collect()
+        .await
+        .unwrap()
+        .into_bytes();
+    assert_eq!(
+        &one_body[..],
+        sentinel,
+        "migrate must skip already-present destination keys on resume; \
+         instead it overwrote one.txt with source content"
+    );
+
+    // Assert that `two.txt` and `three.txt` DID land — these were
+    // missing from the destination, so the resume must have copied them.
+    for name in &["two.txt", "three.txt"] {
+        let head = s3
+            .head_object()
+            .bucket(&dst_bucket)
+            .key(format!("backup/releases/{name}"))
+            .send()
+            .await;
+        assert!(
+            head.is_ok(),
+            "migrate must copy missing key {name}; head got {head:?}"
+        );
+    }
+
+    cleanup(&src_bucket).await;
+    cleanup(&dst_bucket).await;
+}

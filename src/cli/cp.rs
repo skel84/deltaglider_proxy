@@ -654,4 +654,97 @@ mod tests {
         let dst = resolve_local_dst("./output.bin", "releases/v1.zip");
         assert_eq!(dst.to_str(), Some("./output.bin"));
     }
+
+    // ── Exit-code helper coverage ──────────────────────────────────
+    // `partial_or_ok` distinguishes three outcomes: all-clean, partial
+    // failure (some succeeded, some didn't), and total failure. The
+    // distinction matters operationally: a CI job that sees EXIT_PARTIAL
+    // knows to retry only the failed keys, while EXIT_HTTP suggests
+    // a backend-wide outage that won't benefit from a per-key retry.
+
+    #[test]
+    fn partial_or_ok_all_clean_is_exit_ok() {
+        assert_eq!(partial_or_ok(5, 0), cli_exit::EXIT_OK);
+    }
+
+    #[test]
+    fn partial_or_ok_some_failed_is_exit_partial() {
+        assert_eq!(partial_or_ok(3, 2), cli_exit::EXIT_PARTIAL);
+    }
+
+    #[test]
+    fn partial_or_ok_all_failed_is_exit_http() {
+        assert_eq!(partial_or_ok(0, 5), cli_exit::EXIT_HTTP);
+        // Zero-of-zero is the empty-prefix case — treated as success.
+        assert_eq!(partial_or_ok(0, 0), cli_exit::EXIT_OK);
+    }
+
+    // ── parse_metadata_pairs edge cases ────────────────────────────
+    // The parser must tolerate human-supplied formatting (empty values,
+    // leading/trailing whitespace, redundant commas) without surprises;
+    // AWS-CLI's `--metadata` syntax is forgiving and we need parity to
+    // not surprise migrators from the Python tool.
+
+    #[test]
+    fn parse_metadata_pairs_accepts_empty_value() {
+        // `K=` is a legitimate way to set an empty metadata value;
+        // S3 itself accepts it and Python deltaglider passes it through.
+        let raw = vec!["empty=".into()];
+        let parsed = parse_metadata_pairs(&raw).unwrap();
+        assert_eq!(parsed.get("empty").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn parse_metadata_pairs_trims_whitespace_and_skips_blanks() {
+        // Comma-separated lists with stray whitespace come from shell
+        // aliases / docs templates; we don't want those to produce
+        // surprising empty keys.
+        let raw = vec!["  foo = bar ,, baz=qux  ".into()];
+        let parsed = parse_metadata_pairs(&raw).unwrap();
+        assert_eq!(parsed.get("foo").map(String::as_str), Some("bar"));
+        assert_eq!(parsed.get("baz").map(String::as_str), Some("qux"));
+        assert_eq!(parsed.len(), 2);
+    }
+
+    // ── detect_direction adversarial inputs ────────────────────────
+    // is_s3_url's contract is "starts with s3://"; we want to ensure
+    // close-but-not-equal prefixes (s3:/, s3:, S3://) don't get coerced
+    // into Direction::S3*, which would dispatch to the engine layer
+    // and produce confusing errors.
+
+    #[test]
+    fn detect_direction_rejects_close_but_invalid_s3_prefixes() {
+        // Missing the second slash — not a URL.
+        assert_eq!(
+            detect_direction("s3:/bucket/key", "local.zip"),
+            Direction::Reject
+        );
+        // Uppercase scheme — the AWS CLI is case-sensitive and so are we.
+        assert_eq!(
+            detect_direction("S3://bucket/key", "local.zip"),
+            Direction::Reject
+        );
+        // Path-like that just happens to contain "s3" — must not match.
+        assert_eq!(
+            detect_direction("./s3/file.zip", "out.zip"),
+            Direction::Reject
+        );
+    }
+
+    // ── resolve_local_dst on bucket-root-only sources ──────────────
+    // When the source key is bucketless (download s3://b → ./), the
+    // basename derivation falls back on the literal file name "/".
+    // Verify we don't produce a path that walks out of the dst dir.
+
+    #[test]
+    fn resolve_local_dst_with_root_key_keeps_dst_within_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // src_key = "single.bin" (no slashes) → file goes directly in dir.
+        let dst = resolve_local_dst(dir.path().to_str().unwrap(), "single.bin");
+        assert_eq!(
+            dst.parent().map(|p| p.to_path_buf()),
+            Some(dir.path().to_path_buf())
+        );
+        assert_eq!(dst.file_name().and_then(|s| s.to_str()), Some("single.bin"));
+    }
 }

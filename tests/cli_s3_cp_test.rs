@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Integration tests for `deltaglider_proxy cp` against MinIO. Covers
-//! the upload happy path and a recursive upload with an exclude
-//! filter — enough to pin the direction-detection + filter wiring
-//! end-to-end; broader matrix (download, S3-to-S3, dryrun) is
-//! covered by the unit tests in `src/cli/cp.rs`.
+//! Integration tests for `deltaglider_proxy s3 cp` against MinIO.
+//!
+//! The QA pyramid here is intentional:
+//! - Bottom (unit tests in `src/cli/cp.rs`): pure decision functions
+//!   — direction detection, metadata-flag parsing, dst-path resolution,
+//!   exit-code derivation.
+//! - Middle (this file): each direction (upload, download, S3→S3),
+//!   each major optional flag (recursive+exclude, --no-delta, --dryrun)
+//!   exercised end-to-end against a real MinIO so the engine →
+//!   storage → wire path is locked in.
+//! - Top (binary-spawn tests): see `tests/cli_admin_test.rs` style
+//!   if/when we add binary-level smoke for the s3 subgroup.
 
 mod common;
 
@@ -139,5 +146,252 @@ async fn cp_recursive_upload_respects_exclude_filter() {
     for k in &keys {
         s3.delete_object().bucket(&bucket).key(k).send().await.ok();
     }
+    s3.delete_bucket().bucket(&bucket).send().await.ok();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Direction: S3 → local (download)
+// ════════════════════════════════════════════════════════════════════
+
+/// `cp s3://bucket/key local.zip` round-trips the bytes through the
+/// engine's GET path. Exercises `download_one` + reference reconstruction
+/// (small files go passthrough, so this is the simpler reference-free
+/// path).
+#[tokio::test]
+async fn cp_downloads_a_single_s3_object_to_local() {
+    skip_unless_minio!();
+    let bucket = unique_bucket("download");
+    let s3 = minio_client().await;
+    s3.create_bucket().bucket(&bucket).send().await.unwrap();
+
+    // Seed the bucket via cp upload (exercising the same metadata
+    // shape the proxy would emit).
+    let tmp = tempfile::tempdir().unwrap();
+    let upload_path = tmp.path().join("payload.bin");
+    let payload: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&upload_path, &payload).unwrap();
+
+    let upload_args = default_args(
+        upload_path.to_string_lossy().to_string(),
+        format!("s3://{bucket}/data/payload.bin"),
+    );
+    assert_eq!(
+        run(upload_args).await,
+        deltaglider_proxy::cli::config::EXIT_OK
+    );
+
+    // Now download to a NEW local path.
+    let download_path = tmp.path().join("downloaded.bin");
+    let download_args = default_args(
+        format!("s3://{bucket}/data/payload.bin"),
+        download_path.to_string_lossy().to_string(),
+    );
+    assert_eq!(
+        run(download_args).await,
+        deltaglider_proxy::cli::config::EXIT_OK
+    );
+
+    // Bytes must match exactly — this is the canary for any encoding
+    // drift in the GET path.
+    let downloaded = std::fs::read(&download_path).unwrap();
+    assert_eq!(downloaded, payload, "downloaded bytes do not match upload");
+
+    // Cleanup.
+    s3.delete_object()
+        .bucket(&bucket)
+        .key("data/payload.bin")
+        .send()
+        .await
+        .ok();
+    s3.delete_bucket().bucket(&bucket).send().await.ok();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Direction: S3 → S3 (cross-bucket copy)
+// ════════════════════════════════════════════════════════════════════
+
+/// `cp s3://src/key s3://dst/key` delegates to `migrate_s3_to_s3`
+/// internally. Pins the dispatch path (Direction::S3ToS3) and the
+/// observable outcome (object lands on dst with original bytes).
+#[tokio::test]
+async fn cp_copies_between_two_s3_locations() {
+    skip_unless_minio!();
+    let src_bucket = unique_bucket("s3src");
+    let dst_bucket = unique_bucket("s3dst");
+    let s3 = minio_client().await;
+    s3.create_bucket().bucket(&src_bucket).send().await.unwrap();
+    s3.create_bucket().bucket(&dst_bucket).send().await.unwrap();
+
+    // Seed src via upload.
+    let tmp = tempfile::tempdir().unwrap();
+    let payload_path = tmp.path().join("data.bin");
+    let payload = b"cross-bucket payload";
+    std::fs::write(&payload_path, payload).unwrap();
+    let seed = default_args(
+        payload_path.to_string_lossy().to_string(),
+        format!("s3://{src_bucket}/releases/data.bin"),
+    );
+    assert_eq!(run(seed).await, deltaglider_proxy::cli::config::EXIT_OK);
+
+    // S3 → S3 copy.
+    let copy_args = default_args(
+        format!("s3://{src_bucket}/releases/data.bin"),
+        format!("s3://{dst_bucket}/backup/data.bin"),
+    );
+    assert_eq!(
+        run(copy_args).await,
+        deltaglider_proxy::cli::config::EXIT_OK
+    );
+
+    // Verify dst object exists with the original bytes.
+    let got = s3
+        .get_object()
+        .bucket(&dst_bucket)
+        .key("backup/data.bin")
+        .send()
+        .await
+        .expect("dst object should exist after S3→S3 cp")
+        .body
+        .collect()
+        .await
+        .unwrap()
+        .into_bytes();
+    assert_eq!(&got[..], payload);
+
+    // Cleanup.
+    s3.delete_object()
+        .bucket(&src_bucket)
+        .key("releases/data.bin")
+        .send()
+        .await
+        .ok();
+    s3.delete_object()
+        .bucket(&dst_bucket)
+        .key("backup/data.bin")
+        .send()
+        .await
+        .ok();
+    s3.delete_bucket().bucket(&src_bucket).send().await.ok();
+    s3.delete_bucket().bucket(&dst_bucket).send().await.ok();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// `--content-type` flag is forwarded to engine.store
+// ════════════════════════════════════════════════════════════════════
+
+/// `--content-type "application/octet-stream"` flows through to
+/// `engine.store(..., content_type, meta)` and lands on the stored
+/// object as the `content-type` response header. Exercises the cp →
+/// engine content-type plumbing — a regression here would cause
+/// downloaders to receive `application/x-www-form-urlencoded` or
+/// `binary/octet-stream` defaults and misroute file handlers.
+#[tokio::test]
+async fn cp_content_type_flag_forwarded_to_storage() {
+    skip_unless_minio!();
+    let bucket = unique_bucket("ctype");
+    let s3 = minio_client().await;
+    s3.create_bucket().bucket(&bucket).send().await.unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("payload.bin");
+    std::fs::write(&local, b"binary payload").unwrap();
+
+    let mut args = default_args(
+        local.to_string_lossy().to_string(),
+        format!("s3://{bucket}/files/payload.bin"),
+    );
+    args.content_type = Some("application/vnd.deltaglider-test".to_string());
+    assert_eq!(run(args).await, deltaglider_proxy::cli::config::EXIT_OK);
+
+    // HEAD the stored object via direct S3 client. A non-delta-eligible
+    // extension (`.bin`) flows through the engine's passthrough path,
+    // so the object lands at the literal key path. We check both the
+    // object's HTTP content-type AND any user-metadata fields the
+    // engine may have set, since the engine's choice of where to
+    // persist content-type has shifted over versions.
+    let head = s3
+        .head_object()
+        .bucket(&bucket)
+        .key("files/payload.bin")
+        .send()
+        .await
+        .expect("passthrough object must exist after upload");
+
+    let http_ct = head.content_type().unwrap_or("").to_string();
+    let user_meta = head.metadata().cloned().unwrap_or_default();
+    let user_ct = user_meta.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case("dg-content-type") || k.eq_ignore_ascii_case("content-type") {
+            Some(v.clone())
+        } else {
+            None
+        }
+    });
+    // Accept either persistence shape (object content-type OR
+    // user-meta) — both are valid implementations of the contract
+    // "the operator-supplied content-type is preserved." Test will
+    // pinpoint a regression where neither carries it.
+    let found = http_ct == "application/vnd.deltaglider-test"
+        || user_ct.as_deref() == Some("application/vnd.deltaglider-test");
+    assert!(
+        found,
+        "--content-type must persist somewhere; http_ct={http_ct:?}, user_meta={user_meta:?}"
+    );
+
+    // Cleanup.
+    let listing = s3
+        .list_objects_v2()
+        .bucket(&bucket)
+        .prefix("files/")
+        .send()
+        .await
+        .unwrap();
+    for o in listing.contents() {
+        if let Some(k) = o.key() {
+            s3.delete_object().bucket(&bucket).key(k).send().await.ok();
+        }
+    }
+    s3.delete_bucket().bucket(&bucket).send().await.ok();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// `--dryrun` plans without writing
+// ════════════════════════════════════════════════════════════════════
+
+/// `--dryrun` must print the planned operation but make no S3 writes.
+/// The destination bucket starts empty and must remain empty after
+/// the dryrun.
+#[tokio::test]
+async fn cp_dryrun_does_not_write_to_destination() {
+    skip_unless_minio!();
+    let bucket = unique_bucket("dryrun");
+    let s3 = minio_client().await;
+    s3.create_bucket().bucket(&bucket).send().await.unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("source.txt");
+    std::fs::write(&local, b"this content must not land on s3").unwrap();
+
+    let mut args = default_args(
+        local.to_string_lossy().to_string(),
+        format!("s3://{bucket}/planned/source.txt"),
+    );
+    args.dryrun = true;
+    assert_eq!(run(args).await, deltaglider_proxy::cli::config::EXIT_OK);
+
+    // Verify dst is still empty — no writes leaked through.
+    let listing = s3
+        .list_objects_v2()
+        .bucket(&bucket)
+        .prefix("planned/")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        listing.key_count().unwrap_or(0),
+        0,
+        "--dryrun leaked writes onto destination"
+    );
+
+    // Cleanup.
     s3.delete_bucket().bucket(&bucket).send().await.ok();
 }
