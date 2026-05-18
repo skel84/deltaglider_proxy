@@ -14,7 +14,13 @@ use crate::api::handlers::AppState;
 use crate::storage::StorageBackend as _;
 
 /// Cache TTL in seconds (5 minutes).
-const CACHE_TTL_SECS: i64 = 300;
+/// Cache TTL for usage-scan results. Default 5 minutes; quota tests
+/// (and any operator who wants tighter enforcement) can shorten via
+/// `DGP_USAGE_CACHE_TTL_SECS`. Lower values mean more frequent
+/// re-scans on PUT/COPY but tighter quota enforcement after writes.
+fn cache_ttl_secs() -> i64 {
+    crate::config::env_parse_with_default("DGP_USAGE_CACHE_TTL_SECS", 300i64)
+}
 
 /// Maximum number of entries in the usage cache. When exceeded, the oldest
 /// entry (by `computed_at`) is evicted before inserting a new one.
@@ -101,7 +107,7 @@ impl UsageScanner {
             let age = Utc::now()
                 .signed_duration_since(entry.computed_at)
                 .num_seconds();
-            let stale_seconds = age - CACHE_TTL_SECS;
+            let stale_seconds = age - cache_ttl_secs();
             let mut result = entry.clone();
             result.stale_seconds = stale_seconds;
             Some(result)
@@ -125,7 +131,7 @@ impl UsageScanner {
         entry: UsageEntry,
     ) {
         let mut cache = cache.write();
-        let stale_cutoff = Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECS * 2);
+        let stale_cutoff = Utc::now() - chrono::Duration::seconds(cache_ttl_secs() * 2);
 
         // Periodic cleanup: remove entries older than 2x TTL (10 minutes)
         cache.retain(|_, v| v.computed_at > stale_cutoff);
@@ -393,7 +399,7 @@ mod tests {
         let scanner = UsageScanner::new();
         // Insert an entry backdated beyond 2x TTL (should be cleaned)
         let mut stale = make_entry("stale", "", 100, 1);
-        stale.computed_at = Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECS * 3);
+        stale.computed_at = Utc::now() - chrono::Duration::seconds(cache_ttl_secs() * 3);
         UsageScanner::insert_with_eviction(&scanner.cache, "stale/".to_string(), stale);
 
         // Insert a fresh entry — the stale one should be cleaned

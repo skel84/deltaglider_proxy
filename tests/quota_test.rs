@@ -114,10 +114,17 @@ async fn test_quota_second_put_enforced() {
     // After the first PUT triggers a scan, subsequent PUTs are enforced.
     // We use a generous quota (10KB) and overshoot it significantly,
     // then retry until the scanner catches up (up to 10 seconds).
+    //
+    // DGP_USAGE_CACHE_TTL_SECS=1 shortens the scan cache TTL so that
+    // each probe retriggers a re-scan; in production the default 5-min
+    // TTL means the first (racy) scan caches "0 bytes" before the seed
+    // PUT lands on disk, sticking around for 5 minutes and defeating
+    // the polling loop. See src/usage_scanner.rs::cache_ttl_secs.
     let server = TestServer::builder()
         .bucket(BUCKET)
         .auth("TESTKEY5", "TESTSECRET5")
         .bucket_policy(BUCKET, "quota_bytes = 10000") // 10 KB
+        .env("DGP_USAGE_CACHE_TTL_SECS", "1")
         .build()
         .await;
 
@@ -145,10 +152,13 @@ async fn test_quota_second_put_enforced() {
 async fn test_quota_delete_frees_space() {
     // After deleting objects and scanner refreshes, PUT should succeed again.
     // Uses polling to avoid flaky timing dependencies on scanner speed.
+    // See test_quota_second_put_enforced for the DGP_USAGE_CACHE_TTL_SECS=1
+    // rationale.
     let server = TestServer::builder()
         .bucket(BUCKET)
         .auth("TESTKEY6", "TESTSECRET6")
         .bucket_policy(BUCKET, "quota_bytes = 10000") // 10 KB
+        .env("DGP_USAGE_CACHE_TTL_SECS", "1")
         .build()
         .await;
 
