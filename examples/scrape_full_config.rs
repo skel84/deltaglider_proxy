@@ -327,6 +327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             force_path_style,
             access_key_id,
             secret_access_key,
+            ..
         } => {
             out.push_str("      type: s3\n");
             if let Some(ep) = endpoint {
@@ -362,6 +363,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 force_path_style,
                 access_key_id,
                 secret_access_key,
+                ..
             } => {
                 out.push_str("      type: s3\n");
                 if let Some(ep) = endpoint {
