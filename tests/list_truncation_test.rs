@@ -539,13 +539,34 @@ async fn list_objects_v1_raw(endpoint: &str, bucket: &str, qs: Option<&str>) -> 
     reqwest::Client::new().get(&url).send().await.unwrap()
 }
 
-/// V1 on an empty bucket — must return 200 + empty Contents,
-/// `IsTruncated=false`, no NextMarker.
+/// V1 against a unique empty PREFIX — must return 200 + empty
+/// Contents under that prefix, `IsTruncated=false`. We use a
+/// unique prefix (UUID-based) rather than relying on an empty
+/// bucket, because the shared MinIO `deltaglider-test` bucket
+/// is polluted by other tests running in parallel. The semantic
+/// being pinned is the same: "no objects matching the request
+/// produces an empty Contents-less response."
 #[tokio::test]
-async fn test_v1_list_objects_empty_bucket() {
+async fn test_v1_list_objects_empty_prefix() {
     let server = TestServer::s3().await;
-    let resp = list_objects_v1_raw(&server.endpoint(), server.bucket(), None).await;
-    assert_eq!(resp.status().as_u16(), 200, "V1 list empty bucket → 200");
+    let unique = format!(
+        "v1-empty-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let resp = list_objects_v1_raw(
+        &server.endpoint(),
+        server.bucket(),
+        Some(&format!("prefix={}/", unique)),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "V1 list with unmatched prefix → 200"
+    );
     let body = resp.text().await.unwrap();
     assert!(
         body.contains("<ListBucketResult"),
@@ -553,12 +574,12 @@ async fn test_v1_list_objects_empty_bucket() {
     );
     assert!(
         body.contains("<IsTruncated>false</IsTruncated>"),
-        "empty bucket must mark IsTruncated=false; got {}",
+        "unmatched-prefix listing must mark IsTruncated=false; got {}",
         body
     );
     assert!(
         !body.contains("<Contents>"),
-        "empty bucket must have no Contents elements; got {}",
+        "unmatched-prefix listing must have no Contents elements; got {}",
         body
     );
 }
@@ -588,48 +609,55 @@ async fn test_v1_list_objects_nonexistent_bucket_returns_404() {
     );
 }
 
-/// V1 with `max-keys=1` against a populated bucket — must return
-/// exactly 1 key + `IsTruncated=true` + a `NextMarker` we can use
-/// to page.
+/// V1 with `max-keys=1` against a populated unique-prefix slice —
+/// must return exactly 1 key + `IsTruncated=true` + a pageable
+/// marker. The shared MinIO bucket is polluted by parallel tests,
+/// so we scope to a unique prefix and use `prefix=` filter on both
+/// pages to isolate from cross-test contamination.
 #[tokio::test]
 async fn test_v1_list_objects_paginates_via_marker() {
     let server = TestServer::s3().await;
     let s3 = server.s3_client().await;
+    let prefix = format!(
+        "v1-page-{}/",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
 
-    // Seed 3 keys with deterministic alphabetical order.
+    // Seed 3 keys WITHIN the unique prefix; alphabetical order.
     for k in ["aaa.bin", "bbb.bin", "ccc.bin"] {
         s3.put_object()
             .bucket(server.bucket())
-            .key(k)
+            .key(format!("{}{}", &prefix, k))
             .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
             .send()
             .await
             .unwrap();
     }
 
-    // First page: max-keys=1.
-    let resp = list_objects_v1_raw(&server.endpoint(), server.bucket(), Some("max-keys=1")).await;
+    // First page: max-keys=1 within our prefix.
+    let resp = list_objects_v1_raw(
+        &server.endpoint(),
+        server.bucket(),
+        Some(&format!("max-keys=1&prefix={}", &prefix)),
+    )
+    .await;
     assert_eq!(resp.status().as_u16(), 200);
     let body = resp.text().await.unwrap();
     assert!(
         body.contains("<IsTruncated>true</IsTruncated>"),
-        "page-1 must be truncated when max-keys=1 and N=3"
+        "page-1 must be truncated when max-keys=1 and N=3 under unique prefix"
     );
 
-    // V1 NextMarker is OPTIONAL per the S3 spec: required when the
-    // request uses a delimiter, but for plain `max-keys` truncation
-    // the client must fall back to "last key in Contents". Handle
-    // both server-side conventions: if NextMarker is present use it,
-    // otherwise extract the last <Key>. The s3s shim emits NextMarker
-    // unconditionally; the axum adapter omits it when no delimiter is
-    // set. Both are spec-compliant; the assertion is purely about
-    // marker-driven pagination working end-to-end.
+    // V1 NextMarker is OPTIONAL per the S3 spec. Handle both
+    // present (s3s shim) and absent (axum, plain max-keys truncation).
     let next_marker: String = if let Some(start) = body.find("<NextMarker>") {
         let value_start = start + "<NextMarker>".len();
         let value_end = body[value_start..].find("</NextMarker>").unwrap();
         body[value_start..value_start + value_end].to_string()
     } else {
-        // Fall back to last <Key> in Contents.
         let mut last = None;
         let mut search_from = 0;
         while let Some(idx) = body[search_from..].find("<Key>") {
@@ -641,19 +669,21 @@ async fn test_v1_list_objects_paginates_via_marker() {
         last.expect("page-1 must have at least one Contents entry to derive a marker")
     };
 
-    // Second page: pass the derived marker via `marker=...` (V1's pagination shape).
+    // Second page: same prefix + the derived marker.
     let resp2 = list_objects_v1_raw(
         &server.endpoint(),
         server.bucket(),
-        Some(&format!("max-keys=1&marker={}", &next_marker)),
+        Some(&format!(
+            "max-keys=1&prefix={}&marker={}",
+            &prefix, &next_marker
+        )),
     )
     .await;
     assert_eq!(resp2.status().as_u16(), 200);
     let body2 = resp2.text().await.unwrap();
-    // Page 2 must NOT include the page-1 key (would mean marker
-    // ignored).
+    let first_key = format!("<Key>{}aaa.bin</Key>", &prefix);
     assert!(
-        !body2.contains("<Key>aaa.bin</Key>"),
+        !body2.contains(&first_key),
         "page-2 must skip the key from page-1; marker ignored?"
     );
 
@@ -661,7 +691,7 @@ async fn test_v1_list_objects_paginates_via_marker() {
     for k in ["aaa.bin", "bbb.bin", "ccc.bin"] {
         s3.delete_object()
             .bucket(server.bucket())
-            .key(k)
+            .key(format!("{}{}", &prefix, k))
             .send()
             .await
             .ok();
@@ -685,26 +715,38 @@ async fn test_v1_list_objects_max_keys_above_1000_is_clamped() {
     );
 }
 
-/// V1 with `delimiter=/` — must produce CommonPrefixes for top-level
-/// directory shapes.
+/// V1 with `delimiter=/` — must produce CommonPrefixes for the
+/// directory shapes we created under a UNIQUE PREFIX (to isolate
+/// from parallel-test pollution of the shared bucket).
 #[tokio::test]
 async fn test_v1_list_objects_with_delimiter_produces_common_prefixes() {
     let server = TestServer::s3().await;
     let s3 = server.s3_client().await;
+    let prefix = format!(
+        "v1-delim-{}/",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
 
-    // Seed nested keys.
+    // Seed nested keys WITHIN the unique prefix.
     for k in ["dir-a/x.bin", "dir-b/y.bin", "top.bin"] {
         s3.put_object()
             .bucket(server.bucket())
-            .key(k)
+            .key(format!("{}{}", &prefix, k))
             .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
             .send()
             .await
             .unwrap();
     }
 
-    let resp =
-        list_objects_v1_raw(&server.endpoint(), server.bucket(), Some("delimiter=%2F")).await;
+    let resp = list_objects_v1_raw(
+        &server.endpoint(),
+        server.bucket(),
+        Some(&format!("delimiter=%2F&prefix={}", &prefix)),
+    )
+    .await;
     assert_eq!(resp.status().as_u16(), 200);
     let body = resp.text().await.unwrap();
     assert!(
@@ -712,13 +754,16 @@ async fn test_v1_list_objects_with_delimiter_produces_common_prefixes() {
         "delimiter=/ must produce CommonPrefixes, got: {}",
         body
     );
+    let dir_a_prefix = format!("{}dir-a/", &prefix);
     assert!(
-        body.contains("dir-a/") || body.contains("<Prefix>dir-a/</Prefix>"),
-        "CommonPrefixes must include dir-a/, got: {}",
+        body.contains(&dir_a_prefix),
+        "CommonPrefixes must include {}, got: {}",
+        dir_a_prefix,
         body
     );
+    let top_key = format!("<Key>{}top.bin</Key>", &prefix);
     assert!(
-        body.contains("<Key>top.bin</Key>"),
+        body.contains(&top_key),
         "top-level objects must appear as Contents (not CommonPrefixes), got: {}",
         body
     );
@@ -727,7 +772,7 @@ async fn test_v1_list_objects_with_delimiter_produces_common_prefixes() {
     for k in ["dir-a/x.bin", "dir-b/y.bin", "top.bin"] {
         s3.delete_object()
             .bucket(server.bucket())
-            .key(k)
+            .key(format!("{}{}", &prefix, k))
             .send()
             .await
             .ok();
