@@ -2557,6 +2557,446 @@ async fn test_form_post_upload_rejects_public_read_acl() {
     );
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Form-POST paranoia tests (added after the s3s migration landed)
+//
+// We rely heavily on browser form-POST uploads in production. The s3s
+// adapter intercepts these via a method+content-type-aware middleware
+// (`intercept_form_post_for_s3s` in `src/startup.rs`); the goal of
+// this section is to pin every edge case that could regress the
+// dispatch path, the body-collection path, or the response shape.
+// ════════════════════════════════════════════════════════════════════
+
+/// Reusable form-POST signed request builder. Returns the multipart
+/// form and the URL to POST to. Caller supplies the file content +
+/// any extra fields they want to override.
+fn signed_post_form(
+    bucket: &str,
+    key: &str,
+    file_bytes: &[u8],
+    file_name: &str,
+) -> reqwest::multipart::Form {
+    let amz_date = "20260507T120000Z";
+    let credential = "POSTACCESSKEY/20260507/us-east-1/s3/aws4_request";
+    let policy = serde_json::json!({
+        "expiration": "2099-01-01T00:00:00.000Z",
+        "conditions": [
+            { "bucket": bucket },
+            ["starts-with", "$key", ""],
+            { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+            { "x-amz-credential": credential },
+            { "x-amz-date": amz_date },
+            ["content-length-range", 0, 10_485_760]
+        ]
+    });
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy.to_string());
+    let signing_key = derive_post_signing_key("POSTSECRETKEY123", "20260507", "us-east-1");
+    let signature = hex::encode(hmac_sha256(&signing_key, policy_b64.as_bytes()));
+    reqwest::multipart::Form::new()
+        .text("key", key.to_string())
+        .text("policy", policy_b64)
+        .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+        .text("x-amz-credential", credential)
+        .text("x-amz-date", amz_date)
+        .text("x-amz-signature", signature)
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(file_bytes.to_vec())
+                .file_name(file_name.to_string())
+                .mime_str("application/octet-stream")
+                .unwrap(),
+        )
+}
+
+/// `POST /<bucket>/<key>` (path with a nested key) must NOT be
+/// intercepted by the form-POST middleware. The s3s `?delete`
+/// XML batch and CreateMultipartUpload both POST to nested paths;
+/// they must reach the s3s service unmodified. Verify by sending
+/// `POST /<bucket>/<key>` with multipart body — it should NOT
+/// route to form-POST upload (which would silently succeed) but
+/// instead reach s3s and produce a non-204 error.
+#[tokio::test]
+async fn test_form_post_middleware_falls_through_for_nested_paths() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let client = reqwest::Client::new();
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+    // Nested path — should NOT route to form-POST. Middleware bails
+    // because `bucket.contains('/')` after trim.
+    let form = signed_post_form(bucket, "form-key", b"x", "x.bin");
+    let resp = client
+        .post(format!("{}/{}/nested", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    // The fact that we got SOME error response (not 204 OK) is the
+    // assertion. Form-POST handler returns 204; s3s for unknown POST
+    // on a nested path returns either 405 or NotImplemented — either
+    // is fine; what matters is the form-POST handler did NOT run.
+    assert_ne!(
+        resp.status().as_u16(),
+        204,
+        "POST /<bucket>/<key> must NOT be routed to form-POST handler"
+    );
+}
+
+/// `GET /<bucket>` (path matches but method is GET, not POST) must
+/// NOT be intercepted — the middleware's first guard checks the
+/// method.
+#[tokio::test]
+async fn test_form_post_middleware_falls_through_for_get_method() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let client = reqwest::Client::new();
+    let endpoint = server.endpoint();
+    let bucket = server.bucket();
+    // SDK-authenticated GET — proves the middleware doesn't claim
+    // GET /<bucket>.
+    let s3 = server.s3_client().await;
+    let result = s3.list_objects_v2().bucket(bucket).send().await;
+    assert!(
+        result.is_ok(),
+        "GET /<bucket> (ListObjectsV2) must not be intercepted by form-POST middleware: {:?}",
+        result.err()
+    );
+    // Sanity: unsigned GET reaches the SigV4 verifier (auth=enabled),
+    // not the form-POST handler.
+    let resp = client
+        .get(format!("{}/{}", endpoint, bucket))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == reqwest::StatusCode::FORBIDDEN
+            || resp.status() == reqwest::StatusCode::BAD_REQUEST,
+        "unsigned GET /<bucket> should land in SigV4 verifier (403/400), got {}",
+        resp.status()
+    );
+}
+
+/// `POST /<bucket>` with `Content-Type: application/xml` (the
+/// `?delete` DeleteObjects batch shape) must NOT be intercepted.
+/// The middleware checks Content-Type starts_with "multipart/form-data".
+#[tokio::test]
+async fn test_form_post_middleware_falls_through_for_xml_delete_batch() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let s3 = server.s3_client().await;
+    let bucket = server.bucket();
+
+    // Seed two objects, then batch-delete them. The SDK uses
+    // `POST /<bucket>?delete` with `Content-Type: application/xml`.
+    // If the form-POST middleware were over-eager, this would route
+    // wrong and the delete would silently fail.
+    use aws_sdk_s3::primitives::ByteStream;
+    for k in ["delete-batch-1.bin", "delete-batch-2.bin"] {
+        s3.put_object()
+            .bucket(bucket)
+            .key(k)
+            .body(ByteStream::from_static(b"x"))
+            .send()
+            .await
+            .unwrap();
+    }
+    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+    let result = s3
+        .delete_objects()
+        .bucket(bucket)
+        .delete(
+            Delete::builder()
+                .objects(
+                    ObjectIdentifier::builder()
+                        .key("delete-batch-1.bin")
+                        .build()
+                        .unwrap(),
+                )
+                .objects(
+                    ObjectIdentifier::builder()
+                        .key("delete-batch-2.bin")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await;
+    assert!(
+        result.is_ok(),
+        "POST /<bucket>?delete (XML batch) must reach s3s, not form-POST: {:?}",
+        result.err()
+    );
+}
+
+/// Form-POST with a trailing slash on the bucket path (`POST /<bucket>/`)
+/// — middleware trims trailing slash, should still match.
+#[tokio::test]
+async fn test_form_post_with_trailing_slash_on_bucket_path() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let client = reqwest::Client::new();
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+    let form = signed_post_form(bucket, "trailing/slash-test.bin", b"trailing", "x.bin");
+    let resp = client
+        .post(format!("{}/{}/", endpoint, bucket)) // <-- trailing slash
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "POST /<bucket>/ (trailing slash) must route to form-POST: got {}",
+        resp.status()
+    );
+}
+
+/// Form-POST where `Content-Type` is `MULTIPART/FORM-DATA; boundary=...`
+/// (uppercase). Browsers don't do this, but proxies / custom clients
+/// might. The check is case-insensitive (`to_ascii_lowercase().starts_with`).
+#[tokio::test]
+async fn test_form_post_with_uppercase_content_type() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+
+    // Manually construct the multipart body to control the
+    // Content-Type header's case (reqwest's multipart helper
+    // doesn't let you override the case).
+    let boundary = "----paranoid-test-boundary-XYZ";
+    let body = build_multipart_body(boundary, bucket, "uppercase-ct.bin", b"upper");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{}", endpoint, bucket))
+        .header(
+            "content-type",
+            format!("MULTIPART/FORM-DATA; boundary={}", boundary),
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "case-insensitive Content-Type match must succeed, got {}",
+        resp.status()
+    );
+}
+
+/// Form-POST with extended Content-Type parameters
+/// (`multipart/form-data; charset=utf-8; boundary=...`). Some HTTP
+/// clients (notably older Firefox) emit the charset parameter. The
+/// `starts_with("multipart/form-data")` check tolerates it.
+#[tokio::test]
+async fn test_form_post_with_charset_parameter_in_content_type() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+
+    let boundary = "----charset-test-boundary";
+    let body = build_multipart_body(boundary, bucket, "charset.bin", b"charset");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{}", endpoint, bucket))
+        .header(
+            "content-type",
+            format!("multipart/form-data; charset=utf-8; boundary={}", boundary),
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "Content-Type with charset parameter must succeed, got {}",
+        resp.status()
+    );
+}
+
+/// Form-POST with an empty file body. The handler shouldn't crash;
+/// either it succeeds (0-byte object) or rejects per the
+/// content-length-range policy. Our policy allows [0, 10MB] so the
+/// 0-byte case is policy-valid.
+#[tokio::test]
+async fn test_form_post_with_empty_file_body() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+
+    let form = signed_post_form(bucket, "empty.bin", b"", "empty.bin");
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "0-byte form-POST upload (policy allows [0, 10MB]) must succeed, got {}",
+        resp.status()
+    );
+
+    let s3 = server.s3_client().await;
+    let got = s3
+        .get_object()
+        .bucket(bucket)
+        .key("empty.bin")
+        .send()
+        .await
+        .expect("empty.bin must exist");
+    let body = got.body.collect().await.unwrap().into_bytes();
+    assert_eq!(
+        body.len(),
+        0,
+        "uploaded object must be 0 bytes, got {} bytes",
+        body.len()
+    );
+}
+
+/// Build a multipart/form-data body with the given boundary. Used by
+/// tests that need to control the Content-Type header's case or
+/// parameters (reqwest's `multipart::Form` builder doesn't expose
+/// that customization).
+fn build_multipart_body(boundary: &str, bucket: &str, key: &str, file_bytes: &[u8]) -> Vec<u8> {
+    let amz_date = "20260507T120000Z";
+    let credential = "POSTACCESSKEY/20260507/us-east-1/s3/aws4_request";
+    let policy = serde_json::json!({
+        "expiration": "2099-01-01T00:00:00.000Z",
+        "conditions": [
+            { "bucket": bucket },
+            ["starts-with", "$key", ""],
+            { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+            { "x-amz-credential": credential },
+            { "x-amz-date": amz_date },
+            ["content-length-range", 0, 10_485_760]
+        ]
+    });
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy.to_string());
+    let signing_key = derive_post_signing_key("POSTSECRETKEY123", "20260507", "us-east-1");
+    let signature = hex::encode(hmac_sha256(&signing_key, policy_b64.as_bytes()));
+
+    let mut out = Vec::new();
+    let crlf = b"\r\n";
+    let dd_boundary = format!("--{}", boundary);
+    for (name, value) in [
+        ("key", key),
+        ("policy", policy_b64.as_str()),
+        ("x-amz-algorithm", "AWS4-HMAC-SHA256"),
+        ("x-amz-credential", credential),
+        ("x-amz-date", amz_date),
+        ("x-amz-signature", signature.as_str()),
+    ] {
+        out.extend_from_slice(dd_boundary.as_bytes());
+        out.extend_from_slice(crlf);
+        out.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{}\"", name).as_bytes(),
+        );
+        out.extend_from_slice(crlf);
+        out.extend_from_slice(crlf);
+        out.extend_from_slice(value.as_bytes());
+        out.extend_from_slice(crlf);
+    }
+    // The file part.
+    out.extend_from_slice(dd_boundary.as_bytes());
+    out.extend_from_slice(crlf);
+    out.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"upload.bin\"",
+    );
+    out.extend_from_slice(crlf);
+    out.extend_from_slice(b"Content-Type: application/octet-stream");
+    out.extend_from_slice(crlf);
+    out.extend_from_slice(crlf);
+    out.extend_from_slice(file_bytes);
+    out.extend_from_slice(crlf);
+    // Final boundary.
+    out.extend_from_slice(format!("--{}--", boundary).as_bytes());
+    out.extend_from_slice(crlf);
+    out
+}
+
+/// Form-POST that includes `success_action_redirect` (which we
+/// explicitly reject as `NotImplemented`). Verify the rejection
+/// fires correctly and produces a 501 with a useful body.
+#[tokio::test]
+async fn test_form_post_rejects_success_action_redirect() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+    // Take the standard signed form, then bolt on success_action_redirect.
+    let form = signed_post_form(bucket, "should-fail.bin", b"x", "x.bin")
+        .text("success_action_redirect", "https://example.com/done");
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        501,
+        "form-POST with success_action_redirect must be rejected as 501 NotImplemented, got {}",
+        resp.status()
+    );
+}
+
+/// Response from a successful form-POST upload should carry the
+/// `ETag` header — operationally important for callers that want
+/// to verify the upload landed without a separate HEAD call.
+#[tokio::test]
+async fn test_form_post_success_response_has_etag_header() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+    let form = signed_post_form(bucket, "etag-check.bin", b"abc123", "etag.bin");
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204);
+    let etag = resp
+        .headers()
+        .get("etag")
+        .or_else(|| resp.headers().get("ETag"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    assert!(
+        etag.as_deref().is_some_and(|e| !e.is_empty()),
+        "form-POST 204 response must include ETag header; headers={:?}",
+        resp.headers()
+    );
+}
+
 // ============================================================================
 // Tagging / versioning stubs
 //

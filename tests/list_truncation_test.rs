@@ -519,3 +519,217 @@ async fn test_list_small_pages_s3() {
         key_set.difference(&expected).collect::<Vec<_>>(),
     );
 }
+
+// ════════════════════════════════════════════════════════════════════
+// ListObjects V1 paranoia tests
+//
+// `GET /<bucket>` WITHOUT `?list-type=2` dispatches to ListObjects V1.
+// AWS SDKs default to V2, but legacy SDKs, hand-rolled SigV4 clients,
+// and the AWS CLI's older paths still use V1. The s3s adapter
+// shipped only V2; today's commit added a V1 shim. These tests pin
+// the V1-specific behavior — marker/next-marker shape, encoding-type,
+// empty/missing bucket, etc.
+// ════════════════════════════════════════════════════════════════════
+
+/// Helper: send a raw `GET /<bucket>` with no `list-type` query →
+/// dispatches to V1.
+async fn list_objects_v1_raw(endpoint: &str, bucket: &str, qs: Option<&str>) -> reqwest::Response {
+    let qs = qs.map(|q| format!("?{}", q)).unwrap_or_default();
+    let url = format!("{}/{}{}", endpoint, bucket, qs);
+    reqwest::Client::new().get(&url).send().await.unwrap()
+}
+
+/// V1 on an empty bucket — must return 200 + empty Contents,
+/// `IsTruncated=false`, no NextMarker.
+#[tokio::test]
+async fn test_v1_list_objects_empty_bucket() {
+    let server = TestServer::s3().await;
+    let resp = list_objects_v1_raw(&server.endpoint(), server.bucket(), None).await;
+    assert_eq!(resp.status().as_u16(), 200, "V1 list empty bucket → 200");
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<ListBucketResult"),
+        "must include the V1 XML root"
+    );
+    assert!(
+        body.contains("<IsTruncated>false</IsTruncated>"),
+        "empty bucket must mark IsTruncated=false; got {}",
+        body
+    );
+    assert!(
+        !body.contains("<Contents>"),
+        "empty bucket must have no Contents elements; got {}",
+        body
+    );
+}
+
+/// V1 against a non-existent bucket — must return 404 NoSuchBucket.
+/// Catches the "shim didn't propagate NoSuchBucket" regression.
+#[tokio::test]
+async fn test_v1_list_objects_nonexistent_bucket_returns_404() {
+    let server = TestServer::s3().await;
+    let resp = list_objects_v1_raw(
+        &server.endpoint(),
+        "this-bucket-deliberately-does-not-exist-paranoid-test",
+        None,
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "V1 list of non-existent bucket must return 404, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("NoSuchBucket"),
+        "404 body must cite NoSuchBucket, got: {}",
+        body
+    );
+}
+
+/// V1 with `max-keys=1` against a populated bucket — must return
+/// exactly 1 key + `IsTruncated=true` + a `NextMarker` we can use
+/// to page.
+#[tokio::test]
+async fn test_v1_list_objects_paginates_via_marker() {
+    let server = TestServer::s3().await;
+    let s3 = server.s3_client().await;
+
+    // Seed 3 keys with deterministic alphabetical order.
+    for k in ["aaa.bin", "bbb.bin", "ccc.bin"] {
+        s3.put_object()
+            .bucket(server.bucket())
+            .key(k)
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // First page: max-keys=1.
+    let resp = list_objects_v1_raw(&server.endpoint(), server.bucket(), Some("max-keys=1")).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<IsTruncated>true</IsTruncated>"),
+        "page-1 must be truncated when max-keys=1 and N=3"
+    );
+
+    // V1 NextMarker is OPTIONAL per the S3 spec: required when the
+    // request uses a delimiter, but for plain `max-keys` truncation
+    // the client must fall back to "last key in Contents". Handle
+    // both server-side conventions: if NextMarker is present use it,
+    // otherwise extract the last <Key>. The s3s shim emits NextMarker
+    // unconditionally; the axum adapter omits it when no delimiter is
+    // set. Both are spec-compliant; the assertion is purely about
+    // marker-driven pagination working end-to-end.
+    let next_marker: String = if let Some(start) = body.find("<NextMarker>") {
+        let value_start = start + "<NextMarker>".len();
+        let value_end = body[value_start..].find("</NextMarker>").unwrap();
+        body[value_start..value_start + value_end].to_string()
+    } else {
+        // Fall back to last <Key> in Contents.
+        let mut last = None;
+        let mut search_from = 0;
+        while let Some(idx) = body[search_from..].find("<Key>") {
+            let key_start = search_from + idx + "<Key>".len();
+            let key_end = body[key_start..].find("</Key>").unwrap();
+            last = Some(body[key_start..key_start + key_end].to_string());
+            search_from = key_start + key_end;
+        }
+        last.expect("page-1 must have at least one Contents entry to derive a marker")
+    };
+
+    // Second page: pass the derived marker via `marker=...` (V1's pagination shape).
+    let resp2 = list_objects_v1_raw(
+        &server.endpoint(),
+        server.bucket(),
+        Some(&format!("max-keys=1&marker={}", &next_marker)),
+    )
+    .await;
+    assert_eq!(resp2.status().as_u16(), 200);
+    let body2 = resp2.text().await.unwrap();
+    // Page 2 must NOT include the page-1 key (would mean marker
+    // ignored).
+    assert!(
+        !body2.contains("<Key>aaa.bin</Key>"),
+        "page-2 must skip the key from page-1; marker ignored?"
+    );
+
+    // Cleanup.
+    for k in ["aaa.bin", "bbb.bin", "ccc.bin"] {
+        s3.delete_object()
+            .bucket(server.bucket())
+            .key(k)
+            .send()
+            .await
+            .ok();
+    }
+}
+
+/// V1 with `max-keys=1500` (over the S3 limit of 1000) — server
+/// must clamp to 1000.
+#[tokio::test]
+async fn test_v1_list_objects_max_keys_above_1000_is_clamped() {
+    let server = TestServer::s3().await;
+    let resp =
+        list_objects_v1_raw(&server.endpoint(), server.bucket(), Some("max-keys=5000")).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    // Find MaxKeys element. Should be clamped to 1000 (S3 spec).
+    assert!(
+        body.contains("<MaxKeys>1000</MaxKeys>"),
+        "max-keys=5000 must be clamped to 1000 in response, got: {}",
+        body
+    );
+}
+
+/// V1 with `delimiter=/` — must produce CommonPrefixes for top-level
+/// directory shapes.
+#[tokio::test]
+async fn test_v1_list_objects_with_delimiter_produces_common_prefixes() {
+    let server = TestServer::s3().await;
+    let s3 = server.s3_client().await;
+
+    // Seed nested keys.
+    for k in ["dir-a/x.bin", "dir-b/y.bin", "top.bin"] {
+        s3.put_object()
+            .bucket(server.bucket())
+            .key(k)
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let resp =
+        list_objects_v1_raw(&server.endpoint(), server.bucket(), Some("delimiter=%2F")).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<CommonPrefixes>"),
+        "delimiter=/ must produce CommonPrefixes, got: {}",
+        body
+    );
+    assert!(
+        body.contains("dir-a/") || body.contains("<Prefix>dir-a/</Prefix>"),
+        "CommonPrefixes must include dir-a/, got: {}",
+        body
+    );
+    assert!(
+        body.contains("<Key>top.bin</Key>"),
+        "top-level objects must appear as Contents (not CommonPrefixes), got: {}",
+        body
+    );
+
+    // Cleanup.
+    for k in ["dir-a/x.bin", "dir-b/y.bin", "top.bin"] {
+        s3.delete_object()
+            .bucket(server.bucket())
+            .key(k)
+            .send()
+            .await
+            .ok();
+    }
+}
