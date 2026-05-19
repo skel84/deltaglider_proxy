@@ -1812,6 +1812,14 @@ export interface BucketScanResult {
   total_objects: number;
   total_original_bytes: number;
   total_stored_bytes: number;
+  /**
+   * Bytes occupied by `reference.bin` files across the bucket. Always
+   * a subset of `total_stored_bytes`. Optional on the wire for backwards
+   * compatibility with v1 scan results (those existed before the
+   * consolidation, undercounted by this amount, and are dropped on load
+   * — but a stale Rust process could in theory still emit them).
+   */
+  total_reference_bytes?: number;
   savings_percentage: number;
   started_at: string; // ISO-8601
   completed_at: string; // ISO-8601

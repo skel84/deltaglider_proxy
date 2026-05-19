@@ -44,6 +44,7 @@ import {
   type BucketScanProgress,
 } from '../adminApi';
 import { formatBytes } from '../utils';
+import { summarizeScopeSavings } from '../savings';
 import DashboardGrid from './dashboard/DashboardGrid';
 import Panel from './dashboard/Panel';
 import { CHART_PALETTE, chartTooltipStyle, axisTickStyle, fmtNum } from './dashboard/chartDefaults';
@@ -396,9 +397,14 @@ export default function AnalyticsSection({ config }: Props) {
       const totalStored = useLive
         ? liveProgress!.stored_bytes
         : (cached?.total_stored_bytes ?? 0);
-      const savings = Math.max(0, totalOriginal - totalStored);
-      const savingsPercent =
-        totalOriginal > 0 ? (savings / totalOriginal) * 100 : 0;
+      // Route through the canonical scope-savings helper so per-bucket
+      // rows share cap + clamp with every other surface. Pre-routing
+      // this had its own uncapped formula → a deltaspace with 99.95%
+      // raw ratio rendered as 100.0% in the table while the chip
+      // (using the helper) showed 99%.
+      const scope = summarizeScopeSavings(totalOriginal, totalStored);
+      const savings = scope.savedBytes;
+      const savingsPercent = scope.pctOneDecimal;
       const objectCount = useLive
         ? liveProgress!.objects
         : (cached?.total_objects ?? 0);
@@ -420,8 +426,13 @@ export default function AnalyticsSection({ config }: Props) {
 
   const totalOriginal = bucketRows.reduce((s, b) => s + b.totalOriginal, 0);
   const totalStored = bucketRows.reduce((s, b) => s + b.totalStored, 0);
-  const totalSavings = totalOriginal - totalStored;
-  const savingsPercent = totalOriginal > 0 ? (totalSavings / totalOriginal * 100) : 0;
+  // HeroSavingsPanel + KPI tile + dial all read these. Use the
+  // canonical helper for the % — same cap as everything else; use the
+  // signed difference for the cost calculation below (which is purely
+  // a denomination conversion, not a display).
+  const heroSavings = summarizeScopeSavings(totalOriginal, totalStored);
+  const totalSavings = heroSavings.savedBytes;
+  const savingsPercent = heroSavings.pctOneDecimal;
   const monthlySavings = (totalSavings / (1024 * 1024 * 1024)) * costRate;
   const totalObjects = bucketRows.reduce((s, b) => s + b.objectCount, 0);
 

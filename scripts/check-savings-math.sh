@@ -9,21 +9,36 @@
 # `demo/s3-browser/ui/src/savings.ts` (TS). This script is the lock
 # on the door so the pattern can't be reintroduced silently.
 #
-# What's forbidden:
-#   Rust  : the byte-ratio pattern `1.0 - .*stored.*/.*original`
-#           the legacy "stored size" shortcut `delta_size().unwrap_or(.*file_size)`
-#           (use `FileMetadata::stored_size()` instead)
-#   TS    : the byte-ratio pattern `1 - .*storedSize.*/.*originalSize`
-#           (use `summarizeObjectSavings` / `summarizeScopeSavings` instead)
+# The first version of this guard had a narrow regex (only
+# `storedSize`/`originalSize`). A subsequent audit found that
+# `BucketScanCard.tsx` + `AnalyticsSection.tsx` used `storedBytes`
+# and `original_bytes` variable names and dodged the guard entirely.
+# The patterns below cover BOTH naming conventions and the sign-
+# flipped `(orig - stored) / orig` shape that's semantically the
+# same thing.
 #
-# Allow-listed files (the centralization modules themselves and a few
-# constructors that legitimately compute the formula once on input):
-#   src/deltaglider/savings.rs
-#   src/types.rs                       (constructors)
-#   src/api/admin/delta_efficiency.rs  (computes per-row delta_size/original_size for diagnostics)
-#   src/deltaglider/codec.rs           (DeltaCodec::compression_ratio post-encode)
-#   src/deltaglider/engine/store.rs    (delta_size/original ratio threshold check)
-#   demo/s3-browser/ui/src/savings.ts
+# What's forbidden (broad match for any savings-ratio shape):
+#   Rust  : `1.0 - <expr containing stored> / <expr containing original>`
+#           `(<expr w/ original> - <expr w/ stored>) / <expr w/ original>`
+#           `delta_size().unwrap_or(<expr w/ file_size>)` shortcut
+#   TS    : same two ratio shapes for {storedSize,storedBytes,stored_bytes}
+#           against {originalSize,originalBytes,original_bytes}
+#
+# Allow-listed files: the centralization modules themselves and a few
+# constructors that legitimately compute a *different* quantity:
+#   src/deltaglider/savings.rs                — the single source of truth
+#   src/types.rs                              — FileMetadata::stored_size
+#   src/api/admin/delta_efficiency.rs         — per-row diagnostic ratios
+#   src/deltaglider/codec.rs                  — DeltaCodec ratio post-encode
+#   src/deltaglider/engine/store.rs           — encode threshold check
+#   demo/s3-browser/ui/src/savings.ts         — TS canonical module
+#
+# Note on technique: grep is regex-based and line-oriented. It cannot
+# match expressions split across multiple lines, and it cannot tell a
+# comment apart from code. We mitigate both with allow-lists and a
+# stripping pre-pass for `//`/`#`/`///` comments. An AST-based check
+# (cargo xtask using `syn`) is the long-term replacement; this script
+# is the cheap lock that catches 90% of regressions.
 #
 # Run locally:  ./scripts/check-savings-math.sh
 # Exit 0 = clean, non-zero = forbidden pattern detected.
@@ -57,43 +72,94 @@ is_allowed() {
   return 1
 }
 
-# ─── Rust: forbidden ratio formulas ──────────────────────────────────
-while IFS=: read -r path line _; do
-  [[ -z "$path" ]] && continue
-  # Exclude tests/ — assertions there legitimately reproduce the
-  # algorithm to pin invariants. Exclude target/ build output.
-  case "$path" in
-    target/*|tests/*) continue ;;
-  esac
-  if is_allowed "$path" "${allowed_rust[@]}"; then
-    continue
-  fi
-  violations+=("$path:$line: forbidden inline savings ratio (use SavingsTotals::savings_percentage or saved_bytes)")
-done < <(grep -rnE '1\.0\s*-\s*[^;]*stored[^;]*/[^;]*original|\(1\.0?\s*-\s*[^)]*stored[^)]*\s*/\s*[^)]*original[^)]*\)' --include='*.rs' src/ || true)
+# Strip Rust + TS // line comments and /// doc lines BEFORE scanning,
+# so a literal "1.0 - stored / original" in a doc example doesn't
+# trip the check. Block /* */ comments aren't stripped — keep your
+# block-comment savings math out of source code please.
+strip_comments() {
+  # Strip everything from the first `//` to EOL on each line. Doesn't
+  # cope with `//` inside string literals; we accept that tiny gap to
+  # keep this readable.
+  sed -E 's|//.*$||' "$1"
+}
 
-# Rust: forbidden "stored size" shortcut.
-while IFS=: read -r path line _; do
-  [[ -z "$path" ]] && continue
-  case "$path" in
-    target/*|tests/*) continue ;;
-  esac
-  if is_allowed "$path" "${allowed_rust[@]}"; then
-    continue
-  fi
-  violations+=("$path:$line: legacy 'delta_size().unwrap_or(file_size)' — use FileMetadata::stored_size()")
-done < <(grep -rnE 'delta_size\(\)\.unwrap_or\([^)]*file_size\)' --include='*.rs' src/ || true)
+# Common "stored"/"original" name fragments — any of these on either
+# side of a `/` (with the other being the inverse) is suspicious.
+# These cover the THREE conventions we've actually seen in the
+# codebase: PascalCase (storedSize/originalSize), camelCase
+# (storedBytes/originalBytes), snake_case (stored_bytes/original_bytes).
+stored_names='(stored[_]?(size|bytes)|storedSize|storedBytes|stored_bytes)'
+original_names='(original[_]?(size|bytes)|originalSize|originalBytes|original_bytes|file_size)'
 
-# ─── TypeScript: forbidden ratio formulas ───────────────────────────
-while IFS=: read -r path line _; do
-  [[ -z "$path" ]] && continue
-  case "$path" in
-    *node_modules/*|*dist/*) continue ;;
-  esac
-  if is_allowed "$path" "${allowed_ts[@]}"; then
-    continue
-  fi
-  violations+=("$path:$line: forbidden inline savings ratio (use summarizeObjectSavings or summarizeScopeSavings from src/savings.ts)")
-done < <(grep -rnE '\(\s*1\s*-\s*[^)]*storedSize[^)]*/\s*[^)]*originalSize[^)]*\)|1\s*-\s*[^;]*storedSize[^;]*/[^;]*originalSize' --include='*.ts' --include='*.tsx' demo/s3-browser/ui/src/ || true)
+# Rust ratio patterns.
+#  Form A:  1.0 - <…stored…> / <…original…>
+#  Form B:  (<…original…> - <…stored…>) / <…original…>
+# We match on the LINE level after stripping `//` comments.
+rust_pattern_a="1\\.0?\\s*-\\s*[^;]*${stored_names}[^;]*/[^;]*${original_names}"
+rust_pattern_b="\\([^()]*${original_names}[^()]*-[^()]*${stored_names}[^()]*\\)\\s*/"
+rust_pattern_legacy='delta_size\(\)\.unwrap_or\([^)]*file_size\)'
+
+# TS ratio patterns — same two shapes.
+ts_pattern_a="1\\s*-\\s*[^;]*${stored_names}[^;]*/[^;]*${original_names}"
+ts_pattern_b="\\([^()]*${original_names}[^()]*-[^()]*${stored_names}[^()]*\\)\\s*/"
+
+scan_rust() {
+  local pattern="$1"
+  local message="$2"
+  shopt -s globstar nullglob
+  for f in src/**/*.rs; do
+    case "$f" in
+      tests/*) continue ;;
+    esac
+    if is_allowed "$f" "${allowed_rust[@]}"; then
+      continue
+    fi
+    local tmp
+    tmp=$(mktemp)
+    strip_comments "$f" > "$tmp"
+    # Use -n for line numbers, -E for extended regex.
+    while IFS=: read -r line _; do
+      [[ -z "$line" ]] && continue
+      violations+=("$f:$line: $message")
+    done < <(grep -nE "$pattern" "$tmp" || true)
+    rm -f "$tmp"
+  done
+}
+
+scan_ts() {
+  local pattern="$1"
+  local message="$2"
+  shopt -s globstar nullglob
+  for f in demo/s3-browser/ui/src/**/*.ts demo/s3-browser/ui/src/**/*.tsx; do
+    case "$f" in
+      *node_modules/*|*dist/*) continue ;;
+    esac
+    if is_allowed "$f" "${allowed_ts[@]}"; then
+      continue
+    fi
+    local tmp
+    tmp=$(mktemp)
+    strip_comments "$f" > "$tmp"
+    while IFS=: read -r line _; do
+      [[ -z "$line" ]] && continue
+      violations+=("$f:$line: $message")
+    done < <(grep -nE "$pattern" "$tmp" || true)
+    rm -f "$tmp"
+  done
+}
+
+# Run the scans.
+scan_rust "$rust_pattern_a" \
+  "inline savings ratio '1.0 - stored/original' — use SavingsTotals::savings_percentage"
+scan_rust "$rust_pattern_b" \
+  "inline savings ratio '(original - stored)/original' — use SavingsTotals::savings_percentage"
+scan_rust "$rust_pattern_legacy" \
+  "legacy 'delta_size().unwrap_or(file_size)' — use FileMetadata::stored_size()"
+
+scan_ts "$ts_pattern_a" \
+  "inline savings ratio '1 - stored/original' — use summarizeScopeSavings/summarizeObjectSavings from src/savings.ts"
+scan_ts "$ts_pattern_b" \
+  "inline savings ratio '(original - stored)/original' — use summarizeScopeSavings/summarizeObjectSavings from src/savings.ts"
 
 if ((${#violations[@]} > 0)); then
   echo "error: inline savings math detected outside the central modules:" >&2

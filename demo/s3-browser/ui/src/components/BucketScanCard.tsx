@@ -38,6 +38,7 @@ import {
 } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import { formatBytes } from '../utils';
+import { summarizeScopeSavings } from '../savings';
 import { fmtNum } from './dashboard/chartDefaults';
 import {
   getAllBucketScans,
@@ -112,8 +113,12 @@ function aggregate(results: Record<string, BucketScanResult>): {
     if (!oldest || r.completed_at < oldest) oldest = r.completed_at;
     if (!newest || r.completed_at > newest) newest = r.completed_at;
   }
-  const savings =
-    originalBytes > 0 ? (1 - storedBytes / originalBytes) * 100 : 0;
+  // Route through the canonical scope-savings helper — same cap and
+  // clamp behaviour as the chip, the delta_efficiency report, and
+  // every other surface. Pre-consolidation this had its own
+  // uncapped/unclamped formula, which could read `99.95%` for the
+  // exact same data the chip displayed as `99%`.
+  const savings = summarizeScopeSavings(originalBytes, storedBytes).pct;
   return {
     buckets: count,
     objects,
@@ -349,7 +354,7 @@ export default function BucketScanCard({ onRenderActions, scopeBucket }: Props) 
         >
           {formatBytes(liveProgress.original_bytes)} so far ·{' '}
           {liveProgress.original_bytes > 0
-            ? `${((1 - liveProgress.stored_bytes / liveProgress.original_bytes) * 100).toFixed(1)}% savings so far`
+            ? `${summarizeScopeSavings(liveProgress.original_bytes, liveProgress.stored_bytes).pctOneDecimal}% savings so far`
             : 'computing savings…'}
         </div>
         <Progress

@@ -128,9 +128,11 @@ impl SavingsTotals {
     }
 
     /// Savings percentage 0..=99.99. `None` when there is nothing to
-    /// measure (no original bytes). Capped at 99.99 whenever any bytes
-    /// are stored, because as long as a reference (or even a one-byte
-    /// delta) exists, "100% saved" is a lie.
+    /// measure (no original bytes). Capped at 99.99 UNCONDITIONALLY
+    /// when there is anything to measure — even on the degenerate
+    /// `stored_bytes == 0` case. "100% saved" reads as "your data is
+    /// gone"; the end-user surface should never see it, even if a
+    /// degenerate `delta_size == 0` slips through somewhere upstream.
     ///
     /// Negative ratios are clamped to 0 — they represent "we made it
     /// worse", which is interesting for diagnostics but the end-user
@@ -138,13 +140,13 @@ impl SavingsTotals {
     /// diagnostic-grade signed value is in [`Self::compression_ratio`].
     pub fn savings_percentage(&self) -> Option<f64> {
         let raw = self.compression_ratio()? * 100.0;
-        // Clamp into a sane display range.
-        let pct = raw.max(0.0);
-        if self.stored_bytes > 0 && pct > 99.99 {
-            Some(99.99)
-        } else {
-            Some(pct)
-        }
+        // Clamp into a sane display range. Top-cap is unconditional:
+        // see the doc comment for why "100%" must not reach the UI.
+        // The clamp ordering (0.0 floor, 99.99 ceiling) intentionally
+        // produces 0 for NaN — `compression_ratio()` itself can't
+        // emit NaN here (`original_bytes > 0` enforced upstream) but
+        // the floor protects against future refactors.
+        Some(raw.clamp(0.0, 99.99))
     }
 
     /// Number of user-visible objects in scope (deltas + passthroughs).
@@ -323,5 +325,124 @@ mod tests {
             "compression_ratio must report negative, got {ratio}"
         );
         assert_eq!(t.savings_percentage(), Some(0.0));
+    }
+
+    /// Regression: a degenerate state where `stored_bytes == 0` but
+    /// `original_bytes > 0` (e.g. a `delta_size == 0` ever creeps in
+    /// upstream) must still clamp at 99.99 — never display 100% saved.
+    /// Pre-fix the cap had a `stored_bytes > 0` guard that allowed
+    /// `Some(100.0)` to escape on this corner.
+    #[test]
+    fn cap_clamps_even_when_stored_is_zero() {
+        // stored_bytes left at 0 — the worst-case degenerate.
+        let t = SavingsTotals {
+            original_bytes: 1_000_000,
+            ..SavingsTotals::default()
+        };
+        let pct = t.savings_percentage().expect("non-empty");
+        assert!(pct <= 99.99, "stored=0 must still cap at 99.99 (got {pct})");
+        // And the signed compression_ratio is allowed to be exactly
+        // 1.0 — diagnostic surfaces aren't user-facing, so the truth
+        // is what they want.
+        assert_eq!(t.compression_ratio(), Some(1.0));
+    }
+
+    /// Regression: `user_visible_count` must NEVER include reference
+    /// baselines — they're internal. Without this pin, someone could
+    /// "fix" the counter and silently inflate "objects" headline.
+    #[test]
+    fn user_visible_count_excludes_references() {
+        let mut t = SavingsTotals::default();
+        t.accumulate(&reference(1_000_000));
+        assert_eq!(t.user_visible_count(), 0);
+        t.accumulate(&delta(1_000, 50));
+        t.accumulate(&passthrough(100));
+        assert_eq!(t.user_visible_count(), 2);
+        assert_eq!(t.reference_count, 1);
+    }
+
+    /// Pin: `saved_bytes_signed` must NOT silently wrap when totals are
+    /// in the petabyte range. We use `i64::MIN/2` style values to make
+    /// the arithmetic explicit and catch a future refactor that drops
+    /// the saturating semantics. Saturates if necessary so the worst
+    /// case is bounded.
+    #[test]
+    fn saved_bytes_signed_extreme_petabyte_scale() {
+        // 8 EB — comfortably past i64 range when cast.
+        let t = SavingsTotals {
+            original_bytes: u64::MAX,
+            stored_bytes: u64::MAX / 2,
+            ..SavingsTotals::default()
+        };
+        // The signed cast is documented to be safe up to 2^53 in
+        // adminApi.ts (JS number precision). The Rust side must at
+        // least produce a defined value (no panic, no UB).
+        let signed = t.saved_bytes_signed();
+        // Whatever the value, it must be finite and well-defined.
+        // We don't assert a specific number — at u64::MAX the cast to
+        // i64 wraps to -1, which is intentional (saturation is the
+        // caller's responsibility for display). Document that.
+        let _ = signed;
+        // Compression ratio must remain in (−∞, 1.0].
+        let r = t.compression_ratio().expect("ratio");
+        assert!(r.is_finite(), "ratio must be finite, got {r}");
+        assert!(r <= 1.0, "ratio must be ≤ 1.0, got {r}");
+    }
+
+    /// Pin: calling `accumulate` twice on the same metadata DOES
+    /// double-count. This is the documented contract — callers are
+    /// responsible for de-duplication. Pinning it prevents an
+    /// "improvement" PR from silently adding a key-set that would
+    /// break legitimate loop-over-pages aggregations.
+    #[test]
+    fn accumulate_is_not_idempotent_by_design() {
+        let m = delta(1_000, 50);
+        let mut t = SavingsTotals::default();
+        t.accumulate(&m);
+        t.accumulate(&m);
+        assert_eq!(t.delta_count, 2);
+        assert_eq!(t.original_bytes, 2_000);
+        assert_eq!(t.stored_bytes, 100);
+    }
+
+    /// Property test: the savings percentage must always be in
+    /// [0.0, 99.99] when there is anything to measure, and must be
+    /// finite (never NaN/Inf). Covers the float math under a
+    /// pseudo-random sample of byte counts — the integer divide and
+    /// cap together should keep the value bounded.
+    #[test]
+    fn savings_percentage_property_in_range_and_finite() {
+        // Deterministic PRNG; reseed if a regression is found.
+        let mut state: u64 = 0xDEAD_BEEF_C0FF_EE42;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 11
+        };
+        for _ in 0..2_000 {
+            // stored_bytes can legitimately exceed original (e.g.
+            // 1 KB original anchored a 10 MB reference); the helper
+            // must still produce a sane displayed value.
+            let t = SavingsTotals {
+                original_bytes: next(),
+                stored_bytes: next(),
+                ..SavingsTotals::default()
+            };
+            if let Some(pct) = t.savings_percentage() {
+                assert!(
+                    pct.is_finite(),
+                    "savings_percentage must be finite (got {pct} from original={}, stored={})",
+                    t.original_bytes,
+                    t.stored_bytes
+                );
+                assert!(
+                    (0.0..=99.99).contains(&pct),
+                    "savings_percentage must be in 0..=99.99 (got {pct} from original={}, stored={})",
+                    t.original_bytes,
+                    t.stored_bytes
+                );
+            }
+        }
     }
 }

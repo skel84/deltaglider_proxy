@@ -25,8 +25,21 @@
  * / `compression_ratio` fields when they need to show the negative.
  */
 export interface ScopeSavingsView {
-  /** Percent savings 0..=99 (integer; floor of the raw value). */
+  /**
+   * Percent savings 0..=99 (integer; floor of the raw value). The
+   * canonical compact display number for the breadcrumb chip and any
+   * UI that has very little real estate. Surfaces with more pixels
+   * (dashboard hero, analytics) should render `pctOneDecimal` so the
+   * extra precision matches the larger numerals.
+   */
   pct: number;
+  /**
+   * Percent savings 0..=99.9 with one decimal place (e.g. 89.6). Same
+   * underlying value as `pct`, rendered with one extra digit for
+   * surfaces with room to display it. Capping rule is identical
+   * (99.9 is the max — never 100.0).
+   */
+  pctOneDecimal: number;
   /** Saturating bytes saved — never negative. */
   savedBytes: number;
   /** True when there's no measurable scope (no original bytes). */
@@ -40,8 +53,8 @@ export interface ScopeSavingsView {
  *
  *   - `originalBytes <= 0`           → `empty: true`, pct=0, savedBytes=0
  *   - `storedBytes >= originalBytes` → `pct: 0` (no savings to brag about)
- *   - raw pct >= 99 with stored > 0  → clamped to 99
- *   - otherwise                      → `Math.floor(rawPct)`
+ *   - raw pct >= 99 with stored > 0  → clamped to 99 (and 99.9 for one-decimal)
+ *   - otherwise                      → `Math.floor(rawPct)` / `floor*10/10`
  *
  * The floor-instead-of-toFixed choice prevents 99.95% → "100%" rounding
  * (the bug that surfaced the whole DRY problem).
@@ -51,13 +64,21 @@ export function summarizeScopeSavings(
   storedBytes: number,
 ): ScopeSavingsView {
   if (originalBytes <= 0) {
-    return { pct: 0, savedBytes: 0, empty: true };
+    return { pct: 0, pctOneDecimal: 0, savedBytes: 0, empty: true };
   }
   const saved = Math.max(0, originalBytes - storedBytes);
   const rawPct = (saved / originalBytes) * 100;
+  // Integer cap — what the chip uses.
   const pct =
     storedBytes > 0 && rawPct > 99 ? 99 : Math.max(0, Math.floor(rawPct));
-  return { pct, savedBytes: saved, empty: false };
+  // One-decimal cap — same data, more pixels of resolution. We FLOOR
+  // to one decimal to keep the "never 100%" contract: a raw 99.95
+  // displays as 99.9, not 100.0. `Math.floor(x * 10) / 10` is the
+  // deterministic one-decimal floor.
+  const oneDecimalFloor = Math.floor(Math.max(0, rawPct) * 10) / 10;
+  const pctOneDecimal =
+    storedBytes > 0 && oneDecimalFloor > 99.9 ? 99.9 : oneDecimalFloor;
+  return { pct, pctOneDecimal, savedBytes: saved, empty: false };
 }
 
 /**
