@@ -148,7 +148,11 @@ pub struct StatsResult {
     pub deltaspace_health: DeltaspaceHealth,
 }
 
-const CACHE_VERSION: &str = "1.0";
+// Bumped from "1.0" → "2.0" when reference bytes started counting
+// toward `total_stored_bytes`. Old cache entries undercount by the
+// reference total and produce headline numbers that lie; drop them on
+// load so the next CLI invocation rescans honestly.
+const CACHE_VERSION: &str = "2.0";
 
 /// On-bucket cache shape. Compatible with the Python toolchain at the
 /// document level (`version`/`mode`/`computed_at`/`validation`/`stats`),
@@ -171,21 +175,25 @@ struct Validation {
 /// Pure accumulator. One pass through every `(key, metadata)`
 /// the engine returns; the caller rolls deltaspace verdicts at the
 /// end via `into_result`.
+///
+/// Savings math is delegated to [`crate::deltaglider::SavingsTotals`];
+/// `StatsAcc` only owns the *per-deltaspace efficiency classification*
+/// (the `spaces` map) on top of that. The CLI MUST feed both user-
+/// visible objects (via `list_objects`) AND every deltaspace
+/// `reference.bin` (via `engine.list_deltaspace_references`) into
+/// `record`; the centralized totals module sums them honestly, so
+/// "savings_percentage" is what you'd actually save by uninstalling
+/// the proxy and stuffing the originals back on disk.
 #[derive(Debug, Default)]
 pub(crate) struct StatsAcc {
-    pub total_objects: u64,
-    pub total_original_bytes: u64,
-    pub total_stored_bytes: u64,
+    pub totals: crate::deltaglider::SavingsTotals,
     /// deltaspace prefix → (reference_size, delta_size_list)
     pub spaces: HashMap<String, (Option<u64>, Vec<u64>)>,
 }
 
 impl StatsAcc {
     pub fn record(&mut self, key: &str, meta: &FileMetadata) {
-        self.total_objects += 1;
-        self.total_original_bytes = self.total_original_bytes.saturating_add(meta.file_size);
-        let stored = stored_size_of(meta);
-        self.total_stored_bytes = self.total_stored_bytes.saturating_add(stored);
+        self.totals.accumulate(meta);
 
         let deltaspace = deltaspace_id_for_key(key);
         match &meta.storage_info {
@@ -199,7 +207,7 @@ impl StatsAcc {
             }
             StorageInfo::Passthrough => {
                 // Doesn't contribute to a deltaspace verdict. Still
-                // counted in total_objects / bytes above.
+                // counted in `totals` above.
             }
         }
     }
@@ -219,23 +227,41 @@ impl StatsAcc {
                 }
             }
         }
-        let savings = if self.total_original_bytes == 0 {
-            0.0
-        } else {
-            let saved = self
-                .total_original_bytes
-                .saturating_sub(self.total_stored_bytes) as f64;
-            (saved / self.total_original_bytes as f64) * 100.0
-        };
         StatsResult {
             bucket: bucket.to_string(),
-            total_objects: self.total_objects,
-            total_original_bytes: self.total_original_bytes,
-            total_stored_bytes: self.total_stored_bytes,
-            savings_percentage: savings,
+            total_objects: self.totals.user_visible_count(),
+            total_original_bytes: self.totals.original_bytes,
+            total_stored_bytes: self.totals.stored_bytes,
+            savings_percentage: self.totals.savings_percentage().unwrap_or(0.0),
             deltaspace_health: health,
         }
     }
+}
+
+/// Convenience: after a list_objects-driven scan, fold in every
+/// `reference.bin` under the bucket so the totals reflect on-disk cost.
+/// MUST be called before `into_result` for honest numbers.
+async fn fold_in_references(
+    acc: &mut StatsAcc,
+    engine: &DynEngine,
+    bucket: &str,
+) -> Result<(), i32> {
+    let refs = engine
+        .list_deltaspace_references(bucket, "")
+        .await
+        .map_err(|e| {
+            eprintln!("warning: failed to enumerate references for {bucket}: {e}");
+            cli_exit::EXIT_HTTP
+        })?;
+    for meta in &refs {
+        // The reference key shape is `<prefix>reference.bin` — we use
+        // the prefix as the deltaspace id elsewhere; here we just need
+        // the per-object savings contribution, so any key in the right
+        // deltaspace works. The metadata.storage_info already says
+        // Reference, so the SavingsTotals accumulator handles the rest.
+        acc.record("__internal/reference.bin", meta);
+    }
+    Ok(())
 }
 
 /// Pure: pick the deltaspace identifier from an object key. We use
@@ -249,12 +275,14 @@ pub(crate) fn deltaspace_id_for_key(key: &str) -> String {
 }
 
 /// Pure: stored-on-disk bytes for one object's `FileMetadata`.
+///
+/// Thin alias for [`FileMetadata::stored_size`]. Kept as a free
+/// function only because the existing CLI tests (and the cache-
+/// validation listing) refer to it by name; the math itself lives on
+/// `FileMetadata` so a stored-size definition exists in exactly one
+/// place.
 pub(crate) fn stored_size_of(meta: &FileMetadata) -> u64 {
-    match &meta.storage_info {
-        // Reference + Passthrough: stored bytes == file bytes
-        StorageInfo::Reference { .. } | StorageInfo::Passthrough => meta.file_size,
-        StorageInfo::Delta { delta_size, .. } => *delta_size,
-    }
+    meta.stored_size()
 }
 
 /// Pure: cache key for a given mode. Mirrors the Python toolchain so
@@ -379,9 +407,13 @@ async fn compute_stats(
         }
     }
 
-    // Phase 3: compute fresh stats per mode.
+    // Phase 3: compute fresh stats per mode. Every mode delegates the
+    // savings math to `SavingsTotals` (see `StatsAcc::into_result`) and
+    // folds `reference.bin` bytes into `total_stored_bytes` — without
+    // that, the headline number lies by a full reference per
+    // deltaspace.
     let result = match mode {
-        Mode::Quick => quick_from_listing(bucket, &listing),
+        Mode::Quick => quick_scan(engine, bucket, &listing).await?,
         Mode::Sampled => sampled_from_listing(engine, bucket, &listing).await?,
         Mode::Detailed => detailed_scan(engine, bucket).await?,
     };
@@ -450,14 +482,27 @@ async fn list_for_validation(engine: &DynEngine, bucket: &str) -> Result<BucketL
 }
 
 /// Quick mode: trust the listing's `FileMetadata` (which has cached
-/// originals where available, stored sizes otherwise). No additional
-/// I/O. Best-effort numbers for cold buckets.
-fn quick_from_listing(bucket: &str, listing: &BucketListing) -> StatsResult {
+/// originals where available, stored sizes otherwise). The listing
+/// itself hides references; the caller MUST fold them in afterward
+/// via `fold_in_references` so `total_stored_bytes` reflects on-disk
+/// cost honestly. We expose `quick_from_listing_unfolded` as a pure
+/// helper for unit tests; `quick_scan` below is the real entry point.
+fn quick_from_listing_unfolded(listing: &BucketListing) -> StatsAcc {
     let mut acc = StatsAcc::default();
     for (key, meta) in &listing.entries {
         acc.record(key, meta);
     }
-    acc.into_result(bucket)
+    acc
+}
+
+async fn quick_scan(
+    engine: &DynEngine,
+    bucket: &str,
+    listing: &BucketListing,
+) -> Result<StatsResult, i32> {
+    let mut acc = quick_from_listing_unfolded(listing);
+    fold_in_references(&mut acc, engine, bucket).await?;
+    Ok(acc.into_result(bucket))
 }
 
 /// Sampled mode: HEAD one object per deltaspace prefix, then project
@@ -517,6 +562,7 @@ async fn sampled_from_listing(
         acc.record(key, &projected);
     }
 
+    fold_in_references(&mut acc, engine, bucket).await?;
     Ok(acc.into_result(bucket))
 }
 
@@ -547,6 +593,7 @@ async fn detailed_scan(engine: &DynEngine, bucket: &str) -> Result<StatsResult, 
             break;
         }
     }
+    fold_in_references(&mut acc, engine, bucket).await?;
     Ok(acc.into_result(bucket))
 }
 
@@ -692,9 +739,23 @@ mod tests {
             );
         }
         let r = acc.into_result("test");
-        assert_eq!(r.total_objects, 3);
+        // 2 deltas — the reference is internal and not counted as a
+        // user-visible object (previously it leaked into total_objects
+        // and exaggerated user-facing counts).
+        assert_eq!(r.total_objects, 2);
         assert_eq!(r.deltaspace_health.excellent, 1);
-        assert!(r.savings_percentage > 50.0, "got {}%", r.savings_percentage);
+        // Stored = 200 KB (reference) + 2 × 1 KB (deltas) = 202 KB.
+        // Original (user-visible) = 2 × 200 KB = 400 KB. Savings ≈ 49.5%.
+        // The reference is REAL cost — without it, "savings" looks like
+        // 99% but lies. This is the bug the centralization closes.
+        assert!(
+            (49.0..=51.0).contains(&r.savings_percentage),
+            "expected ~50% (200KB ref + 2×1KB delta vs 2×200KB original); got {}%",
+            r.savings_percentage,
+        );
+        // Reference + delta totals add up to on-disk cost.
+        assert_eq!(r.total_stored_bytes, 200_000 + 2 * 1_000);
+        assert_eq!(r.total_original_bytes, 2 * 200_000);
     }
 
     #[test]

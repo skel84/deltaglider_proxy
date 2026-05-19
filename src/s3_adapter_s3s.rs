@@ -1635,7 +1635,7 @@ fn add_storage_debug_headers(headers: &mut axum::http::HeaderMap, meta: &FileMet
     if let Ok(value) = axum::http::HeaderValue::from_str(meta.storage_info.label()) {
         headers.insert("x-amz-storage-type", value);
     }
-    let stored_size = meta.delta_size().unwrap_or(meta.file_size);
+    let stored_size = meta.stored_size();
     if let Ok(value) = axum::http::HeaderValue::from_str(&stored_size.to_string()) {
         headers.insert("x-deltaglider-stored-size", value);
     }

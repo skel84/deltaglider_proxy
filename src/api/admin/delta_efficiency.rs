@@ -505,22 +505,38 @@ fn build_report_for_prefix(
         min_deltas,
     )?;
 
-    let total_delta: u64 = partition.delta_sizes.iter().sum();
     let median = median_u64(&partition.delta_sizes);
     let max_delta = partition.delta_sizes.iter().copied().max().unwrap_or(0);
-    let stored_bytes = partition
-        .reference_bytes
-        .unwrap_or(0)
-        .saturating_add(total_delta);
-    // Savings is meaningful only with true originals. Under
-    // `originals_estimated`, the UI shouldn't display this; we zero it
-    // out and the `original_size_estimated` flag on the report flags
-    // the row.
-    let savings = if originals_estimated {
+    // Route the byte totals through the canonical accumulator so the
+    // sums here stay in lockstep with bucket_scan, cli stats, and the
+    // SPA chip. We pass the scan slice in directly — `SavingsTotals`
+    // handles passthrough / reference / delta bookkeeping the same way
+    // it does for every other consumer, and we crucially do NOT double-
+    // count delta `file_size` as "original" under lite mode (where
+    // `file_size == delta_size` for deltas). That special case is
+    // expressed by clearing original_bytes here, not by another inline
+    // formula.
+    let mut totals = crate::deltaglider::SavingsTotals::default();
+    for m in scan {
+        totals.accumulate(m);
+    }
+    if originals_estimated {
+        // Lite mode: delta `file_size` is actually on-disk size, not
+        // the original. The accumulator adds it to original_bytes —
+        // strip the contribution so the savings figure isn't a lie.
+        // Passthrough originals stay (their file_size IS the original).
+        totals.original_bytes = totals
+            .original_bytes
+            .saturating_sub(totals.delta_stored_bytes);
+    }
+    let savings_bytes = if originals_estimated {
+        // Without true originals, savings is unknowable. Sentinel "0"
+        // (not negative) is what the UI expects to suppress the cell.
         0
     } else {
-        partition.total_original as i64 - stored_bytes as i64
+        totals.saved_bytes_signed()
     };
+    let total_delta = totals.delta_stored_bytes;
     let ratio_median = ratio_or_none(median, partition.reference_bytes);
 
     Some(DeltaspaceReport {
@@ -530,10 +546,10 @@ fn build_report_for_prefix(
         passthrough: partition.passthrough_count,
         reference_bytes: partition.reference_bytes,
         total_delta_bytes: total_delta,
-        total_original_bytes: partition.total_original,
+        total_original_bytes: totals.original_bytes,
         median_delta_bytes: median,
         max_delta_bytes: max_delta,
-        savings_bytes: savings,
+        savings_bytes,
         efficiency,
         ratio_median,
         original_size_estimated: originals_estimated,
@@ -769,57 +785,36 @@ pub async fn verify_delta_efficiency(
 ///
 /// Separated so it can be unit-tested without standing up a backend.
 fn build_verify_response(bucket: &str, prefix: &str, scan: &[FileMetadata]) -> VerifyResponse {
-    let mut reference_bytes: Option<u64> = None;
+    // Per-delta diagnostic rows: keep ratio computed per-object so the
+    // UI can sort + show percentiles. The TOTALS, however, route
+    // through the canonical SavingsTotals accumulator — no separate
+    // formula lives here.
     let mut per_delta: Vec<VerifiedDelta> = Vec::new();
-    let mut passthrough_count: usize = 0;
-    let mut passthrough_bytes: u64 = 0;
-    let mut total_original: u64 = 0;
-    let mut total_delta_stored: u64 = 0;
-
+    let mut reference_bytes: Option<u64> = None;
+    let mut totals = crate::deltaglider::SavingsTotals::default();
     for m in scan {
-        match &m.storage_info {
-            StorageInfo::Reference { .. } => {
-                reference_bytes = Some(m.file_size);
-            }
-            StorageInfo::Delta { delta_size, .. } => {
-                let original = m.file_size;
-                let delta = *delta_size;
-                total_original = total_original.saturating_add(original);
-                total_delta_stored = total_delta_stored.saturating_add(delta);
-                let ratio = if original == 0 {
-                    // Pathological — a 0-byte original. Treat as
-                    // ratio 0 so it doesn't blow out percentile sorts.
-                    0.0
-                } else {
-                    delta as f64 / original as f64
-                };
-                per_delta.push(VerifiedDelta {
-                    key: m.original_name.clone(),
-                    original_size: original,
-                    delta_size: delta,
-                    ratio,
-                });
-            }
-            StorageInfo::Passthrough => {
-                passthrough_count += 1;
-                passthrough_bytes = passthrough_bytes.saturating_add(m.file_size);
-                total_original = total_original.saturating_add(m.file_size);
-            }
+        totals.accumulate(m);
+        if let StorageInfo::Reference { .. } = &m.storage_info {
+            reference_bytes = Some(m.file_size);
+        }
+        if let StorageInfo::Delta { delta_size, .. } = &m.storage_info {
+            let original = m.file_size;
+            let delta = *delta_size;
+            let ratio = if original == 0 {
+                // Pathological — a 0-byte original. Treat as ratio 0
+                // so it doesn't blow out percentile sorts.
+                0.0
+            } else {
+                delta as f64 / original as f64
+            };
+            per_delta.push(VerifiedDelta {
+                key: m.original_name.clone(),
+                original_size: original,
+                delta_size: delta,
+                ratio,
+            });
         }
     }
-
-    // Stored = reference (if present) + sum(delta_size) + passthrough
-    // bytes. Passthroughs cost their own size to store.
-    let total_stored = reference_bytes
-        .unwrap_or(0)
-        .saturating_add(total_delta_stored)
-        .saturating_add(passthrough_bytes);
-    let true_savings = total_original as i64 - total_stored as i64;
-    let compression_ratio = if total_original == 0 {
-        None
-    } else {
-        Some(1.0 - (total_stored as f64 / total_original as f64))
-    };
 
     // Sort per_delta by ratio ascending so the UI gets percentile
     // picks for free at indices [n*0.1], [n*0.5], [n*0.9].
@@ -834,11 +829,11 @@ fn build_verify_response(bucket: &str, prefix: &str, scan: &[FileMetadata]) -> V
         prefix: prefix.to_string(),
         reference_bytes,
         deltas: per_delta.len(),
-        passthrough_count,
-        total_original_bytes: total_original,
-        total_stored_bytes: total_stored,
-        true_savings_bytes: true_savings,
-        compression_ratio,
+        passthrough_count: totals.passthrough_count as usize,
+        total_original_bytes: totals.original_bytes,
+        total_stored_bytes: totals.stored_bytes,
+        true_savings_bytes: totals.saved_bytes_signed(),
+        compression_ratio: totals.compression_ratio(),
         per_delta,
     }
 }
@@ -1200,9 +1195,16 @@ mod tests {
         let report = build_report_for_prefix("bk", "p".into(), &scan, 3, false).expect("present");
         // Originals: 3 deltas × 10MB + 1 passthrough × 5MB = 35MB
         assert_eq!(report.total_original_bytes, 35_000_000);
-        // Stored = reference + sum(delta_size) = 10MB + 3×100KB = 10.3MB
-        // savings = 35MB - 10.3MB = ~24.7MB
-        assert_eq!(report.savings_bytes, 35_000_000 - (10_000_000 + 300_000));
+        // Stored = reference + sum(delta_size) + passthrough = 10MB + 3×100KB + 5MB = 15.3MB
+        // (Passthrough bytes are stored as-is — they MUST be in stored_bytes;
+        // pre-DRY-centralization fix, `build_report_for_prefix` silently
+        // omitted them and `build_verify_response` correctly included them,
+        // which is the divergence this consolidation closes.)
+        // savings = 35MB - 15.3MB = 19.7MB
+        assert_eq!(
+            report.savings_bytes,
+            35_000_000 - (10_000_000 + 300_000 + 5_000_000)
+        );
         assert!(!report.original_size_estimated);
     }
 

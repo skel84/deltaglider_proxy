@@ -159,7 +159,7 @@ pub fn debug_headers_enabled() -> bool {
 
 /// Build response headers for an object including DeltaGlider custom metadata.
 fn build_object_headers(metadata: &FileMetadata) -> HeaderMap {
-    let stored_size = metadata.delta_size().unwrap_or(metadata.file_size);
+    let stored_size = metadata.stored_size();
     let content_type = metadata
         .content_type
         .clone()

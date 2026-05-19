@@ -562,6 +562,7 @@ export default function App() {
               onSearchChange={s3.setSearchQuery}
               refreshing={s3.refreshing}
               accountMenu={accountMenu(true)}
+              deltaSummary={view === 'browser' ? s3.deltaSummary : null}
             />
           )}
 

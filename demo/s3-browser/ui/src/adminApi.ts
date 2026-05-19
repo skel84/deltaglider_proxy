@@ -662,6 +662,51 @@ export async function getPrefixUsage(bucket: string, prefix: string): Promise<Us
   return safeJson(res);
 }
 
+/**
+ * Per-prefix delta-compression savings, reference-aware.
+ *
+ * Backed by `src/api/admin/savings.rs` + the central `SavingsTotals`
+ * accumulator. Unlike a client-side aggregation over `headCache`, this
+ * includes the on-disk `reference.bin` cost in `stored_bytes`, so the
+ * chip never displays "100% saved" while a reference still lives on
+ * disk. Server-side cached for 30 s.
+ */
+export interface PrefixSavingsTotals {
+  original_bytes: number;
+  stored_bytes: number;
+  reference_bytes: number;
+  delta_stored_bytes: number;
+  passthrough_bytes: number;
+  reference_count: number;
+  delta_count: number;
+  passthrough_count: number;
+}
+
+export interface PrefixSavingsResponse {
+  bucket: string;
+  prefix: string;
+  totals: PrefixSavingsTotals;
+  /** 0..=99.99, or null when there's nothing measurable under the prefix. */
+  savings_percentage: number | null;
+  truncated: boolean;
+  computed_at: string;
+}
+
+export async function getPrefixSavings(
+  bucket: string,
+  prefix: string,
+): Promise<PrefixSavingsResponse | null> {
+  const params = new URLSearchParams({ bucket, prefix });
+  const res = await adminFetch(`/api/admin/deltaspace/savings?${params}`);
+  if (!res.ok) {
+    // 401/403 (no admin session) is expected on bootstrap-only S3
+    // browsers — we silently degrade and the chip stays hidden.
+    if (res.status === 401 || res.status === 403) return null;
+    await throwApiError(res, 'Prefix savings query');
+  }
+  return safeJson(res);
+}
+
 // === Full Backup / Restore ===
 //
 // Since v0.8.4 the default shape is a zip containing config.yaml +

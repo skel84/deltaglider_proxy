@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { uploadObject, type UploadTelemetry } from './s3client';
+import { summarizeObjectSavings } from './savings';
 import { clampPercent, type UploadStatus } from './uploadTelemetry';
 
 export interface UploadQueueItem {
@@ -270,11 +271,12 @@ export default function useUploadQueue(destination: string) {
     };
   }, [queue]);
 
-  const rawSavings = stats.originalSize > 0
-    ? Math.max(0, ((stats.originalSize - stats.storedSize) / stats.originalSize) * 100)
-    : 0;
-  // Cap at 99.9% unless stored size is truly zero (avoid misleading "100.0%")
-  const savings = rawSavings >= 100 && stats.storedSize !== 0 ? 99.9 : rawSavings;
+  // All "savings %" math goes through `src/savings.ts` — see that
+  // file's header for why we don't roll our own here. The upload
+  // batch is conceptually an aggregate over completed objects so it
+  // uses the OBJECT view (decimal cap at 99.9), not the scope view
+  // (integer cap at 99) that the breadcrumb chip uses.
+  const savings = summarizeObjectSavings(stats.originalSize, stats.storedSize).pct;
 
   return {
     queue,

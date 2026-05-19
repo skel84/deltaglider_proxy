@@ -15,6 +15,7 @@ mod groups;
 mod lifecycle;
 pub(crate) mod objects;
 pub(crate) mod replication;
+mod savings;
 mod scanner;
 pub(crate) mod users;
 
@@ -84,6 +85,7 @@ pub use replication::{
     list_rules as replication_list_rules, pause as replication_pause, resume as replication_resume,
     run_now as replication_run_now,
 };
+pub use savings::{get_savings, SavingsCache};
 pub use scanner::{get_usage, migrate_legacy, scan_usage, ScanUsageRequest, UsageQuery};
 pub use users::{
     clone_user, create_user, delete_user, get_canned_policies, iam_version, list_users,
@@ -124,6 +126,10 @@ pub struct AdminState {
     /// the honest dashboard headline numbers (total objects, total
     /// bytes, savings %).
     pub bucket_scanner: Arc<bucket_scan::BucketScanner>,
+    /// Per-prefix savings cache for the SPA chip + any other UI that
+    /// asks "how much did this prefix save?". 30 s TTL — see
+    /// `savings.rs`.
+    pub savings_cache: Arc<savings::SavingsCache>,
     /// Per-IP rate limiter for login endpoints and auth failures.
     pub rate_limiter: RateLimiter,
     /// S3 sync for the config database (None if DGP_CONFIG_SYNC_BUCKET is not set).

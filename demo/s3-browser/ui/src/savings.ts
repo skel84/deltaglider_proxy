@@ -1,0 +1,95 @@
+// Single source of truth for delta-compression savings math on the
+// client. Mirrors the Rust module at `src/deltaglider/savings.rs`.
+//
+// Why this file exists: pre-centralisation the SPA had THREE inline
+// "savings" formulas (DeltaSavingsChip, useUploadQueue, InspectorPanel),
+// each rolling their own cap (99 in one, 99.9 in two others) and their
+// own zero-bytes edge handling. The result was that the same "100%
+// saved" lie or "−12% saved" looked different in each surface. Every
+// number a user reads must come from one of the two helpers below.
+//
+// Server-driven numbers (per-prefix / per-bucket) should arrive
+// pre-computed in `PrefixSavingsResponse` from `/_/api/admin/...`. The
+// helpers here handle the per-object / per-batch cases where the
+// browser computes locally because it already has both sides
+// (originalSize + storedSize). They MUST NOT be used to roll up a
+// prefix client-side — see `getPrefixSavings` for that.
+
+/**
+ * Per-scope savings summary (suitable for "we just saved you ~X%").
+ * Capped at 99 so the UI never reads "100% saved" while bytes are on
+ * disk; clamped to 0 on the negative side (a single delta against a
+ * larger reference can produce a negative diff, but end-user surfaces
+ * should show "no savings yet", not "−12%"). The diagnostic admin
+ * surfaces have their own server-computed signed `true_savings_bytes`
+ * / `compression_ratio` fields when they need to show the negative.
+ */
+export interface ScopeSavingsView {
+  /** Percent savings 0..=99 (integer; floor of the raw value). */
+  pct: number;
+  /** Saturating bytes saved — never negative. */
+  savedBytes: number;
+  /** True when there's no measurable scope (no original bytes). */
+  empty: boolean;
+}
+
+/**
+ * Compute the per-scope savings view from raw byte totals. Same shape
+ * as the Rust `SavingsTotals::savings_percentage` + `saved_bytes`.
+ * Stays deterministic on edge cases:
+ *
+ *   - `originalBytes <= 0`           → `empty: true`, pct=0, savedBytes=0
+ *   - `storedBytes >= originalBytes` → `pct: 0` (no savings to brag about)
+ *   - raw pct >= 99 with stored > 0  → clamped to 99
+ *   - otherwise                      → `Math.floor(rawPct)`
+ *
+ * The floor-instead-of-toFixed choice prevents 99.95% → "100%" rounding
+ * (the bug that surfaced the whole DRY problem).
+ */
+export function summarizeScopeSavings(
+  originalBytes: number,
+  storedBytes: number,
+): ScopeSavingsView {
+  if (originalBytes <= 0) {
+    return { pct: 0, savedBytes: 0, empty: true };
+  }
+  const saved = Math.max(0, originalBytes - storedBytes);
+  const rawPct = (saved / originalBytes) * 100;
+  const pct =
+    storedBytes > 0 && rawPct > 99 ? 99 : Math.max(0, Math.floor(rawPct));
+  return { pct, savedBytes: saved, empty: false };
+}
+
+/**
+ * The per-OBJECT savings view, intended for the single-row InspectorPanel
+ * + the post-upload batch summary in UploadPage. Differs from
+ * `summarizeScopeSavings` in two ways that matter to the user:
+ *
+ *   - `pct` is rendered as a fractional number (one decimal place) and
+ *     capped at 99.9 — for a single object users expect to see "99.9%
+ *     saved" on tiny deltas; the chip-style integer cap is for
+ *     aggregations across many objects.
+ *   - `storedSize == null` (HEAD not yet resolved) returns `empty:true`
+ *     so the UI can show a spinner.
+ */
+export interface ObjectSavingsView {
+  pct: number;
+  savedBytes: number;
+  empty: boolean;
+}
+
+export function summarizeObjectSavings(
+  originalSize: number,
+  storedSize: number | null | undefined,
+): ObjectSavingsView {
+  if (storedSize == null || originalSize <= 0) {
+    return { pct: 0, savedBytes: 0, empty: true };
+  }
+  const saved = Math.max(0, originalSize - storedSize);
+  const rawPct = (saved / originalSize) * 100;
+  // Cap at 99.9 unless the stored size is *literally* 0 — only then
+  // is 100% honest. For everything else the reference and/or non-zero
+  // delta still consumes bytes.
+  const pct = rawPct >= 100 && storedSize !== 0 ? 99.9 : Math.max(0, rawPct);
+  return { pct, savedBytes: saved, empty: false };
+}

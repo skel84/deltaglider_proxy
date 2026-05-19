@@ -505,6 +505,28 @@ impl FileMetadata {
         }
     }
 
+    /// On-disk bytes occupied by this single object. The single canonical
+    /// per-object accessor — all "how big is this thing on disk" callers
+    /// must route through here so a stored-size definition lives in
+    /// exactly one place.
+    ///
+    /// Semantics by storage class:
+    ///   * `Delta`       → `delta_size` (the `.delta` file on disk)
+    ///   * `Reference`   → `file_size` (the `reference.bin` itself)
+    ///   * `Passthrough` → `file_size` (stored as-is)
+    ///
+    /// Note: `Reference` objects are NOT in the user-visible listing —
+    /// callers that fold references into a per-scope total must source
+    /// them via [`engine::list_deltaspace_references`], not from a normal
+    /// `list_objects` walk. See `src/deltaglider/savings.rs` for the
+    /// scope-level accumulator that ties this together.
+    pub fn stored_size(&self) -> u64 {
+        match &self.storage_info {
+            StorageInfo::Delta { delta_size, .. } => *delta_size,
+            StorageInfo::Reference { .. } | StorageInfo::Passthrough => self.file_size,
+        }
+    }
+
     /// Get compression ratio if this is a delta file
     pub fn compression_ratio(&self) -> Option<f32> {
         match &self.storage_info {

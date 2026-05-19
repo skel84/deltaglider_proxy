@@ -4,6 +4,7 @@ import { DownloadOutlined, DeleteOutlined, LinkOutlined, FileOutlined, CloseOutl
 import { deleteObject, downloadObject, getPresignedUrl, getObjectUrl, headObject, getBucket } from '../s3client';
 import { GlobalOutlined } from '@ant-design/icons';
 import { formatBytes } from '../utils';
+import { summarizeObjectSavings } from '../savings';
 import type { S3Object } from '../types';
 import { useColors } from '../ThemeContext';
 import { getPreviewMode } from './filePreviewMode';
@@ -323,13 +324,14 @@ export default function InspectorPanel({
   // so object.size is NOT the original size for deltas. The HEAD metadata has the real original.
   const dgFileSize = headers['x-amz-meta-dg-file-size'];
   const originalSize = dgFileSize ? parseInt(dgFileSize, 10) : object.size;
-  const rawSavings =
-    storedSize != null && originalSize > 0
-      ? ((1 - storedSize / originalSize) * 100)
-      : 0;
-  // Cap at 99.9% unless stored size is truly zero (avoid misleading "100.0%")
-  const savings = rawSavings >= 100 && storedSize !== 0 ? 99.9 : rawSavings;
-  const savedBytes = storedSize != null ? Math.max(0, originalSize - storedSize) : 0;
+  // All "savings" math goes through `src/savings.ts` — the single
+  // client-side formula. Pre-centralisation the inline math here
+  // differed from useUploadQueue + DeltaSavingsChip in both cap (99.9 vs 99)
+  // and zero-handling, so two surfaces could report different "saved %"
+  // for the same data.
+  const objectSavings = summarizeObjectSavings(originalSize, storedSize);
+  const savings = objectSavings.pct;
+  const savedBytes = objectSavings.savedBytes;
 
   const dgMeta = getDgMetadata(headers);
   const userMeta = getUserMetadata(headers);

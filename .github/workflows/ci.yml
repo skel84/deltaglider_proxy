@@ -56,6 +56,20 @@ jobs:
       - name: Every .rs file must have SPDX-License-Identifier
         run: ./scripts/check-spdx-headers.sh
 
+  verify-savings-math-dry:
+    name: Savings math DRY guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Forbid inline savings math outside the central modules
+        run: ./scripts/check-savings-math.sh
+
   fmt:
     name: Rustfmt
     runs-on: k3s
@@ -355,6 +369,7 @@ jobs:
             --test lifecycle_test \
             --test quota_test \
             --test replication_test \
+            --test savings_test \
             -- --nocapture
       - name: Clean up MinIO test data
         if: always()

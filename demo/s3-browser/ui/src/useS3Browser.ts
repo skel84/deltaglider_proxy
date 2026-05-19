@@ -6,8 +6,10 @@ import {
   bulkDeleteObjects,
   bulkMoveObjects,
   bulkZipDownloadUrl,
+  getPrefixSavings,
   listAllUnderPrefix,
 } from './adminApi';
+import { type DeltaSummary, summaryFromResponse } from './deltaSummary';
 import { normalizeUiError } from './errorHandling';
 import useSelection from './useSelection';
 import { virtualWritableChildren } from './permissions';
@@ -377,6 +379,39 @@ export default function useS3Browser(options: UseS3BrowserOptions = {}) {
     }
   }, []);
 
+  // Per-prefix delta savings, fetched from the server-side endpoint that
+  // owns the canonical (reference-aware) math. Previously this was a
+  // client-side accumulator over `headCache`, which undercounted by one
+  // `reference.bin` per deltaspace and could read "100% saved" for ROR-
+  // shaped buckets. The server now owns the algorithm; the SPA just
+  // renders. See `src/api/admin/savings.rs` for the wire shape.
+  const [deltaSummary, setDeltaSummary] = useState<DeltaSummary | null>(null);
+  useEffect(() => {
+    if (!connected) return;
+    const bucket = getBucket();
+    if (!bucket) return;
+    let cancelled = false;
+    setDeltaSummary((prev) => (prev ? { ...prev, loading: true } : null));
+    getPrefixSavings(bucket, prefix)
+      .then((resp) => {
+        if (cancelled) return;
+        if (!resp) {
+          // Admin endpoint refused (no admin session) — keep the chip
+          // hidden rather than guessing client-side.
+          setDeltaSummary(null);
+          return;
+        }
+        setDeltaSummary(summaryFromResponse(resp));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDeltaSummary(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connected, prefix, refreshTrigger]);
+
   return {
     // Data
     objects: filteredObjects,
@@ -388,6 +423,7 @@ export default function useS3Browser(options: UseS3BrowserOptions = {}) {
     refreshing,
     isTruncated,
     headCache,
+    deltaSummary,
     connected,
     refreshTrigger,
     error,

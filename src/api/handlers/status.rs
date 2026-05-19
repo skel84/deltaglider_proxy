@@ -85,39 +85,46 @@ async fn compute_stats(
 
     const SCAN_LIMIT: u64 = 1000;
 
-    let mut total_objects: u64 = 0;
-    let mut total_original_size: u64 = 0;
-    let mut total_stored_size: u64 = 0;
+    // Single source of truth for the savings math — same accumulator
+    // the admin dashboard, CLI `stats`, and the SPA chip use. The
+    // legacy /_/stats endpoint must NOT inline its own formula or
+    // ignore reference.bin bytes (the original pre-centralisation
+    // bug here: deltas reported their tiny `delta_size` but the
+    // shared 18 MB reference behind them was never counted, so the
+    // headline read up to "100% saved" on busy ROR buckets).
+    let mut totals = crate::deltaglider::SavingsTotals::default();
     let mut truncated = false;
 
     'outer: for bucket in &buckets_to_scan {
-        let page = state
-            .engine
-            .load()
+        let engine = state.engine.load();
+        let page = engine
             .list_objects(bucket, "", None, SCAN_LIMIT as u32, None, true)
             .await?;
         for (_key, meta) in &page.objects {
-            total_objects += 1;
-            total_original_size += meta.file_size;
-            total_stored_size += meta.delta_size().unwrap_or(meta.file_size);
-            if total_objects >= SCAN_LIMIT {
+            totals.accumulate(meta);
+            if totals.user_visible_count() >= SCAN_LIMIT {
                 truncated = true;
                 break 'outer;
             }
         }
+        // Fold this bucket's references into stored_bytes — they're
+        // hidden from list_objects but they cost real disk. Failures
+        // for individual deltaspaces are warn-logged inside the helper
+        // and don't poison the scan.
+        for meta in engine
+            .list_deltaspace_references(bucket, "")
+            .await
+            .unwrap_or_default()
+        {
+            totals.accumulate(&meta);
+        }
     }
 
-    let savings_percentage = if total_original_size > 0 {
-        (1.0 - total_stored_size as f64 / total_original_size as f64) * 100.0
-    } else {
-        0.0
-    };
-
     Ok(StatsResponse {
-        total_objects,
-        total_original_size,
-        total_stored_size,
-        savings_percentage,
+        total_objects: totals.user_visible_count(),
+        total_original_size: totals.original_bytes,
+        total_stored_size: totals.stored_bytes,
+        savings_percentage: totals.savings_percentage().unwrap_or(0.0),
         truncated,
     })
 }

@@ -999,6 +999,64 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         Ok(page)
     }
 
+    /// Return the `reference.bin` metadata for every deltaspace whose
+    /// prefix begins with `scope_prefix` in the given bucket.
+    ///
+    /// `list_objects` deliberately hides references from S3-compatible
+    /// callers (a `reference.bin` is an implementation detail, not a
+    /// user-visible object). Anything reporting "true storage cost" or
+    /// "honest savings" — the admin dashboard, the CLI `stats` command,
+    /// the SPA's per-prefix savings chip — must add reference bytes to
+    /// the on-disk total. This helper is the supported way to do that
+    /// without re-implementing per-backend listing details at the call
+    /// sites.
+    ///
+    /// `scope_prefix == ""` returns every reference in the bucket.
+    ///
+    /// Errors from `get_reference_metadata` for individual deltaspaces
+    /// are logged and skipped — a missing or unreadable reference for
+    /// one prefix should not poison the entire scan.
+    pub async fn list_deltaspace_references(
+        &self,
+        bucket: &str,
+        scope_prefix: &str,
+    ) -> Result<Vec<crate::types::FileMetadata>, EngineError> {
+        let all = self.storage.list_deltaspaces(bucket).await?;
+        // Normalise `scope_prefix` for the starts_with check below.
+        // Storage backends return deltaspace prefixes WITHOUT trailing
+        // slashes (e.g. `releases/v1`), but callers using the S3
+        // convention pass `releases/v1/` here. Strip the trailing
+        // slash so `releases/v1/`-shaped scopes match `releases/v1` and
+        // `releases/v1/sub`. An empty scope means "everything".
+        let scope_norm = scope_prefix.trim_end_matches('/');
+        let mut out = Vec::new();
+        let prefix_match = |p: &str| -> bool {
+            if scope_norm.is_empty() {
+                return true;
+            }
+            p == scope_norm || p.starts_with(&format!("{scope_norm}/"))
+        };
+        for prefix in all {
+            if !prefix_match(&prefix) {
+                continue;
+            }
+            match self.storage.get_reference_metadata(bucket, &prefix).await {
+                Ok(meta) => out.push(meta),
+                Err(e) => {
+                    tracing::warn!(
+                        "list_deltaspace_references: skipping {}/{} ({}). \
+                         Savings totals for this scope will undercount the \
+                         reference bytes for this deltaspace.",
+                        bucket,
+                        prefix,
+                        e,
+                    );
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Internal: build a ListObjectsPage from bulk_list_objects + in-memory
     /// delimiter collapsing and pagination.
     async fn list_objects_bulk(

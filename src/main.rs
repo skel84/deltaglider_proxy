@@ -739,6 +739,7 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         bucket_scanner: deltaglider_proxy::api::admin::BucketScanner::load(
             std::path::PathBuf::from(".deltaglider_scans"),
         ),
+        savings_cache: Arc::new(deltaglider_proxy::api::admin::SavingsCache::new()),
         rate_limiter,
         config_sync,
         config_db_mismatch,

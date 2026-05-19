@@ -81,6 +81,12 @@ pub struct ScanResult {
     pub total_objects: u64,
     pub total_original_bytes: u64,
     pub total_stored_bytes: u64,
+    /// Bytes occupied by `reference.bin` files across the bucket.
+    /// Included in `total_stored_bytes`. Exposed so the UI can break
+    /// down storage cost as "deltas + passthroughs + references" and
+    /// explain *why* savings aren't 100%.
+    #[serde(default)]
+    pub total_reference_bytes: u64,
     pub savings_percentage: f64,
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
@@ -97,7 +103,12 @@ fn default_version() -> u32 {
     1
 }
 
-const CURRENT_VERSION: u32 = 1;
+// Bumped from 1 → 2 when reference bytes started counting toward
+// `total_stored_bytes`. Old cache files (v1) drop because their
+// `total_stored_bytes` undercounts by the reference total, and we
+// don't want the UI to render lies just because we have a cached
+// number to show.
+const CURRENT_VERSION: u32 = 2;
 
 /// Live progress snapshot, broadcast to SSE subscribers via
 /// `watch::channel`. The terminal frame is the one where
@@ -415,9 +426,14 @@ async fn run_scan(
     cancel: CancellationToken,
 ) -> Result<ScanResult, ScanFailure> {
     let started_instant = std::time::Instant::now();
-    let mut objects: u64 = 0;
-    let mut original_bytes: u64 = 0;
-    let mut stored_bytes: u64 = 0;
+    // The pure savings accumulator (`src/deltaglider/savings.rs`) owns
+    // the math. Page through every user-visible object; once that's
+    // done, walk the deltaspace references separately and feed them in
+    // — references are hidden from `list_objects` but their bytes are
+    // real and MUST count toward `total_stored_bytes`, otherwise the
+    // dashboard reports up to "100% saved" on prefixes whose true
+    // savings is ~80%.
+    let mut totals = crate::deltaglider::SavingsTotals::default();
     let mut pages_done: u32 = 0;
     let mut continuation_token: Option<String> = None;
 
@@ -444,9 +460,7 @@ async fn run_scan(
         };
 
         for (_key, meta) in &page.objects {
-            objects += 1;
-            original_bytes += meta.file_size;
-            stored_bytes += meta.delta_size().unwrap_or(meta.file_size);
+            totals.accumulate(meta);
         }
         pages_done += 1;
 
@@ -459,9 +473,9 @@ async fn run_scan(
         // dashboard showed "Scanning… 0 objects" right up to "done".
         let snapshot = ScanProgress {
             bucket: bucket.to_string(),
-            objects,
-            original_bytes,
-            stored_bytes,
+            objects: totals.user_visible_count(),
+            original_bytes: totals.original_bytes,
+            stored_bytes: totals.stored_bytes,
             pages_done,
             has_more,
             finished: !has_more,
@@ -479,19 +493,33 @@ async fn run_scan(
         continuation_token = page.next_continuation_token;
     }
 
+    // Second pass: fold in every `reference.bin` across the bucket so
+    // `total_stored_bytes` matches what's actually on disk. Failures
+    // for individual deltaspaces are logged inside the engine helper
+    // and skipped — a missing reference is a per-deltaspace data
+    // problem, not a reason to abort the whole scan.
+    if cancel.is_cancelled() {
+        return Err(ScanFailure::Cancelled);
+    }
+    let engine = s3_state.engine.load();
+    let refs = engine
+        .list_deltaspace_references(bucket, "")
+        .await
+        .map_err(|e| ScanFailure::Error(e.to_string()))?;
+    for meta in &refs {
+        totals.accumulate(meta);
+    }
+
     let completed_at = Utc::now();
     let duration_ms = started_instant.elapsed().as_millis() as u64;
-    let savings_percentage = if original_bytes > 0 {
-        (1.0 - stored_bytes as f64 / original_bytes as f64) * 100.0
-    } else {
-        0.0
-    };
+    let savings_percentage = totals.savings_percentage().unwrap_or(0.0);
 
     let result = ScanResult {
         bucket: bucket.to_string(),
-        total_objects: objects,
-        total_original_bytes: original_bytes,
-        total_stored_bytes: stored_bytes,
+        total_objects: totals.user_visible_count(),
+        total_original_bytes: totals.original_bytes,
+        total_stored_bytes: totals.stored_bytes,
+        total_reference_bytes: totals.reference_bytes,
         savings_percentage,
         started_at,
         completed_at,
@@ -503,9 +531,9 @@ async fn run_scan(
     // clean "done" signal before the channel closes.
     let _ = tx.send(ScanProgress {
         bucket: bucket.to_string(),
-        objects,
-        original_bytes,
-        stored_bytes,
+        objects: totals.user_visible_count(),
+        original_bytes: totals.original_bytes,
+        stored_bytes: totals.stored_bytes,
         pages_done,
         has_more: false,
         finished: true,
@@ -726,6 +754,7 @@ mod tests {
             total_objects: 42,
             total_original_bytes: 1_000_000,
             total_stored_bytes: 800_000,
+            total_reference_bytes: 100_000,
             savings_percentage: 20.0,
             started_at: started,
             completed_at: started,
