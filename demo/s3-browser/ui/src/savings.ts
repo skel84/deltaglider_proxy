@@ -24,7 +24,7 @@
  * surfaces have their own server-computed signed `true_savings_bytes`
  * / `compression_ratio` fields when they need to show the negative.
  */
-export interface ScopeSavingsView {
+interface ScopeSavingsView {
   /**
    * Percent savings 0..=99 (integer; floor of the raw value). The
    * canonical compact display number for the breadcrumb chip and any
@@ -93,7 +93,7 @@ export function summarizeScopeSavings(
  *   - `storedSize == null` (HEAD not yet resolved) returns `empty:true`
  *     so the UI can show a spinner.
  */
-export interface ObjectSavingsView {
+interface ObjectSavingsView {
   pct: number;
   savedBytes: number;
   empty: boolean;
