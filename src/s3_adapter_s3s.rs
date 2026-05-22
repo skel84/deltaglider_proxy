@@ -955,7 +955,7 @@ impl s3s::S3 for DeltaGliderS3Service {
         .map_err(engine_error_to_s3s)?;
         let force_chunked_passthrough =
             !engine.is_delta_eligible(&input.key) || total_parts_size > delta_limit;
-        let multipart_etag = if force_chunked_passthrough {
+        let (multipart_etag, store_meta) = if force_chunked_passthrough {
             let completed = self
                 .state
                 .multipart
@@ -996,7 +996,7 @@ impl s3s::S3 for DeltaGliderS3Service {
                 }
             };
             match store_result {
-                Ok(_) => etag,
+                Ok(result) => (etag, Some(result.metadata)),
                 Err(e) => {
                     self.state.multipart.rollback_upload(&input.upload_id);
                     return Err(engine_error_to_s3s(e));
@@ -1025,7 +1025,7 @@ impl s3s::S3 for DeltaGliderS3Service {
                 )
                 .await
             {
-                Ok(_) => etag,
+                Ok(result) => (etag, Some(result.metadata)),
                 Err(e) => {
                     self.state.multipart.rollback_upload(&input.upload_id);
                     return Err(engine_error_to_s3s(e));
@@ -1034,15 +1034,23 @@ impl s3s::S3 for DeltaGliderS3Service {
         };
         self.state.multipart.finish_upload(&input.upload_id);
         let location = format!("/{}/{}", input.bucket, input.key);
-        Ok(s3s::S3Response::new(
-            s3s::dto::CompleteMultipartUploadOutput {
-                bucket: Some(input.bucket),
-                key: Some(input.key),
-                e_tag: Some(parse_s3s_etag(&multipart_etag)?),
-                location: Some(location),
-                ..Default::default()
-            },
-        ))
+        let mut resp = s3s::S3Response::new(s3s::dto::CompleteMultipartUploadOutput {
+            bucket: Some(input.bucket),
+            key: Some(input.key),
+            e_tag: Some(parse_s3s_etag(&multipart_etag)?),
+            location: Some(location),
+            ..Default::default()
+        });
+        // Parity with the legacy axum multipart handler: emit
+        // `x-amz-storage-type` (and `x-deltaglider-stored-size`) on
+        // CompleteMultipartUpload responses so tests / operators can
+        // observe whether the multipart landed as `delta`, `passthrough`,
+        // or another storage shape. The s3s rewrite dropped this header,
+        // breaking tests/s3_integration_test.rs::test_multipart_*.
+        if let Some(meta) = store_meta.as_ref() {
+            add_storage_debug_headers(&mut resp.headers, meta);
+        }
+        Ok(resp)
     }
 
     async fn list_multipart_uploads(
