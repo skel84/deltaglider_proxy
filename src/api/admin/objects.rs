@@ -140,6 +140,19 @@ fn dest_key(dest_prefix: &str, relative: &str) -> String {
     }
 }
 
+/// True when a move item's destination resolves to the exact same
+/// bucket+key as its source — i.e. the "copy" is a self no-op and the source
+/// must NOT be deleted (doing so is data loss). Pure decision point; unit-tested.
+fn is_same_location_move(
+    source_bucket: &str,
+    dest_bucket: &str,
+    dest_prefix: &str,
+    source_key: &str,
+    relative: &str,
+) -> bool {
+    source_bucket == dest_bucket && dest_key(dest_prefix, relative) == source_key
+}
+
 /// Detect duplicate destination keys in a copy/move plan. The client
 /// already does this; we re-check server-side because trusting the
 /// client to validate was the cause of past silent overwrites.
@@ -334,9 +347,26 @@ pub async fn move_objects(
     // doing it here keeps the contract identical and lets us extend
     // to actual transactions later.
     let mut deleted = 0usize;
+    let mut skipped_self = 0usize;
     if copy_result.failed == 0 {
         let engine = s3.engine.load();
         for it in &req.items {
+            // DATA-LOSS GUARD: a move whose destination key resolves to the
+            // SAME bucket+key as the source is a self-copy no-op. Deleting the
+            // source here would destroy the only copy. Never delete a source we
+            // did not actually relocate elsewhere — regardless of what the
+            // client computed. (The GUI should also prevent offering this, but
+            // this is the last line of defence.)
+            if is_same_location_move(
+                &req.source_bucket,
+                &req.dest_bucket,
+                &req.dest_prefix,
+                &it.source_key,
+                &it.relative,
+            ) {
+                skipped_self += 1;
+                continue;
+            }
             match engine.delete(&req.source_bucket, &it.source_key).await {
                 Ok(()) => deleted += 1,
                 Err(e) => {
@@ -348,6 +378,13 @@ pub async fn move_objects(
                     // The source object is just leftover.
                 }
             }
+        }
+        if skipped_self > 0 {
+            warn!(
+                "bulk move: skipped deleting {} source(s) whose destination equals the source \
+                 (same-location move — would have been data loss)",
+                skipped_self
+            );
         }
     }
 
@@ -623,4 +660,60 @@ pub async fn list_all(
         keys,
         truncated: false,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dest_key, is_same_location_move};
+
+    #[test]
+    fn dest_key_joins_prefix_and_relative() {
+        assert_eq!(dest_key("", "a/b.zip"), "a/b.zip");
+        assert_eq!(dest_key("backups/", "a/b.zip"), "backups/a/b.zip");
+    }
+
+    #[test]
+    fn same_location_move_is_detected_and_blocks_delete() {
+        // Same bucket, dest_prefix + relative == source_key → self no-op.
+        // The source MUST NOT be deleted (this is the data-loss case).
+        assert!(is_same_location_move(
+            "beshu",
+            "beshu",
+            "ror/builds/",
+            "ror/builds/app.zip",
+            "app.zip",
+        ));
+        // Empty dest_prefix, relative IS the full source key → still self.
+        assert!(is_same_location_move(
+            "beshu", "beshu", "", "app.zip", "app.zip",
+        ));
+    }
+
+    #[test]
+    fn genuine_relocations_are_not_flagged() {
+        // Different bucket → real move.
+        assert!(!is_same_location_move(
+            "beshu",
+            "archive",
+            "ror/builds/",
+            "ror/builds/app.zip",
+            "app.zip",
+        ));
+        // Same bucket, different dest prefix → real move.
+        assert!(!is_same_location_move(
+            "beshu",
+            "beshu",
+            "ror/old/",
+            "ror/builds/app.zip",
+            "app.zip",
+        ));
+        // Same bucket, dest key differs from source key → real move.
+        assert!(!is_same_location_move(
+            "beshu",
+            "beshu",
+            "ror/builds/",
+            "ror/staging/app.zip",
+            "app.zip",
+        ));
+    }
 }
