@@ -338,7 +338,16 @@ export default function InspectorPanel({
 
   const storageTypeLabel = storageType || 'Original';
   const storageTypeColor = STORAGE_TYPE_COLORS[storageType || 'passthrough'] || STORAGE_TYPE_DEFAULT;
-  const compressionEnabled = bucketPolicy?.compressionEnabled ?? true;
+  // Once the HEAD resolves, an object stored as `passthrough` (e.g. a `.sha512`
+  // checksum sidecar, an already-compressed asset, or any non-delta-eligible
+  // file) has NO compression to report — stored == original. Showing a
+  // "Savings %" / original-vs-stored panel for it is meaningless, and the panel
+  // would otherwise sit on its loading spinner waiting for delta stats that
+  // never come. Treat passthrough like "compression off": render the simple
+  // size view instead. Until the HEAD resolves (storageType still undefined),
+  // keep the bucket-policy default so we don't flicker.
+  const isPassthroughObject = storageType === 'passthrough';
+  const compressionEnabled = (bucketPolicy?.compressionEnabled ?? true) && !isPassthroughObject;
   /** When policy is still loading or unavailable, never show a false "public" badge. */
   const isPublic =
     hasAdminSession &&
@@ -545,8 +554,11 @@ export default function InspectorPanel({
               </InspectorSection>
             ) : compressionEnabled ? (
               <InspectorSection title="Storage Stats">
-                {headLoading && Object.keys(headers).length === 0 ? (
-                  /* Show spinner until HEAD completes with full metadata */
+                {headLoading && Object.keys(headers).length === 0 && storedSize == null ? (
+                  /* Spin only while the HEAD is in flight AND we have nothing
+                   * renderable yet. If the table's headCache already seeded a
+                   * storedSize/storageType, render immediately instead of
+                   * spinning behind an in-flight HEAD that may be slow. */
                   <div style={{
                     background: BG_SIDEBAR, borderRadius: 10, padding: '24px 16px',
                     display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
