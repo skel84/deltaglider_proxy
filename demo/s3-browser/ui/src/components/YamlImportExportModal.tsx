@@ -31,6 +31,7 @@ import {
   type ConfigApplyResponse,
 } from '../adminApi';
 import { useColors } from '../ThemeContext';
+import { useCopyToClipboard } from '../useCopyToClipboard';
 
 const { Text, Paragraph } = Typography;
 
@@ -51,7 +52,7 @@ export function YamlImportExportModal({ open, mode, onClose, onApplied }: YamlMo
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
-  const [copied, setCopied] = useState(false);
+  const { copy, copied } = useCopyToClipboard();
   const [validated, setValidated] = useState(false);
   const [applyResult, setApplyResult] = useState<ConfigApplyResponse | null>(null);
 
@@ -61,7 +62,6 @@ export function YamlImportExportModal({ open, mode, onClose, onApplied }: YamlMo
     let cancelled = false;
     setError(null);
     setWarnings([]);
-    setCopied(false);
     setValidated(false);
     setApplyResult(null);
     if (mode === 'export') {
@@ -85,15 +85,10 @@ export function YamlImportExportModal({ open, mode, onClose, onApplied }: YamlMo
     };
   }, [open, mode]);
 
-  const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(yaml);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch (e) {
-      setError(`Clipboard write failed: ${e instanceof Error ? e.message : e}`);
-    }
-  }, [yaml]);
+  const handleCopy = useCallback(
+    () => copy(yaml, { successMessage: 'Copied configuration YAML to clipboard' }),
+    [copy, yaml]
+  );
 
   const handleValidate = useCallback(async () => {
     setError(null);
@@ -188,7 +183,9 @@ export function YamlImportExportModal({ open, mode, onClose, onApplied }: YamlMo
             <Button
               type="primary"
               icon={copied ? <CheckOutlined /> : <CopyOutlined />}
-              onClick={handleCopy}
+              onClick={() => {
+                void handleCopy();
+              }}
               disabled={!yaml || loading}
             >
               {copied ? 'Copied!' : 'Copy to clipboard'}

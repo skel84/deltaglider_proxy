@@ -34,6 +34,13 @@ import { fetchAudit, type AuditEntry } from '../adminApi';
 
 const { Text } = Typography;
 
+/** Single-line, ellipsis-on-overflow cell — shared by the user/ip/bucket/target columns. */
+const CELL_TRUNCATE_STYLE = {
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+} as const;
+
 interface Props {
   onSessionExpired?: () => void;
 }
@@ -281,44 +288,27 @@ export default function AuditLogPanel({ onSessionExpired }: Props) {
               </div>
               <div
                 style={{
+                  ...CELL_TRUNCATE_STYLE,
                   color: e.user ? colors.TEXT_PRIMARY : colors.TEXT_MUTED,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
                 }}
                 title={e.user}
               >
                 {e.user || '—'}
               </div>
               <div
-                style={{
-                  color: colors.TEXT_SECONDARY,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
+                style={{ ...CELL_TRUNCATE_STYLE, color: colors.TEXT_SECONDARY }}
                 title={e.ua ? `${e.ip} · ${e.ua}` : e.ip}
               >
                 {e.ip || '—'}
               </div>
               <div
-                style={{
-                  color: colors.TEXT_SECONDARY,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
+                style={{ ...CELL_TRUNCATE_STYLE, color: colors.TEXT_SECONDARY }}
                 title={e.bucket}
               >
                 {e.bucket || '—'}
               </div>
               <div
-                style={{
-                  color: colors.TEXT_SECONDARY,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
+                style={{ ...CELL_TRUNCATE_STYLE, color: colors.TEXT_SECONDARY }}
                 title={e.path ? `${e.target} · ${e.path}` : e.target}
               >
                 {e.path || e.target || '—'}

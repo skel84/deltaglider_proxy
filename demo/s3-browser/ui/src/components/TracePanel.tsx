@@ -37,17 +37,16 @@ import {
   ExperimentOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
-  ArrowRightOutlined,
 } from '@ant-design/icons';
 import { adminFetch } from '../adminApi';
 import { useColors } from '../ThemeContext';
 import { useCardStyles } from './shared-styles';
+import { METHODS } from '../schemas/admissionSchema';
 import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 
 const { Text, Paragraph } = Typography;
 
-const METHODS = ['GET', 'HEAD', 'PUT', 'POST', 'DELETE', 'PATCH'] as const;
 type Method = (typeof METHODS)[number];
 
 interface TraceRequest {
@@ -489,8 +488,3 @@ function ResolvedRequest({ resolved }: { resolved: TraceResolved }) {
     </div>
   );
 }
-
-// Unused import suppressor — kept for future inline use of ArrowRightOutlined
-// in a potential stepper visualisation. Keeping the import avoids a
-// re-edit when that ships.
-void ArrowRightOutlined;

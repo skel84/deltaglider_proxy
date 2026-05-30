@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Input, Button, Typography, Segmented, Checkbox } from 'antd';
 import { PlusOutlined, DeleteOutlined, FilterOutlined } from '@ant-design/icons';
-import { useCardStyles } from './shared-styles';
+import { useCardStyles, usePermissionStyles } from './shared-styles';
 import { useColors } from '../ThemeContext';
 import { listBuckets } from '../s3client';
 import { parseResourcePattern } from '../storagePath';
@@ -37,6 +37,7 @@ interface PermissionEditorProps {
 
 export default function PermissionEditor({ permissions, onChange }: PermissionEditorProps) {
   const { inputRadius } = useCardStyles();
+  const { condLabelStyle, monoTextStyle } = usePermissionStyles();
   const colors = useColors();
   const [bucketNames, setBucketNames] = useState<string[]>([]);
   /**
@@ -103,19 +104,6 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
       else next.add(id);
       return next;
     });
-  };
-
-  const condLabelStyle: React.CSSProperties = {
-    fontSize: 10,
-    fontWeight: 600,
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-    color: colors.TEXT_MUTED,
-    fontFamily: 'var(--font-ui)',
-  };
-  const monoTextStyle: React.CSSProperties = {
-    fontFamily: 'var(--font-mono)',
-    color: colors.TEXT_PRIMARY,
   };
 
   return (

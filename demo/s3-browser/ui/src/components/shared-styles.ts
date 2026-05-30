@@ -39,3 +39,48 @@ export function useCardStyles() {
   }, [BG_CARD, BORDER, TEXT_MUTED]);
 }
 
+/**
+ * Uppercase form-label style object (spread onto a wrapper div) for panels that
+ * render labels as plain divs rather than the <FormLabel> component — e.g.
+ * AuthenticationPanel's provider/preview fields. Memoized for stable identity.
+ */
+export function useFormLabelStyle(): React.CSSProperties {
+  const { TEXT_MUTED } = useColors();
+  return useMemo(
+    () => ({
+      fontSize: 11,
+      fontWeight: 600,
+      textTransform: 'uppercase' as const,
+      letterSpacing: 0.5,
+      color: TEXT_MUTED,
+      fontFamily: 'var(--font-ui)',
+      marginBottom: 4,
+    }),
+    [TEXT_MUTED],
+  );
+}
+
+/**
+ * Theme-aware style objects shared by PermissionEditor (condition labels +
+ * inline mono spans). Memoized so the object identity is stable across renders
+ * while the theme is unchanged.
+ */
+export function usePermissionStyles() {
+  const { TEXT_MUTED, TEXT_PRIMARY } = useColors();
+  return useMemo(() => {
+    const condLabelStyle: React.CSSProperties = {
+      fontSize: 10,
+      fontWeight: 600,
+      letterSpacing: 0.5,
+      textTransform: 'uppercase',
+      color: TEXT_MUTED,
+      fontFamily: 'var(--font-ui)',
+    };
+    const monoTextStyle: React.CSSProperties = {
+      fontFamily: 'var(--font-mono)',
+      color: TEXT_PRIMARY,
+    };
+    return { condLabelStyle, monoTextStyle };
+  }, [TEXT_MUTED, TEXT_PRIMARY]);
+}
+

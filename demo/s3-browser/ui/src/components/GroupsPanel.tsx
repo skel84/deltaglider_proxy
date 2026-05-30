@@ -4,6 +4,7 @@ import { PlusOutlined, SearchOutlined, FolderOutlined, DeleteOutlined, CopyOutli
 import type { IamGroup, IamMode, IamUser } from '../adminApi';
 import { getAdminConfig, getGroups, createGroup, updateGroup, deleteGroup, addGroupMember, removeGroupMember, getUsers, cloneGroup } from '../adminApi';
 import { useCardStyles } from './shared-styles';
+import FormLabel from './FormLabel';
 import { useColors } from '../ThemeContext';
 import PermissionEditor from './PermissionEditor';
 import { permissionsToRows, rowsToPermissions, type PermissionRow } from './permissionRows';
@@ -402,13 +403,6 @@ function GroupForm({ group, users, onSaved, onDeleted, onCancel, onSavingChange 
     });
   };
 
-  const label = (text: string, hint?: string) => (
-    <div style={{ marginBottom: 4 }}>
-      <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>{text}</Text>
-      {hint && <Text type="secondary" style={{ fontSize: 10, fontWeight: 400, marginLeft: 6 }}>{hint}</Text>}
-    </div>
-  );
-
   return (
     <div style={{ padding: '24px 28px', maxWidth: 600, overflow: 'auto', height: '100%' }}>
       <Title level={5} style={{ margin: '0 0 20px', fontFamily: 'var(--font-ui)' }}>
@@ -418,12 +412,12 @@ function GroupForm({ group, users, onSaved, onDeleted, onCancel, onSavingChange 
       {error && <Alert type="error" message={error} showIcon closable onClose={() => setError('')} style={{ marginBottom: 16, borderRadius: 8 }} />}
 
       <div style={{ marginBottom: 16 }}>
-        {label('Name')}
+        <FormLabel text="Name" />
         <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. developers" style={{ ...inputRadius }} />
       </div>
 
       <div style={{ marginBottom: 16 }}>
-        {label('Description')}
+        <FormLabel text="Description" />
         <Input value={description} onChange={e => setDescription(e.target.value)} placeholder="e.g. Development team access" style={{ ...inputRadius }} />
       </div>
 

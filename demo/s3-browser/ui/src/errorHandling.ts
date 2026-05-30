@@ -34,6 +34,11 @@ function statusHint(status: number): string {
   }
 }
 
+/** ` (request-id: …)` suffix, or empty string when no request id is present. */
+export function requestIdSuffix(requestId: string | undefined | null): string {
+  return requestId ? ` (request-id: ${requestId})` : '';
+}
+
 function trimOneLine(text: string, max = 280): string {
   const compact = text.replace(/\s+/g, ' ').trim();
   if (compact.length <= max) return compact;
@@ -85,7 +90,7 @@ export async function throwApiError(res: Response, context: string): Promise<nev
   const hint = statusHint(res.status);
   const main = message || hint || `HTTP ${res.status}`;
   const codePart = code ? ` [${code}]` : '';
-  const reqPart = requestId ? ` (request-id: ${requestId})` : '';
+  const reqPart = requestIdSuffix(requestId);
   throw new Error(`${context} failed (${res.status})${codePart}: ${main}${reqPart}`);
 }
 
@@ -123,7 +128,7 @@ export function normalizeS3Error(err: unknown, context: string): Error {
   // Convert this into actionable output with status-based hints.
   if (hasDomParserNoise) {
     const hint = status ? statusHint(status) : 'Server returned a non-XML error response.';
-    const reqPart = requestId ? ` (request-id: ${requestId})` : '';
+    const reqPart = requestIdSuffix(requestId);
     return new Error(`${context} failed${status ? ` (${status})` : ''}: ${hint}${reqPart}`);
   }
 
@@ -132,19 +137,19 @@ export function normalizeS3Error(err: unknown, context: string): Error {
   if (status === 502 || status === 503 || status === 504 || hasGatewayBody) {
     const effectiveStatus = status ?? (/\b503\b|service unavailable/i.test(raw) ? 503 : /\b504\b|gateway timeout/i.test(raw) ? 504 : 502);
     const hint = statusHint(effectiveStatus);
-    const reqPart = requestId ? ` (request-id: ${requestId})` : '';
+    const reqPart = requestIdSuffix(requestId);
     return new Error(`${context} failed (${effectiveStatus}): ${hint}${reqPart}`);
   }
 
   if (status === 413 || code === 'EntityTooLarge') {
-    const reqPart = requestId ? ` (request-id: ${requestId})` : '';
+    const reqPart = requestIdSuffix(requestId);
     return new Error(
       `${context} failed (${status ?? 413}) [EntityTooLarge]: ${statusHint(413)}${reqPart}`,
     );
   }
 
   if (status === 403 && /SignatureDoesNotMatch|AccessDenied/i.test(raw)) {
-    const reqPart = requestId ? ` (request-id: ${requestId})` : '';
+    const reqPart = requestIdSuffix(requestId);
     return new Error(
       `${context} failed (403): Access denied or signature mismatch. Reconnect with valid credentials/permissions.${reqPart}`,
     );
@@ -152,7 +157,7 @@ export function normalizeS3Error(err: unknown, context: string): Error {
 
   const codePart = code ? ` [${code}]` : '';
   const statusPart = status ? ` (${status})` : '';
-  const reqPart = requestId ? ` (request-id: ${requestId})` : '';
+  const reqPart = requestIdSuffix(requestId);
   return new Error(`${context} failed${statusPart}${codePart}: ${trimOneLine(raw)}${reqPart}`);
 }
 

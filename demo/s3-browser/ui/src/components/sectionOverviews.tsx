@@ -21,23 +21,33 @@
  *     response as `auth_enabled`.
  */
 import { useEffect, useState } from 'react';
-import {
-  TeamOutlined,
-  FolderOutlined,
-  SafetyOutlined,
-  LockOutlined,
-  DatabaseOutlined,
-  CloudOutlined,
-  CloudServerOutlined,
-  ClockCircleOutlined,
-  SettingOutlined,
-  SyncOutlined,
-} from '@ant-design/icons';
+import { TeamOutlined, CloudServerOutlined, SettingOutlined } from '@ant-design/icons';
 import type { AdminConfig, ExternalProviderInfo } from '../adminApi';
 import { getAdminConfig, whoami, getUsers, getGroups } from '../adminApi';
 import SectionOverview from './SectionOverview';
 import type { OverviewCard, OverviewStat } from './SectionOverview';
+import { childrenForPath } from './adminNavigation';
 import { Spin, Alert } from 'antd';
+
+/**
+ * Build the sub-section card list for a Configuration parent from the
+ * ADMIN_IA tree (single source for title + icon + path), layering on
+ * a section-specific contextual `blurb` and `extra` (summary +
+ * declarative banner) keyed by path. The ordering follows ADMIN_IA.
+ */
+function cardsFromIA(
+  sectionPath: string,
+  blurbs: Record<string, string>,
+  extra: (path: string) => Pick<OverviewCard, 'summary' | 'declarativeBanner'>
+): OverviewCard[] {
+  return childrenForPath(sectionPath).map((entry) => ({
+    title: entry.label,
+    icon: entry.icon,
+    path: entry.path,
+    blurb: blurbs[entry.path] ?? '',
+    ...extra(entry.path),
+  }));
+}
 
 interface OverviewProps {
   onNavigateAdmin: (path: string) => void;
@@ -154,54 +164,55 @@ export function AccessOverview({ onNavigateAdmin, onSessionExpired }: OverviewPr
     },
   ];
 
-  const cards: OverviewCard[] = [
+  const cards = cardsFromIA(
+    'configuration/access',
     {
-      title: 'Credentials & mode',
-      blurb:
+      'configuration/access/credentials':
         'Legacy SigV4 key pair, authentication mode selector, and the GUI ↔ Declarative IAM-mode toggle. Sets the context for everything else in Access.',
-      icon: <LockOutlined />,
-      path: 'configuration/access/credentials',
-      summary: `access_key_id: ${config.access_key_id ? `${config.access_key_id.slice(0, 8)}...` : 'unset'}`,
-    },
-    {
-      title: 'Users',
-      blurb:
+      'configuration/access/users':
         'IAM users with fine-grained S3 permissions via ABAC policies. Each user gets their own access key + secret for SigV4.',
-      icon: <TeamOutlined />,
-      path: 'configuration/access/users',
-      summary:
-        userCount === null
-          ? 'Loading...'
-          : userCount === 0
-            ? 'No IAM users — bootstrap creds only'
-            : `${userCount} user${userCount === 1 ? '' : 's'}`,
-      declarativeBanner: declarativeMode,
-    },
-    {
-      title: 'Groups',
-      blurb:
+      'configuration/access/groups':
         'Assemble users into groups with shared permission policies. Members inherit the union of their groups\' permissions.',
-      icon: <FolderOutlined />,
-      path: 'configuration/access/groups',
-      summary:
-        groupCount === null
-          ? 'Loading...'
-          : `${groupCount} group${groupCount === 1 ? '' : 's'}`,
-      declarativeBanner: declarativeMode,
-    },
-    {
-      title: 'External authentication',
-      blurb:
+      'configuration/access/ext-auth':
         'OAuth / OIDC providers for SSO, plus mapping rules that translate external identity claims to IAM group memberships.',
-      icon: <SafetyOutlined />,
-      path: 'configuration/access/ext-auth',
-      summary:
-        providerCount === null
-          ? 'Loading...'
-          : `${providerCount} provider${providerCount === 1 ? '' : 's'}`,
-      declarativeBanner: declarativeMode,
     },
-  ];
+    (path) => {
+      switch (path) {
+        case 'configuration/access/credentials':
+          return {
+            summary: `access_key_id: ${config.access_key_id ? `${config.access_key_id.slice(0, 8)}...` : 'unset'}`,
+          };
+        case 'configuration/access/users':
+          return {
+            summary:
+              userCount === null
+                ? 'Loading...'
+                : userCount === 0
+                  ? 'No IAM users — bootstrap creds only'
+                  : `${userCount} user${userCount === 1 ? '' : 's'}`,
+            declarativeBanner: declarativeMode,
+          };
+        case 'configuration/access/groups':
+          return {
+            summary:
+              groupCount === null
+                ? 'Loading...'
+                : `${groupCount} group${groupCount === 1 ? '' : 's'}`,
+            declarativeBanner: declarativeMode,
+          };
+        case 'configuration/access/ext-auth':
+          return {
+            summary:
+              providerCount === null
+                ? 'Loading...'
+                : `${providerCount} provider${providerCount === 1 ? '' : 's'}`,
+            declarativeBanner: declarativeMode,
+          };
+        default:
+          return {};
+      }
+    }
+  );
 
   return (
     <SectionOverview
@@ -271,43 +282,40 @@ export function StorageOverview({ onNavigateAdmin, onSessionExpired }: OverviewP
     },
   ];
 
-  const cards: OverviewCard[] = [
+  const cards = cardsFromIA(
+    'configuration/storage',
     {
-      title: 'Backends',
-      blurb:
+      'configuration/storage/backends':
         'Default storage backend (filesystem or S3-compatible), named backend targets, connection tests, and encryption-at-rest.',
-      icon: <DatabaseOutlined />,
-      path: 'configuration/storage/backends',
-      summary: `${backendType === 's3' ? 'S3' : 'Filesystem'} default · ${namedBackendCount} named`,
-    },
-    {
-      title: 'Buckets',
-      blurb:
+      'configuration/storage/buckets':
         'Per-bucket overrides: compression toggle, delta-ratio threshold, public-read prefixes, quotas, and virtual-to-real name aliases.',
-      icon: <CloudOutlined />,
-      path: 'configuration/storage/buckets',
-      summary:
-        buckets.length === 0
-          ? 'No overrides'
-          : `${buckets.length} bucket${buckets.length === 1 ? '' : 's'} with policies`,
-    },
-    {
-      title: 'Object replication',
-      blurb:
+      'configuration/storage/replication':
         'One-way run-now object copy between buckets or prefixes. Rules go through the engine, so encryption and delta compression stay transparent.',
-      icon: <SyncOutlined />,
-      path: 'configuration/storage/replication',
-      summary: 'Rules, run history, failures',
-    },
-    {
-      title: 'Object lifecycle',
-      blurb:
+      'configuration/storage/lifecycle':
         'Delete-only expiration rules with read-only preview, guarded run-now, and scheduler history. Disabled by default.',
-      icon: <ClockCircleOutlined />,
-      path: 'configuration/storage/lifecycle',
-      summary: 'Preview, delete, history',
     },
-  ];
+    (path) => {
+      switch (path) {
+        case 'configuration/storage/backends':
+          return {
+            summary: `${backendType === 's3' ? 'S3' : 'Filesystem'} default · ${namedBackendCount} named`,
+          };
+        case 'configuration/storage/buckets':
+          return {
+            summary:
+              buckets.length === 0
+                ? 'No overrides'
+                : `${buckets.length} bucket${buckets.length === 1 ? '' : 's'} with policies`,
+          };
+        case 'configuration/storage/replication':
+          return { summary: 'Rules, run history, failures' };
+        case 'configuration/storage/lifecycle':
+          return { summary: 'Preview, delete, history' };
+        default:
+          return {};
+      }
+    }
+  );
 
   return (
     <SectionOverview
@@ -369,48 +377,41 @@ export function AdvancedOverview({ onNavigateAdmin, onSessionExpired }: Overview
     },
   ];
 
-  const cards: OverviewCard[] = [
+  const cards = cardsFromIA(
+    'configuration/advanced',
     {
-      title: 'Listener & TLS',
-      blurb:
+      'configuration/advanced/listener':
         'HTTP listen address, optional TLS cert / key paths, backend SigV4 credentials. Changes usually require a restart.',
-      icon: <CloudServerOutlined />,
-      path: 'configuration/advanced/listener',
-      summary: `${config.listen_addr} · auth ${config.auth_enabled ? 'on' : 'off'}`,
-    },
-    {
-      title: 'Caches',
-      blurb:
+      'configuration/advanced/caches':
         'Reference-baseline cache (delta reconstruction) and object-metadata cache. Larger caches trade memory for throughput.',
-      icon: <DatabaseOutlined />,
-      path: 'configuration/advanced/caches',
-      summary: `${config.cache_size_mb} MB reference · ${config.metadata_cache_mb} MB metadata`,
-    },
-    {
-      title: 'Limits',
-      blurb:
+      'configuration/advanced/limits':
         'Request timeouts, concurrency caps, multipart-upload limits. Protects the proxy from overload and abuse. Env-var only.',
-      icon: <CloudOutlined />,
-      path: 'configuration/advanced/limits',
-      summary: `${config.max_concurrent_requests} concurrent · ${config.request_timeout_secs}s timeout`,
-    },
-    {
-      title: 'Logging',
-      blurb:
+      'configuration/advanced/logging':
         'tracing-subscriber EnvFilter that drives every log line. Hot-reloadable — changes take effect on the next request.',
-      icon: <DatabaseOutlined />,
-      path: 'configuration/advanced/logging',
-      summary: logPresetLabel,
-    },
-    {
-      title: 'Config DB sync',
-      blurb:
+      'configuration/advanced/sync':
         'Replicate the encrypted IAM/config database to S3 so proxy instances share users, groups, and OAuth providers. Separate from object replication.',
-      icon: <SyncOutlined />,
-      path: 'configuration/advanced/sync',
-      summary: configSyncEnabled ? `Bucket: ${config.config_sync_bucket}` : 'Disabled',
     },
-  ];
+    (path) => {
+      switch (path) {
+        case 'configuration/advanced/listener':
+          return { summary: `${config.listen_addr} · auth ${config.auth_enabled ? 'on' : 'off'}` };
+        case 'configuration/advanced/caches':
+          return {
+            summary: `${config.cache_size_mb} MB reference · ${config.metadata_cache_mb} MB metadata`,
+          };
+        case 'configuration/advanced/limits':
+          return {
+            summary: `${config.max_concurrent_requests} concurrent · ${config.request_timeout_secs}s timeout`,
+          };
+        case 'configuration/advanced/logging':
+          return { summary: logPresetLabel };
+        case 'configuration/advanced/sync':
+          return { summary: configSyncEnabled ? `Bucket: ${config.config_sync_bucket}` : 'Disabled' };
+        default:
+          return {};
+      }
+    }
+  );
 
   return (
     <SectionOverview

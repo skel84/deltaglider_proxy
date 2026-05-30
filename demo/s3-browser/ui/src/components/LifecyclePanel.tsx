@@ -45,6 +45,8 @@ import { formatBytes } from '../utils';
 import { normalizePrefix } from '../storagePath';
 import ApplyDialog from './ApplyDialog';
 import BucketPrefixInput from './BucketPrefixInput';
+import { AdvancedDisclosure, Field } from './ruleEditorFields';
+import { fmtUnix, formRow, lineList, lines } from './ruleEditorHelpers';
 import SectionHeader from './SectionHeader';
 import SimpleSelect from './SimpleSelect';
 import { useCardStyles } from './shared-styles';
@@ -98,17 +100,6 @@ function normalizeLifecycle(input: Partial<LifecycleConfig> | undefined): Lifecy
   };
 }
 
-function lineList(value: string): string[] {
-  return value
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function lines(value: string[]): string {
-  return value.join('\n');
-}
-
 function actionKind(action: LifecycleRuleConfig['action']): 'delete' | 'transition' {
   return typeof action === 'object' && action?.type ? 'transition' : 'delete';
 }
@@ -127,11 +118,6 @@ function normalizeAction(action: LifecycleRuleConfig['action']): LifecycleRuleCo
 
 function actionLabel(action: LifecycleRuleConfig['action'] | string | undefined): string {
   return actionKind(action as LifecycleRuleConfig['action']) === 'transition' ? 'archive/move' : 'delete';
-}
-
-function fmtUnix(ts: number | null | undefined): string {
-  if (!ts) return 'never';
-  return new Date(ts * 1000).toLocaleString();
 }
 
 function fmtDate(value: string): string {
@@ -510,8 +496,8 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
           title="Object lifecycle"
           description="Delete-only expiration rules. Preview is read-only; run-now is explicit and guarded."
         />
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14, alignItems: 'center' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={formRow(16, { flexWrap: 'wrap', marginTop: 14 })}>
+          <label style={formRow(8)}>
             <Switch checked={lifecycle.enabled} onChange={(enabled) => updateConfig({ enabled })} />
             <Text strong>Automatic scheduler</Text>
           </label>
@@ -930,7 +916,7 @@ function PreviewPanel({
 
   return (
     <div style={{ marginTop: 18 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+      <div style={formRow(8, { justifyContent: 'space-between' })}>
         <Text strong>Latest preview/run result</Text>
         <Tag color={outcome.errors > 0 ? 'error' : 'processing'}>{outcome.status}</Tag>
       </div>
@@ -1074,7 +1060,7 @@ function FailureSection({
 }) {
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+      <div style={formRow(8, { justifyContent: 'space-between' })}>
         <Text strong>{title}</Text>
         {failures.length > 0 && <Tag color="error">{failures.length} shown</Tag>}
       </div>
@@ -1148,44 +1134,4 @@ function Metric({
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label style={{ display: 'block' }}>
-      <Text type="secondary" style={{ display: 'block', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
-        {label}
-      </Text>
-      {children}
-    </label>
-  );
-}
-
-function AdvancedDisclosure({ title, children }: { title: string; children: React.ReactNode }) {
-  const { BORDER, TEXT_SECONDARY } = useColors();
-  return (
-    <details
-      style={{
-        marginTop: 16,
-        borderTop: `1px solid ${BORDER}`,
-        paddingTop: 12,
-      }}
-    >
-      <summary
-        style={{
-          cursor: 'pointer',
-          color: TEXT_SECONDARY,
-          fontSize: 12,
-          fontWeight: 700,
-          letterSpacing: 0.5,
-          textTransform: 'uppercase',
-          userSelect: 'none',
-        }}
-      >
-        {title}
-      </summary>
-      <div style={{ marginTop: 12 }}>
-        {children}
-      </div>
-    </details>
-  );
-}
 

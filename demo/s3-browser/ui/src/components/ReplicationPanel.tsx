@@ -45,6 +45,8 @@ import { useCardStyles } from './shared-styles';
 import SectionHeader from './SectionHeader';
 import BucketPrefixInput from './BucketPrefixInput';
 import ApplyDialog from './ApplyDialog';
+import { AdvancedDisclosure, Field } from './ruleEditorFields';
+import { fmtUnix, lineList, lines } from './ruleEditorHelpers';
 import { useApplyHandler, useDirtySection } from '../useDirtySection';
 import { formatBytes } from '../utils';
 import { normalizePrefix } from '../storagePath';
@@ -101,26 +103,6 @@ function normalizeReplication(input: Partial<ReplicationConfig> | undefined): Re
       exclude_globs: r.exclude_globs || ['.dg/*'],
     })),
   };
-}
-
-// Glob textareas are one-pattern-per-line. Blank/whitespace-only lines carry
-// no glob and are intentionally dropped (filter(Boolean)) rather than persisted
-// as empty-string globs the backend would reject — same normalization as the
-// reference ConditionPrefixInput. This is by design; do not "preserve blanks".
-function lineList(value: string): string[] {
-  return value
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function lines(value: string[]): string {
-  return value.join('\n');
-}
-
-function fmtUnix(ts: number | null | undefined): string {
-  if (!ts) return 'never';
-  return new Date(ts * 1000).toLocaleString();
 }
 
 function statusTone(status: string, paused: boolean, enabled: boolean): 'success' | 'warning' | 'error' | 'default' {
@@ -744,46 +726,6 @@ function RuleEditor({
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label style={{ display: 'block' }}>
-      <Text type="secondary" style={{ display: 'block', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
-        {label}
-      </Text>
-      {children}
-    </label>
-  );
-}
-
-function AdvancedDisclosure({ title, children }: { title: string; children: React.ReactNode }) {
-  const { BORDER, TEXT_SECONDARY } = useColors();
-  return (
-    <details
-      style={{
-        marginTop: 16,
-        borderTop: `1px solid ${BORDER}`,
-        paddingTop: 12,
-      }}
-    >
-      <summary
-        style={{
-          cursor: 'pointer',
-          color: TEXT_SECONDARY,
-          fontSize: 12,
-          fontWeight: 700,
-          letterSpacing: 0.5,
-          textTransform: 'uppercase',
-          userSelect: 'none',
-        }}
-      >
-        {title}
-      </summary>
-      <div style={{ marginTop: 12 }}>
-        {children}
-      </div>
-    </details>
-  );
-}
 
 function RuntimeDetails({
   history,

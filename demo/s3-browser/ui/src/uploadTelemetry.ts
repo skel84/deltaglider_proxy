@@ -1,6 +1,8 @@
+import { clamp } from './utils';
+
 export const DEFAULT_UPLOAD_PART_SIZE = 16 * 1024 * 1024; // 16 MiB
 export const DEFAULT_UPLOAD_QUEUE_SIZE = 4;
-export const SPEED_WINDOW_MS = 5000;
+const SPEED_WINDOW_MS = 5000;
 
 export type UploadStatus =
   | 'queued'
@@ -16,10 +18,7 @@ export interface ThroughputSample {
 }
 
 export function clampPercent(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  if (value < 0) return 0;
-  if (value > 100) return 100;
-  return value;
+  return clamp(value, 0, 100);
 }
 
 export function estimateTotalParts(totalBytes: number, partSize: number): number {

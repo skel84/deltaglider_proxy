@@ -57,6 +57,7 @@ import {
   type TestS3Response,
 } from '../adminApi';
 import { useColors } from '../ThemeContext';
+import { useCopyToClipboard } from '../useCopyToClipboard';
 import { useCardStyles } from './shared-styles';
 import FormField from './FormField';
 
@@ -699,7 +700,7 @@ function OptionalPublicBucketStep({
 
 function ReviewStep({ yaml, cardStyle }: { yaml: string; cardStyle: React.CSSProperties }) {
   const colors = useColors();
-  const [copied, setCopied] = useState(false);
+  const { copy, copied } = useCopyToClipboard();
   return (
     <div style={cardStyle}>
       <h3 style={{ margin: 0, fontFamily: 'var(--font-ui)', fontSize: 18 }}>
@@ -712,14 +713,8 @@ function ReviewStep({ yaml, cardStyle }: { yaml: string; cardStyle: React.CSSPro
       <div style={{ position: 'relative' }}>
         <Button
           size="small"
-          onClick={async () => {
-            try {
-              await navigator.clipboard.writeText(yaml);
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
-            } catch {
-              /* noop */
-            }
+          onClick={() => {
+            void copy(yaml, { successMessage: 'Copied setup YAML to clipboard', resetMs: 1500 });
           }}
           style={{
             position: 'absolute',

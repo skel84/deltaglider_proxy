@@ -2,18 +2,30 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
 
-const sourceUrl = new URL('../src/uploadTelemetry.ts', import.meta.url);
-const source = await readFile(sourceUrl, 'utf8');
-const transpiled = ts.transpileModule(source, {
-  compilerOptions: {
-    module: ts.ModuleKind.ES2020,
-    target: ts.ScriptTarget.ES2020,
-    importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
-  },
-  fileName: 'uploadTelemetry.ts',
-}).outputText;
+// Transpile a TS module to an importable data: URL. `replaceImports` rewrites
+// bare relative imports to already-built data URLs so the dependency graph
+// (uploadTelemetry -> utils) resolves without a bundler.
+async function loadModule(relPath, fileName, replaceImports = {}) {
+  const url = new URL(relPath, import.meta.url);
+  let source = await readFile(url, 'utf8');
+  for (const [spec, dataUrl] of Object.entries(replaceImports)) {
+    source = source.replaceAll(`'${spec}'`, `'${dataUrl}'`);
+  }
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2020,
+      target: ts.ScriptTarget.ES2020,
+      importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
+    },
+    fileName,
+  });
+  return `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`;
+}
 
-const moduleUrl = `data:text/javascript;base64,${Buffer.from(transpiled).toString('base64')}`;
+const utilsUrl = await loadModule('../src/utils.ts', 'utils.ts');
+const moduleUrl = await loadModule('../src/uploadTelemetry.ts', 'uploadTelemetry.ts', {
+  './utils': utilsUrl,
+});
 const {
   appendThroughputSample,
   clampPercent,

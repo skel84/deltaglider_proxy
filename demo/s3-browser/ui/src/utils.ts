@@ -40,3 +40,38 @@ export function timeAgo(date: Date): string {
 export function detectDefaultEndpoint(): string {
   return window.location.origin;
 }
+
+/** Clamp `n` into `[lo, hi]`. Non-finite input collapses to `lo`. */
+export function clamp(n: number, lo: number, hi: number): number {
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
+}
+
+/**
+ * Tiny 6×6 dot pattern as a CSS background-image (inline SVG, no
+ * external asset). Used to texturise "saved" bars so they read as
+ * negative space without introducing another colour to the eye.
+ */
+export function dotPattern(color: string): string {
+  const safe = encodeURIComponent(color);
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='6' height='6'><circle cx='1' cy='1' r='1' fill='${safe}' fill-opacity='0.5'/></svg>`;
+  return `url("data:image/svg+xml;utf8,${svg.replace(/"/g, "'")}")`;
+}
+
+/** "3h 21m ago" / "47s ago" / "never" — coarse age label for cache timestamps. */
+export function ageLabel(iso: string | null): string {
+  if (!iso) return 'never';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return 'just now';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) {
+    const mm = m % 60;
+    return mm ? `${h}h ${mm}m ago` : `${h}h ago`;
+  }
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}

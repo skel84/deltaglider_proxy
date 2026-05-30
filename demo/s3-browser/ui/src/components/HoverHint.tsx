@@ -1,6 +1,7 @@
 import { useState, useRef, type ReactNode } from 'react';
 import { useColors } from '../ThemeContext';
 import { useFixedOverlayPosition } from '../useFixedOverlayPosition';
+import { BORDER_RADIUS, OVERLAY_SHADOW, Z_INDEX_OVERLAY } from './overlayStyles';
 
 /**
  * Self-contained tooltip. Sibling pattern to SimpleSelect: pure
@@ -99,9 +100,9 @@ export default function HoverHint({ hint, children, maxWidth = 280, role = 'tool
             color: colors.TEXT_PRIMARY,
             background: colors.BG_ELEVATED,
             border: `1px solid ${colors.BORDER}`,
-            borderRadius: 8,
-            boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
-            zIndex: 99999,
+            borderRadius: BORDER_RADIUS.md,
+            boxShadow: OVERLAY_SHADOW,
+            zIndex: Z_INDEX_OVERLAY,
             // Bubble shouldn't capture mouse — moving the mouse onto
             // the bubble would `onMouseLeave` the trigger and close it.
             pointerEvents: 'none',

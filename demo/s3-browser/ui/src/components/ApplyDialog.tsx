@@ -20,6 +20,7 @@ import { Modal, Alert, Typography, Button, Space } from 'antd';
 import { CheckCircleOutlined, WarningOutlined, SyncOutlined } from '@ant-design/icons';
 import type { SectionApplyResponse, SectionName } from '../adminApi';
 import { useColors } from '../ThemeContext';
+import { BORDER_RADIUS } from './overlayStyles';
 
 const { Text } = Typography;
 
@@ -126,7 +127,7 @@ export default function ApplyDialog({
         style={{
           background: BG_CARD,
           border: `1px solid ${BORDER}`,
-          borderRadius: 8,
+          borderRadius: BORDER_RADIUS.md,
           padding: 12,
           marginBottom: 12,
         }}

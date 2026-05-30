@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useColors } from '../ThemeContext';
 import { useEscapeKey, useOnClickOutside } from '../useDocumentEvent';
 import { useFixedOverlayPosition } from '../useFixedOverlayPosition';
+import { BORDER_RADIUS, getOverlayBaseStyles } from './overlayStyles';
 
 /**
  * Self-contained dropdown select. No Ant Design popup layer, no rc-component/trigger,
@@ -81,7 +82,7 @@ export default function SimpleSelect({ value, onChange, options, placeholder, al
           display: 'inline-flex', alignItems: 'center', justifyContent: 'space-between',
           height: h, padding: '0 10px', cursor: disabled ? 'not-allowed' : 'pointer',
           border: `1px solid ${open ? colors.ACCENT_BLUE : colors.BORDER}`,
-          borderRadius: 6, background: colors.BG_ELEVATED,
+          borderRadius: BORDER_RADIUS.sm, background: colors.BG_ELEVATED,
           fontSize: isSmall ? 12 : 13, fontFamily: 'var(--font-ui)',
           color: selected ? colors.TEXT_PRIMARY : colors.TEXT_MUTED,
           transition: 'border-color 0.15s',
@@ -114,17 +115,7 @@ export default function SimpleSelect({ value, onChange, options, placeholder, al
         <div
           ref={setOverlay}
           style={{
-            position: 'fixed',
-            top: pos.top,
-            left: pos.left,
-            width: Math.max(pos.width, 200),
-            maxHeight: 240,
-            overflowY: 'auto',
-            background: colors.BG_ELEVATED,
-            border: `1px solid ${colors.BORDER}`,
-            borderRadius: 8,
-            boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
-            zIndex: 99999,
+            ...getOverlayBaseStyles(colors, pos, { minWidth: 200, maxHeight: 240 }),
             padding: 4,
           }}
         >

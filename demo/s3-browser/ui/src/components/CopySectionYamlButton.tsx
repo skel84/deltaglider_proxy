@@ -11,34 +11,13 @@
  * Settings group.
  */
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Input, Modal, Space, message } from 'antd';
+import { Alert, Button, Input, Modal, Space } from 'antd';
 import { CopyOutlined } from '@ant-design/icons';
 import type { SectionName } from '../adminApi';
 import { getSectionYaml } from '../adminApi';
 import { useColors } from '../ThemeContext';
-
-/** Strip full-line # comments (API bodies are comment-free; avoids double-detection if we re-fetch). */
-function stripLeadingYamlCommentLines(s: string): string {
-  return s
-    .split('\n')
-    .filter((line) => !/^\s*#/.test(line))
-    .join('\n')
-    .trim();
-}
-
-/**
- * True when the access section response is only an empty mapping.
- * Happens often: API responses use `redact_all_secrets()` (no SigV4 keys in YAML),
- * default `iam_mode: gui` is omitted by serde, and IAM directory state is DB-only.
- */
-function isRedactedEmptyAccessYaml(apiBody: string): boolean {
-  const core = stripLeadingYamlCommentLines(apiBody);
-  if (!core.startsWith('access:')) return false;
-  const rest = core.slice('access:'.length).trim();
-  if (rest === '') return true;
-  if (rest === '{}' || /^\{\s*\}$/.test(rest)) return true;
-  return false;
-}
+import { useCopyToClipboard } from '../useCopyToClipboard';
+import { isRedactedEmptyAccessYaml } from '../yamlUtils';
 
 const ACCESS_EMPTY_YAML_EXPLAINER = `# -----------------------------------------------------------------------------
 # Why this block looks empty (expected)
@@ -63,8 +42,7 @@ export function SectionYamlModal({ section, open, onClose }: SectionYamlModalPro
   const [accessEmptyExplainer, setAccessEmptyExplainer] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [copying, setCopying] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const { copy, copied } = useCopyToClipboard();
   const mountedRef = useRef(true);
   useEffect(
     () => () => {
@@ -79,7 +57,6 @@ export function SectionYamlModal({ section, open, onClose }: SectionYamlModalPro
     let cancelled = false;
     setLoading(true);
     setError(null);
-    setCopied(false);
     setAccessEmptyExplainer(false);
     getSectionYaml(section)
       .then((text) => {
@@ -110,44 +87,15 @@ export function SectionYamlModal({ section, open, onClose }: SectionYamlModalPro
   const label = section.charAt(0).toUpperCase() + section.slice(1);
 
   const handleClose = () => {
-    setCopied(false);
     onClose();
   };
 
-  const handleCopy = async () => {
-    if (!yaml) return;
-    setCopying(true);
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(yaml);
-        if (!mountedRef.current) return;
-        setCopied(true);
-        message.success(`Copied ${section} YAML to clipboard`);
-      } else {
-        // Clipboard API blocked / unavailable. Fall back to download.
-        message.warning(
-          'Clipboard API unavailable — falling back to a download. Check your browser permissions.'
-        );
-        const blob = new Blob([yaml], { type: 'application/yaml' });
-        const url = URL.createObjectURL(blob);
-        try {
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `dgp-${section}.yaml`;
-          a.click();
-        } finally {
-          URL.revokeObjectURL(url);
-        }
-      }
-    } catch (e) {
-      if (!mountedRef.current) return;
-      message.error(
-        `Copy failed: ${e instanceof Error ? e.message : 'unknown error'}`
-      );
-    } finally {
-      if (mountedRef.current) setCopying(false);
-    }
-  };
+  const handleCopy = () =>
+    copy(yaml, {
+      successMessage: `Copied ${section} YAML to clipboard`,
+      fallbackFilename: `dgp-${section}.yaml`,
+      fallbackMimeType: 'application/yaml',
+    });
 
   return (
     <Modal
@@ -162,7 +110,6 @@ export function SectionYamlModal({ section, open, onClose }: SectionYamlModalPro
           <Button
             type="primary"
             icon={<CopyOutlined />}
-            loading={copying}
             onClick={() => {
               void handleCopy();
             }}

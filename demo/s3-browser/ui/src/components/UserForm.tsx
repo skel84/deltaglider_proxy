@@ -5,10 +5,13 @@ import type { IamUser, IamGroup, CreateUserRequest, UpdateUserRequest, CannedPol
 import { createUser, updateUser, deleteUser, rotateUserKeys, getCannedPolicies, getGroups } from '../adminApi';
 import { setCredentials, getCredentials } from '../s3client';
 import { useCardStyles } from './shared-styles';
+import FormLabel from './FormLabel';
 import { useColors } from '../ThemeContext';
 import PermissionEditor from './PermissionEditor';
+import PermissionSummarySection from './PermissionSummarySection';
 import { permissionsToRows, rowsToPermissions, type PermissionRow } from './permissionRows';
 import CredentialsBanner from './CredentialsBanner';
+import { generateId, generateSecret } from '../credentialGeneration';
 
 const { Text, Title } = Typography;
 
@@ -18,23 +21,6 @@ const FALLBACK_PRESETS: Record<string, PermissionRow[]> = {
   'Read/Write': [{ effect: 'Allow', actions: ['read', 'write', 'list'], resources: '*' }],
   'Read Only': [{ effect: 'Allow', actions: ['read', 'list'], resources: '*' }],
 };
-
-/** Cryptographically secure random string from the given alphabet. */
-function secureRandom(alphabet: string, length: number): string {
-  const buf = new Uint8Array(length);
-  crypto.getRandomValues(buf);
-  return Array.from(buf, (b) => alphabet[b % alphabet.length]).join('');
-}
-
-function generateId(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  return 'AK' + secureRandom(chars, 18);
-}
-
-function generateSecret(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  return secureRandom(chars, 40);
-}
 
 interface UserFormProps {
   user: IamUser | null; // null = create mode
@@ -161,13 +147,6 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
     secretKey.trim().length > 0
   );
 
-  const label = (text: string, hint?: string) => (
-    <div style={{ marginBottom: 4 }}>
-      <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>{text}</Text>
-      {hint && <Text type="secondary" style={{ fontSize: 10, fontWeight: 400, marginLeft: 6 }}>{hint}</Text>}
-    </div>
-  );
-
   return (
     <div style={{ padding: '24px 28px', maxWidth: 600, overflow: 'auto', height: '100%' }}>
       <div style={{ marginBottom: 20 }}>
@@ -223,12 +202,12 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
       {error && <Alert type="error" message={error} showIcon closable onClose={() => setError('')} style={{ marginBottom: 16, borderRadius: 8 }} />}
 
       <div style={{ marginBottom: 16 }}>
-        {label('Name')}
+        <FormLabel text="Name" />
         <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. ci-bot" style={{ ...inputRadius }} />
       </div>
 
       <div style={{ marginBottom: 16 }}>
-        {label('Access Key ID', isEdit ? undefined : '(auto-generated if empty)')}
+        <FormLabel text="Access Key ID" hint={isEdit ? undefined : '(auto-generated if empty)'} />
         <Space.Compact style={{ width: '100%' }}>
           <Input
             value={accessKeyId}
@@ -243,7 +222,7 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
       </div>
 
       <div style={{ marginBottom: 16 }}>
-        {label('Secret Access Key', isEdit ? '(leave empty to keep current)' : '(auto-generated if empty)')}
+        <FormLabel text="Secret Access Key" hint={isEdit ? '(leave empty to keep current)' : '(auto-generated if empty)'} />
         <Space.Compact style={{ width: '100%' }}>
           <Input.Password
             value={secretKey}
@@ -256,7 +235,7 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
       </div>
 
       <div style={{ marginBottom: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
-        {label('Enabled')}
+        <FormLabel text="Enabled" />
         <Switch checked={enabled} onChange={setEnabled} size="small" />
       </div>
 
@@ -288,117 +267,14 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
 
       <PermissionEditor permissions={permissions} onChange={setPermissions} />
 
-      {isEdit && (() => {
-        const memberGroups = userGroups.filter(g => user && g.member_ids.includes(user.id));
-        const inheritedPerms = memberGroups.flatMap(g => g.permissions.map(p => ({ ...p, _group: g.name, _groupId: g.id })));
-        const directPerms = rowsToPermissions(permissions);
-        const allPerms = [...directPerms, ...inheritedPerms.map(p => ({ id: p.id, effect: p.effect, actions: p.actions, resources: p.resources, conditions: p.conditions }))];
-
-        return (
-          <div style={{ marginBottom: 24 }}>
-            <Divider style={{ margin: '20px 0 12px' }}>Groups &amp; Inherited Access</Divider>
-
-            {/* Group memberships — clickable */}
-            {memberGroups.length > 0 ? (
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {memberGroups.map(g => (
-                    <Tag
-                      key={g.id}
-                      color="blue"
-                      style={{
-                        borderRadius: 8, fontSize: 12, padding: '3px 12px', margin: 0,
-                        cursor: onNavigateToGroup ? 'pointer' : undefined,
-                      }}
-                      onClick={() => onNavigateToGroup?.(g.id)}
-                    >
-                      {g.name}
-                      <span style={{ marginLeft: 4, opacity: 0.6, fontSize: 10 }}>
-                        {g.permissions.length} rule{g.permissions.length !== 1 ? 's' : ''} · {g.member_ids.length} member{g.member_ids.length !== 1 ? 's' : ''}
-                      </span>
-                    </Tag>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>
-                Not a member of any group. Permissions come only from the rules above.
-              </Text>
-            )}
-
-            {/* Inherited permissions — per group */}
-            {memberGroups.map(g => {
-              if (g.permissions.length === 0) return null;
-              return (
-                <div key={g.id} style={{ marginBottom: 12 }}>
-                  <div style={{
-                    display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6,
-                    cursor: onNavigateToGroup ? 'pointer' : undefined,
-                  }} onClick={() => onNavigateToGroup?.(g.id)}>
-                    <Text style={{ fontSize: 11, fontWeight: 700, color: colors.ACCENT_BLUE, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                      From {g.name}
-                    </Text>
-                    <span style={{ fontSize: 10, color: colors.TEXT_MUTED }}>↗</span>
-                  </div>
-                  {g.permissions.map((perm, i) => {
-                    const isDeny = perm.effect === 'Deny';
-                    return (
-                      <div key={i} style={{
-                        border: `1px solid ${isDeny ? `${colors.ACCENT_RED}20` : colors.BORDER}`,
-                        borderLeft: isDeny ? `3px solid ${colors.ACCENT_RED}60` : `3px solid ${colors.ACCENT_BLUE}40`,
-                        borderRadius: 8, padding: '8px 12px', marginBottom: 4,
-                        background: isDeny ? `${colors.ACCENT_RED}05` : colors.BG_BASE,
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <Tag color={isDeny ? 'red' : 'green'} style={{ fontSize: 10, borderRadius: 4, margin: 0 }}>{perm.effect}</Tag>
-                          <Text style={{ fontSize: 12 }}>
-                            <strong>{perm.actions.join(', ')}</strong> on {perm.resources.join(', ')}
-                          </Text>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-
-            {/* Effective permissions summary — all merged */}
-            {allPerms.length > 0 && (
-              <div style={{
-                marginTop: 16, padding: 12, borderRadius: 8,
-                background: `${colors.ACCENT_BLUE}08`, border: `1px solid ${colors.ACCENT_BLUE}20`,
-              }}>
-                <Text style={{
-                  fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
-                  color: colors.ACCENT_BLUE, display: 'block', marginBottom: 8,
-                }}>
-                  Effective Permissions ({directPerms.length} direct + {inheritedPerms.length} inherited)
-                </Text>
-                {allPerms.map((perm, i) => {
-                  const isDeny = perm.effect === 'Deny';
-                  const source = i < directPerms.length ? 'direct' : inheritedPerms[i - directPerms.length]?._group;
-                  return (
-                    <div key={i} style={{
-                      display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0',
-                      borderBottom: i < allPerms.length - 1 ? `1px solid ${colors.BORDER}` : undefined,
-                    }}>
-                      <Tag color={isDeny ? 'red' : 'green'} style={{ fontSize: 10, borderRadius: 4, margin: 0, flexShrink: 0 }}>
-                        {perm.effect}
-                      </Tag>
-                      <Text style={{ fontSize: 12, flex: 1 }}>
-                        {perm.actions.join(', ')} on {perm.resources.join(', ')}
-                      </Text>
-                      <Text style={{ fontSize: 10, color: colors.TEXT_MUTED, flexShrink: 0 }}>
-                        {source}
-                      </Text>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })()}
+      {isEdit && user && (
+        <PermissionSummarySection
+          user={user}
+          permissions={permissions}
+          userGroups={userGroups}
+          onNavigateToGroup={onNavigateToGroup}
+        />
+      )}
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>

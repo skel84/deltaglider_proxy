@@ -16,6 +16,7 @@ function sectionPanelStyle(
 }
 import { useOnClickOutside } from '../useDocumentEvent';
 import { useFixedOverlayPosition } from '../useFixedOverlayPosition';
+import { BORDER_RADIUS, getOverlayBaseStyles } from './overlayStyles';
 
 /**
  * Self-contained autocomplete input. Type to filter, click to select,
@@ -203,7 +204,7 @@ export default function SimpleAutoComplete({
             height: 36,
             padding: '0 10px',
             border: `1px solid ${focused ? colors.ACCENT_BLUE : colors.BORDER}`,
-            borderRadius: 6,
+            borderRadius: BORDER_RADIUS.sm,
             background: colors.BG_ELEVATED,
             color: colors.TEXT_PRIMARY,
             outline: 'none',
@@ -221,20 +222,8 @@ export default function SimpleAutoComplete({
           id={listId}
           role="listbox"
           style={{
-            position: 'fixed',
-            top: pos.top,
-            left: pos.left,
-            width: Math.max(pos.width, 220),
-            maxHeight: 280,
-            overflowY: 'auto',
-            background: colors.BG_ELEVATED,
-            border: `1px solid ${colors.BORDER}`,
-            borderRadius: 8,
-            boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
-            zIndex: 99999,
+            ...getOverlayBaseStyles(colors, pos, { minWidth: 220, maxHeight: 280, flexLayout: true }),
             padding: useSectionPanels ? '8px 6px 10px' : '4px 0',
-            display: 'flex',
-            flexDirection: 'column',
             gap: useSectionPanels ? 10 : 0,
           }}
         >

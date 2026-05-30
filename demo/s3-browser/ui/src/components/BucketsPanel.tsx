@@ -50,6 +50,7 @@ import SectionHeader from './SectionHeader';
 import SimpleSelect from './SimpleSelect';
 import SimpleAutoComplete from './SimpleAutoComplete';
 import ApplyDialog from './ApplyDialog';
+import { formRow } from './ruleEditorHelpers';
 import { useApplyHandler, useDirtySection } from '../useDirtySection';
 
 const { Text } = Typography;
@@ -532,16 +533,8 @@ function BucketCard({
       </div>
 
       {/* Compression + alias + quota row */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 16,
-          flexWrap: 'wrap',
-          marginBottom: 12,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <div style={formRow(16, { flexWrap: 'wrap', marginBottom: 12 })}>
+        <div style={formRow(8, { flexWrap: 'wrap' })}>
           <Text style={{ fontSize: 12, fontFamily: 'var(--font-ui)', color: colors.TEXT_MUTED }}>
             Compression
           </Text>
@@ -625,7 +618,7 @@ function BucketCard({
             );
           })()}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={formRow(6)}>
           <Text style={{ fontSize: 11, color: colors.TEXT_MUTED }}>Alias:</Text>
           <Input
             value={row.alias}
@@ -640,7 +633,7 @@ function BucketCard({
             size="small"
           />
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={formRow(6)}>
           <Text
             style={{
               fontSize: 11,
@@ -715,7 +708,7 @@ function BucketCard({
                   : [],
             });
           }}
-          style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
+          style={formRow(6, { flexDirection: 'column', alignItems: 'stretch' })}
         >
           <Radio value="none" style={{ alignItems: 'flex-start' }}>
             <div>
@@ -763,7 +756,7 @@ function BucketCard({
                   {row.public_prefixes.map((prefix) => (
                     <div
                       key={prefix.id}
-                      style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+                      style={formRow(4)}
                     >
                       <Input
                         value={prefix.value}

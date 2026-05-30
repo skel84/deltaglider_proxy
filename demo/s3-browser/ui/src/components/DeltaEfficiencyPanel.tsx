@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Typography, Button, Tag, Alert, Space, Select, InputNumber, Spin } from 'antd';
 import { ReloadOutlined, ThunderboltOutlined, CopyOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
+import { clamp, formatBytes } from '../utils';
 import {
   fetchDeltaEfficiency,
   triggerDeltaEfficiencyScan,
@@ -52,14 +53,6 @@ function efficiencyLabel(e: DeltaEfficiency): string {
     case 'poor': return 'Poor';
     case 'no_reference': return 'No reference';
   }
-}
-
-function fmtBytes(n: number | null | undefined): string {
-  if (n == null) return '—';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 function copyToClipboard(text: string) {
@@ -477,7 +470,7 @@ function HeroHeadline({
     : `${actionable} of ${totalReported.toLocaleString()} prefixes need re-baselining`;
   const subText = allHealthy
     ? `Scanned ${totalReported.toLocaleString()} deltaspace(s) with ≥${minDeltas} deltas. No regression found.`
-    : `≈ ${fmtBytes(totalRecoverableBytes)} stored as bad-reference deltas. Re-upload the listed prefixes to recover.`;
+    : `≈ ${formatBytes(totalRecoverableBytes)} stored as bad-reference deltas. Re-upload the listed prefixes to recover.`;
 
   return (
     <div
@@ -819,7 +812,7 @@ function RatioRow({
           color: colors.TEXT_SECONDARY,
         }}
       >
-        {fmtBytes(r.reference_bytes)}
+        {r.reference_bytes == null ? '—' : formatBytes(r.reference_bytes)}
       </div>
 
       {/* Stored / original. Without verification: just stored bytes.
@@ -920,7 +913,7 @@ function StoredCell({
       }}
     >
       <div style={{ color: storedColor, fontWeight: storedWeight }}>
-        {fmtBytes(r.total_delta_bytes)}
+        {formatBytes(r.total_delta_bytes)}
       </div>
       {verified && <VerifiedStoredVsOriginal verified={verified} />}
       {verify?.status === 'loading' && (
@@ -972,15 +965,15 @@ function VerifiedStoredVsOriginal({ verified }: { verified: VerifyDeltaEfficienc
             <b>Verified from {verified.deltas.toLocaleString()} HEAD calls.</b>
           </div>
           <div style={{ marginTop: 4 }}>
-            Originals total: <b>{fmtBytes(verified.total_original_bytes)}</b>
+            Originals total: <b>{formatBytes(verified.total_original_bytes)}</b>
           </div>
           <div>
-            DG storage: <b>{fmtBytes(verified.total_stored_bytes)}</b>
+            DG storage: <b>{formatBytes(verified.total_stored_bytes)}</b>
           </div>
           <div style={{ marginTop: 4, color: savedColor }}>
             {positive
-              ? `DG is saving ${fmtBytes(verified.true_savings_bytes)} on this prefix.`
-              : `DG is costing ${fmtBytes(-verified.true_savings_bytes)} extra on this prefix — you'd be better off without it.`}
+              ? `DG is saving ${formatBytes(verified.true_savings_bytes)} on this prefix.`
+              : `DG is costing ${formatBytes(-verified.true_savings_bytes)} extra on this prefix — you'd be better off without it.`}
           </div>
         </>
       }
@@ -1000,7 +993,7 @@ function VerifiedStoredVsOriginal({ verified }: { verified: VerifyDeltaEfficienc
         }}
       >
         <div style={{ fontSize: 10, color: colors.TEXT_MUTED }}>
-          orig {fmtBytes(verified.total_original_bytes)}
+          orig {formatBytes(verified.total_original_bytes)}
         </div>
         <div
           style={{
@@ -1265,10 +1258,6 @@ function AxisLine({
       )}
     </>
   );
-}
-
-function clamp(n: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, n));
 }
 
 /**

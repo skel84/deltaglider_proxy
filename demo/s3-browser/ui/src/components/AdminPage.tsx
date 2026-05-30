@@ -2,23 +2,7 @@ import { cloneElement, isValidElement, useState, useEffect, useCallback, useMemo
 import { Typography, Button, Input, Alert, Space, Spin, Drawer, message, Modal } from 'antd';
 import { checkSession, adminLogin, whoami, loginAs, exportBackup, importBackup, ImportBackupError, type ExternalProviderInfo, type ImportBackupMode } from '../adminApi';
 import { getCredentials, initFromSession } from '../s3client';
-import {
-  CloudOutlined,
-  CloudServerOutlined,
-  DatabaseOutlined,
-  TeamOutlined,
-  FolderOutlined,
-  LockOutlined,
-  DashboardOutlined,
-  SafetyOutlined,
-  ExperimentOutlined,
-  SecurityScanOutlined,
-  SettingOutlined,
-  MenuOutlined,
-  SyncOutlined,
-  ClockCircleOutlined,
-  DownloadOutlined,
-} from '@ant-design/icons';
+import { LockOutlined, MenuOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import FullScreenHeader from './FullScreenHeader';
 import UsersPanel from './UsersPanel';
@@ -28,6 +12,7 @@ import BackendsPanel from './BackendsPanel';
 import MetricsPage from './MetricsPage';
 import OAuthProviderList from './OAuthProviderList';
 import AdminSidebar from './AdminSidebar';
+import { headerForPath } from './adminNavigation';
 import AdmissionPanel from './AdmissionPanel';
 import CredentialsModePanel from './CredentialsModePanel';
 import BucketsPanel from './BucketsPanel';
@@ -62,7 +47,6 @@ import {
 import { useNavigation } from '../NavigationContext';
 import TabHeader from './TabHeader';
 import { YamlImportExportModal } from './YamlImportExportModal';
-import { FileTextOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useDirtyGlobalIndicators, requestApplyCurrent } from '../useDirtySection';
 import type { SectionName } from '../adminApi';
 import type { AccountMenuConfigProps } from './AccountMenu';
@@ -153,114 +137,6 @@ function resolveAdminPath(subPath: string): string {
   }
   return 'diagnostics/dashboard';
 }
-
-/**
- * Header metadata for the current admin page, indexed by the new
- * canonical path. Used by `renderAdminContent` to render a
- * `TabHeader` above the page content.
- */
-const PAGE_HEADERS: Record<string, { icon: React.ReactNode; title: string; description: string }> = {
-  'diagnostics/dashboard': {
-    icon: <DashboardOutlined />,
-    title: 'Dashboard',
-    description: 'Health, metrics, and admission-chain preview. Landing page for the admin UI.',
-  },
-  'diagnostics/trace': {
-    icon: <ExperimentOutlined />,
-    title: 'Admission trace',
-    description: 'Evaluate a synthetic request against the current admission chain. See which block fires and why.',
-  },
-  'diagnostics/audit': {
-    icon: <FileTextOutlined />,
-    title: 'Audit log',
-    description: 'Recent authentication + mutation events from this process (in-memory ring, default 500 entries). Stdout remains authoritative for long-term audit.',
-  },
-  'diagnostics/delta-efficiency': {
-    icon: <ThunderboltOutlined />,
-    title: 'Delta efficiency',
-    description: "Scan a bucket's deltaspaces and surface prefixes where the reference baseline is producing larger deltas than expected. Read-only diagnostic; you decide what to re-upload.",
-  },
-  'diagnostics/event-outbox': {
-    icon: <DatabaseOutlined />,
-    title: 'Event outbox',
-    description: 'Durable object mutation events, delivery state, retry backoff, and failed webhook rows from the encrypted config DB.',
-  },
-  'configuration/admission': {
-    icon: <SecurityScanOutlined />,
-    title: 'Admission',
-    description: 'Pre-auth request gating. Blocks are evaluated top to bottom; first match wins. Synthesized blocks from bucket public_prefixes fire after operator-authored ones.',
-  },
-  'configuration/access/credentials': {
-    icon: <LockOutlined />,
-    title: 'Credentials & mode',
-    description: 'IAM mode (GUI vs. declarative), authentication mode, legacy SigV4 bootstrap credentials, admin password.',
-  },
-  'configuration/access/users': {
-    icon: <TeamOutlined />,
-    title: 'Users',
-    description: 'IAM users with fine-grained S3 permissions. In declarative IAM mode, this panel is read-only — edit your YAML instead.',
-  },
-  'configuration/access/groups': {
-    icon: <FolderOutlined />,
-    title: 'Groups',
-    description: 'Organize users into groups with shared permission policies.',
-  },
-  'configuration/access/ext-auth': {
-    icon: <SafetyOutlined />,
-    title: 'External authentication',
-    description: 'OAuth/OIDC providers and group mapping rules for SSO.',
-  },
-  'configuration/storage/backends': {
-    icon: <CloudServerOutlined />,
-    title: 'Backends',
-    description: 'Storage backends, default backend selection, connection tests, and encryption-at-rest.',
-  },
-  'configuration/storage/buckets': {
-    icon: <CloudOutlined />,
-    title: 'Buckets',
-    description: 'Per-bucket policies: compression overrides, delta ratio, public prefixes, quotas, aliases.',
-  },
-  'configuration/storage/replication': {
-    icon: <SyncOutlined />,
-    title: 'Object replication',
-    description: 'Object data replication between buckets and prefixes. Rules are storage config; runtime state lives in the encrypted config DB.',
-  },
-  'configuration/storage/lifecycle': {
-    icon: <ClockCircleOutlined />,
-    title: 'Object lifecycle',
-    description: 'Delete-only object expiration rules with read-only preview, guarded run-now, and scheduler history.',
-  },
-  'configuration/recovery': {
-    icon: <DownloadOutlined />,
-    title: 'Backup',
-    description: 'Download a full backup bundle or restore one (IAM and control-plane state).',
-  },
-  'configuration/advanced/listener': {
-    icon: <CloudServerOutlined />,
-    title: 'Listener & TLS',
-    description: 'HTTP listen address, TLS cert and key paths.',
-  },
-  'configuration/advanced/caches': {
-    icon: <DatabaseOutlined />,
-    title: 'Caches',
-    description: 'Reference cache, metadata cache, codec concurrency, blocking-thread pool size.',
-  },
-  'configuration/advanced/limits': {
-    icon: <CloudOutlined />,
-    title: 'Limits',
-    description: 'Request timeouts, concurrency caps, multipart-upload limits. Most are env-var driven.',
-  },
-  'configuration/advanced/logging': {
-    icon: <DatabaseOutlined />,
-    title: 'Logging',
-    description: 'tracing-subscriber EnvFilter string. Changes take effect immediately without restart.',
-  },
-  'configuration/advanced/sync': {
-    icon: <SettingOutlined />,
-    title: 'Config DB sync',
-    description: 'S3 bucket for encrypted IAM/config database HA across proxy instances. This is not object replication.',
-  },
-};
 
 interface AdminPageProps {
   onBack: () => void;
@@ -618,7 +494,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
    * URL segment should land somewhere sensible.
    */
   const renderContent = () => {
-    const meta = PAGE_HEADERS[adminPath];
+    const meta = headerForPath(adminPath);
     const header = meta ? (
       <TabHeader icon={meta.icon} title={meta.title} description={meta.description} />
     ) : null;

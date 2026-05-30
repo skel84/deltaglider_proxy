@@ -49,7 +49,7 @@ import {
 } from 'motion/react';
 import { SettingOutlined, ClockCircleOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
-import { formatBytes } from '../utils';
+import { formatBytes, clamp, dotPattern } from '../utils';
 import { useFixedOverlayPosition } from '../useFixedOverlayPosition';
 
 /** Cost rate presets — moved here from AnalyticsSection (sole caller now). */
@@ -122,8 +122,8 @@ function HeroInner({
     v => v < 10 ? v.toFixed(2) : v.toFixed(2),
   );
 
-  const targetPercent = clampPercent(savingsPercent);
-  const targetSavedWidth = clampPercent(savingsPercent);
+  const targetPercent = clamp(savingsPercent, 0, 100);
+  const targetSavedWidth = clamp(savingsPercent, 0, 100);
   const targetDollars = Math.max(0, monthlySavings);
 
   // Skip the count-up sequence when:
@@ -637,22 +637,4 @@ function HeroInner({
       </div>
     </div>
   );
-}
-
-/** Clamp to [0, 100] and round NaN to 0. */
-function clampPercent(v: number): number {
-  if (!Number.isFinite(v) || v < 0) return 0;
-  if (v > 100) return 100;
-  return v;
-}
-
-/**
- * Tiny 4×4 dot pattern as a CSS background-image (inline SVG, no
- * external asset). Used to texturise the saved-bar so it reads as
- * negative space without introducing another colour to the eye.
- */
-function dotPattern(color: string): string {
-  const safe = encodeURIComponent(color);
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='6' height='6'><circle cx='1' cy='1' r='1' fill='${safe}' fill-opacity='0.5'/></svg>`;
-  return `url("data:image/svg+xml;utf8,${svg.replace(/"/g, "'")}")`;
 }

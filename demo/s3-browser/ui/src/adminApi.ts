@@ -254,6 +254,19 @@ async function safeJson<T>(res: Response): Promise<T> {
   }
 }
 
+/**
+ * GET a path and parse the JSON body, throwing an actionable error
+ * (via `throwApiError`) on a non-2xx status. Collapses the ubiquitous
+ * `adminFetch → if (!res.ok) throwApiError → safeJson` triple. Only for
+ * the plain happy-path shape — callsites with bespoke fallback handling
+ * (null-on-404, try/catch defaults, custom error bodies) stay explicit.
+ */
+async function fetchJson<T>(path: string, errorContext: string): Promise<T> {
+  const res = await adminFetch(path);
+  if (!res.ok) await throwApiError(res, errorContext);
+  return safeJson<T>(res);
+}
+
 export async function updateAdminConfig(updates: Record<string, unknown>): Promise<ConfigUpdateResponse> {
   const res = await adminFetch('/api/admin/config', 'PUT', updates);
   return safeJson(res);
@@ -344,9 +357,7 @@ export interface SectionApplyResponse {
  * value.
  */
 export async function getSection<T = unknown>(section: SectionName): Promise<T> {
-  const res = await adminFetch(`/api/admin/config/section/${section}`);
-  if (!res.ok) await throwApiError(res, `Section fetch (${section})`);
-  return safeJson(res);
+  return fetchJson(`/api/admin/config/section/${section}`, `Section fetch (${section})`);
 }
 
 /**
@@ -908,15 +919,11 @@ export interface CreateBackendRequest {
 }
 
 export async function getBackends(): Promise<BackendListResponse> {
-  const res = await adminFetch('/api/admin/backends');
-  if (!res.ok) await throwApiError(res, 'Load backends');
-  return safeJson(res);
+  return fetchJson('/api/admin/backends', 'Load backends');
 }
 
 export async function getBucketOrigins(): Promise<BucketOriginListResponse> {
-  const res = await adminFetch('/api/admin/buckets');
-  if (!res.ok) await throwApiError(res, 'Load bucket origins');
-  return safeJson(res);
+  return fetchJson('/api/admin/buckets', 'Load bucket origins');
 }
 
 export async function createBucketOnBackend(
@@ -1080,9 +1087,7 @@ export interface ReplicationFailureEntry {
 }
 
 export async function getReplicationOverview(): Promise<ReplicationOverview> {
-  const res = await adminFetch('/api/admin/replication');
-  if (!res.ok) await throwApiError(res, 'Replication overview');
-  return safeJson(res);
+  return fetchJson('/api/admin/replication', 'Replication overview');
 }
 
 export async function runReplicationNow(rule: string): Promise<ReplicationRunNowResponse> {
@@ -1102,15 +1107,11 @@ export async function resumeReplicationRule(rule: string): Promise<void> {
 }
 
 export async function getReplicationHistory(rule: string, limit = 20): Promise<{ runs: ReplicationHistoryEntry[] }> {
-  const res = await adminFetch(`/api/admin/replication/rules/${encodeURIComponent(rule)}/history?limit=${encodeURIComponent(limit)}`);
-  if (!res.ok) await throwApiError(res, 'Replication history');
-  return safeJson(res);
+  return fetchJson(`/api/admin/replication/rules/${encodeURIComponent(rule)}/history?limit=${encodeURIComponent(limit)}`, 'Replication history');
 }
 
 export async function getReplicationFailures(rule: string, limit = 20): Promise<{ failures: ReplicationFailureEntry[] }> {
-  const res = await adminFetch(`/api/admin/replication/rules/${encodeURIComponent(rule)}/failures?limit=${encodeURIComponent(limit)}`);
-  if (!res.ok) await throwApiError(res, 'Replication failures');
-  return safeJson(res);
+  return fetchJson(`/api/admin/replication/rules/${encodeURIComponent(rule)}/failures?limit=${encodeURIComponent(limit)}`, 'Replication failures');
 }
 
 // === Object Lifecycle ===
@@ -1189,9 +1190,7 @@ export interface LifecycleFailureEntry {
 }
 
 export async function getLifecycleOverview(): Promise<LifecycleOverview> {
-  const res = await adminFetch('/api/admin/lifecycle');
-  if (!res.ok) await throwApiError(res, 'Lifecycle overview');
-  return safeJson(res);
+  return fetchJson('/api/admin/lifecycle', 'Lifecycle overview');
 }
 
 export async function previewLifecycleRule(rule: string): Promise<LifecycleRunOutcome> {
@@ -1207,15 +1206,11 @@ export async function runLifecycleNow(rule: string): Promise<LifecycleRunOutcome
 }
 
 export async function getLifecycleHistory(rule: string, limit = 20): Promise<{ runs: LifecycleHistoryEntry[] }> {
-  const res = await adminFetch(`/api/admin/lifecycle/rules/${encodeURIComponent(rule)}/history?limit=${encodeURIComponent(limit)}`);
-  if (!res.ok) await throwApiError(res, 'Lifecycle history');
-  return safeJson(res);
+  return fetchJson(`/api/admin/lifecycle/rules/${encodeURIComponent(rule)}/history?limit=${encodeURIComponent(limit)}`, 'Lifecycle history');
 }
 
 export async function getLifecycleFailures(rule: string, limit = 20): Promise<{ failures: LifecycleFailureEntry[] }> {
-  const res = await adminFetch(`/api/admin/lifecycle/rules/${encodeURIComponent(rule)}/failures?limit=${encodeURIComponent(limit)}`);
-  if (!res.ok) await throwApiError(res, 'Lifecycle failures');
-  return safeJson(res);
+  return fetchJson(`/api/admin/lifecycle/rules/${encodeURIComponent(rule)}/failures?limit=${encodeURIComponent(limit)}`, 'Lifecycle failures');
 }
 
 // === External Auth (OAuth/OIDC) ===
@@ -1270,9 +1265,7 @@ export interface ProviderTestResult {
 }
 
 export async function getAuthProviders(): Promise<AuthProvider[]> {
-  const res = await adminFetch('/api/admin/ext-auth/providers');
-  if (!res.ok) await throwApiError(res, 'Load auth providers');
-  return safeJson(res);
+  return fetchJson('/api/admin/ext-auth/providers', 'Load auth providers');
 }
 
 export async function createAuthProvider(req: CreateAuthProviderRequest): Promise<AuthProvider> {
@@ -1330,9 +1323,7 @@ interface UpdateMappingRuleRequest {
 }
 
 export async function getMappingRules(): Promise<MappingRule[]> {
-  const res = await adminFetch('/api/admin/ext-auth/mappings');
-  if (!res.ok) await throwApiError(res, 'Load group mappings');
-  return safeJson(res);
+  return fetchJson('/api/admin/ext-auth/mappings', 'Load group mappings');
 }
 
 export async function createMappingRule(req: CreateMappingRuleRequest): Promise<MappingRule> {
@@ -1378,9 +1369,7 @@ export interface ExternalIdentity {
 }
 
 export async function getExternalIdentities(): Promise<ExternalIdentity[]> {
-  const res = await adminFetch('/api/admin/ext-auth/identities');
-  if (!res.ok) await throwApiError(res, 'Load external identities');
-  return safeJson(res);
+  return fetchJson('/api/admin/ext-auth/identities', 'Load external identities');
 }
 
 interface SyncResult {
@@ -1425,9 +1414,7 @@ interface AuditResponse {
  * governed by `DGP_AUDIT_RING_SIZE` (default 500).
  */
 export async function fetchAudit(limit = 100): Promise<AuditResponse> {
-  const res = await adminFetch(`/api/admin/audit?limit=${encodeURIComponent(limit)}`);
-  if (!res.ok) await throwApiError(res, 'Audit fetch');
-  return safeJson(res);
+  return fetchJson(`/api/admin/audit?limit=${encodeURIComponent(limit)}`, 'Audit fetch');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1492,9 +1479,7 @@ export async function fetchEventOutbox(
     order,
   });
   if (status && status !== 'all') qs.set('status', status);
-  const res = await adminFetch(`/api/admin/event-outbox?${qs.toString()}`);
-  if (!res.ok) await throwApiError(res, 'Event outbox fetch');
-  return safeJson(res);
+  return fetchJson(`/api/admin/event-outbox?${qs.toString()}`, 'Event outbox fetch');
 }
 
 export async function requeueEventOutbox(id: number): Promise<EventOutboxRequeueResponse> {
@@ -1602,9 +1587,7 @@ interface ListAllResponse {
 export async function listAllUnderPrefix(bucket: string, prefix: string): Promise<ListAllResponse> {
   if (!prefix) throw new Error('listAllUnderPrefix: prefix must be non-empty');
   const qs = new URLSearchParams({ bucket, prefix });
-  const res = await adminFetch(`/api/admin/objects/list?${qs.toString()}`);
-  if (!res.ok) await throwApiError(res, 'List under prefix');
-  return safeJson(res);
+  return fetchJson(`/api/admin/objects/list?${qs.toString()}`, 'List under prefix');
 }
 
 /**
@@ -1860,9 +1843,7 @@ export interface BucketScanProgress {
 export async function getAllBucketScans(): Promise<{
   buckets: Record<string, BucketScanResult>;
 }> {
-  const res = await adminFetch('/api/admin/diagnostics/scan/status');
-  if (!res.ok) await throwApiError(res, 'Bucket scan status (all)');
-  return safeJson(res);
+  return fetchJson('/api/admin/diagnostics/scan/status', 'Bucket scan status (all)');
 }
 
 /**
