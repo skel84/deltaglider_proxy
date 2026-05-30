@@ -23,7 +23,7 @@ interface Props {
 export default function UploadPage({ prefix, onBack, onDone }: Props) {
   const {
     BG_BASE, BG_ELEVATED, BORDER, TEXT_PRIMARY,
-    TEXT_SECONDARY, TEXT_MUTED, ACCENT_BLUE, ACCENT_GREEN, ACCENT_RED, ACCENT_PURPLE,
+    TEXT_SECONDARY, TEXT_MUTED, ACCENT_BLUE, ACCENT_GREEN, ACCENT_RED, ACCENT_PURPLE, ACCENT_AMBER,
   } = useColors();
   const [destination, setDestination] = useState(prefix);
   const [dragging, setDragging] = useState(false);
@@ -310,6 +310,7 @@ export default function UploadPage({ prefix, onBack, onDone }: Props) {
             accentBlue={ACCENT_BLUE}
             accentGreen={ACCENT_GREEN}
             accentRed={ACCENT_RED}
+            finalizingColor={ACCENT_AMBER}
             onCancelUpload={cancelUpload}
             onRetryUpload={retryUpload}
           />

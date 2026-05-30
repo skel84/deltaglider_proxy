@@ -144,6 +144,15 @@ async function sendCommand<T>(command: object, context: string): Promise<T> {
   }
 }
 
+/**
+ * A CommonPrefix is a real folder iff it's non-empty, not equal to the prefix
+ * we listed under, and doesn't end in "//". The "//" case shows as a bogus "/"
+ * folder in the UI and comes from objects with empty path segments.
+ */
+function isValidCommonPrefix(prefix: string | undefined, currentPrefix: string): prefix is string {
+  return !!prefix && prefix !== currentPrefix && !prefix.endsWith('//');
+}
+
 const MAX_LIST_PAGES = 10; // ~10,000 objects max
 
 export async function listObjects(prefix = ''): Promise<ListResult> {
@@ -164,9 +173,7 @@ export async function listObjects(prefix = ''): Promise<ListResult> {
     );
 
     for (const cp of resp.CommonPrefixes || []) {
-      // Skip bogus prefixes: empty, equal to current prefix, or ending in "//"
-      // (these show as "/" in the UI and are caused by objects with empty path segments)
-      if (cp.Prefix && cp.Prefix !== prefix && !cp.Prefix.endsWith('//')) {
+      if (isValidCommonPrefix(cp.Prefix, prefix)) {
         folderSet.add(cp.Prefix);
       }
     }
@@ -209,49 +216,55 @@ export async function listCommonPrefixes(bucket: string, prefix = ''): Promise<s
   );
 
   return (resp.CommonPrefixes || [])
-    .map((cp) => cp.Prefix || '')
-    .filter((p) => p && p !== prefix && !p.endsWith('//'));
+    .map((cp) => cp.Prefix)
+    .filter((p): p is string => isValidCommonPrefix(p, prefix));
 }
 
-/** Fetch HEAD metadata for a single object (called lazily by InspectorPanel). */
-export async function headObject(key: string): Promise<{
+interface HeadObjectShape {
   headers: Record<string, string>;
   storageType?: string;
   storedSize?: number;
-}> {
+}
+
+/**
+ * Pure transform from a HeadObject response into the flat header map +
+ * DeltaGlider-specific storage hints the InspectorPanel consumes. The DG
+ * `dg-note` / `dg-delta-size` user-metadata is surfaced as the
+ * `x-amz-storage-type` / `x-deltaglider-stored-size` headers.
+ */
+function formatHeadObjectResponse(resp: HeadObjectCommandOutput): HeadObjectShape {
+  const headers: Record<string, string> = {};
+
+  if (resp.ContentType) headers['content-type'] = resp.ContentType;
+  if (resp.ContentLength !== undefined) headers['content-length'] = String(resp.ContentLength);
+  if (resp.ETag) headers['etag'] = resp.ETag;
+  if (resp.LastModified) headers['last-modified'] = resp.LastModified.toUTCString();
+
+  const meta = resp.Metadata || {};
+  for (const [k, v] of Object.entries(meta)) {
+    headers[`x-amz-meta-${k}`] = v;
+  }
+  if (resp.StorageClass) headers['x-amz-storage-class'] = resp.StorageClass;
+
+  const storageType = meta['dg-note'] || undefined;
+  if (storageType) headers['x-amz-storage-type'] = storageType;
+  const storedStr = meta['dg-delta-size'];
+  if (storedStr) headers['x-deltaglider-stored-size'] = storedStr;
+
+  return {
+    headers,
+    storageType,
+    storedSize: storedStr ? parseInt(storedStr, 10) : undefined,
+  };
+}
+
+/** Fetch HEAD metadata for a single object (called lazily by InspectorPanel). */
+export async function headObject(key: string): Promise<HeadObjectShape> {
   const headResp = await sendCommand<HeadObjectCommandOutput>(
     new HeadObjectCommand({ Bucket: activeBucket, Key: key }),
     `Read object metadata for ${key}`,
   );
-  const headers: Record<string, string> = {};
-
-  if (headResp.ContentType) headers['content-type'] = headResp.ContentType;
-  if (headResp.ContentLength !== undefined) headers['content-length'] = String(headResp.ContentLength);
-  if (headResp.ETag) headers['etag'] = headResp.ETag;
-  if (headResp.LastModified) headers['last-modified'] = headResp.LastModified.toUTCString();
-
-  if (headResp.Metadata) {
-    for (const [k, v] of Object.entries(headResp.Metadata)) {
-      headers[`x-amz-meta-${k}`] = v;
-    }
-  }
-  if (headResp.StorageClass) {
-    headers['x-amz-storage-class'] = headResp.StorageClass;
-  }
-
-  const meta = headResp.Metadata || {};
-  const dgNote = meta['dg-note'];
-  if (dgNote) headers['x-amz-storage-type'] = dgNote;
-  const dgDeltaSize = meta['dg-delta-size'];
-  if (dgDeltaSize) headers['x-deltaglider-stored-size'] = dgDeltaSize;
-
-  let storageType: string | undefined;
-  let storedSize: number | undefined;
-  if (headers['x-amz-storage-type']) storageType = headers['x-amz-storage-type'];
-  const storedStr = headers['x-deltaglider-stored-size'];
-  if (storedStr) storedSize = parseInt(storedStr, 10);
-
-  return { headers, storageType, storedSize };
+  return formatHeadObjectResponse(headResp);
 }
 
 export interface UploadTelemetry {
@@ -438,14 +451,8 @@ export async function deleteObject(key: string): Promise<void> {
   );
 }
 
-export async function downloadObject(key: string): Promise<Blob> {
-  const resp = await sendCommand<GetObjectCommandOutput>(
-    new GetObjectCommand({ Bucket: activeBucket, Key: key }),
-    `Download object ${key}`,
-  );
-  if (!resp.Body) throw new Error('Empty response body');
-  // resp.Body is a ReadableStream in the browser
-  const stream = resp.Body as ReadableStream<Uint8Array>;
+/** Drain a browser ReadableStream into a single Blob. */
+async function readStreamToBlob(stream: ReadableStream<Uint8Array>): Promise<Blob> {
   const reader = stream.getReader();
   const chunks: BlobPart[] = [];
   for (;;) {
@@ -454,6 +461,16 @@ export async function downloadObject(key: string): Promise<Blob> {
     if (value) chunks.push(value as unknown as BlobPart);
   }
   return new Blob(chunks);
+}
+
+export async function downloadObject(key: string): Promise<Blob> {
+  const resp = await sendCommand<GetObjectCommandOutput>(
+    new GetObjectCommand({ Bucket: activeBucket, Key: key }),
+    `Download object ${key}`,
+  );
+  if (!resp.Body) throw new Error('Empty response body');
+  // resp.Body is a ReadableStream in the browser
+  return readStreamToBlob(resp.Body as ReadableStream<Uint8Array>);
 }
 
 export async function getPresignedUrl(key: string, expiresInSeconds = 7 * 24 * 3600 - 1): Promise<string> {

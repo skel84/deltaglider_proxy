@@ -13,9 +13,7 @@ interface Props {
 export default function FileBrowserSessionTip({ visible }: Props) {
   const colors = useColors();
   const { navigate } = useNavigation();
-  const [dismissed, setDismissed] = useState(
-    () => typeof localStorage !== 'undefined' && localStorage.getItem(STORAGE_KEY) === '1',
-  );
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem(STORAGE_KEY) === '1');
 
   useEffect(() => {
     if (!visible) return;

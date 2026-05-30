@@ -10,6 +10,28 @@ export function displayName(key: string, prefix: string): string {
   return key.startsWith(prefix) ? key.slice(prefix.length) : key;
 }
 
+/** Last path segment of an S3 key (the bare filename). Falls back to the key itself. */
+export function getFileName(key: string): string {
+  return key.split('/').pop() || key;
+}
+
+/** Trigger a browser download of `blob` as `filename` via a transient object URL. */
+export function downloadBlobAsFile(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** "1 item" / "3 items" — count-aware pluralisation. */
+export function pluralize(count: number, singular: string, plural = singular + 's'): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 /** Split a prefix path into breadcrumb segments */
 export function prefixSegments(prefix: string): { label: string; prefix: string }[] {
   if (!prefix) return [];

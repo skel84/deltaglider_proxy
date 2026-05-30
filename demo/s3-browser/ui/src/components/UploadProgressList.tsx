@@ -23,6 +23,7 @@ interface UploadProgressListProps {
   accentBlue: string;
   accentGreen: string;
   accentRed: string;
+  finalizingColor: string;
   onCancelUpload: (id: string) => void;
   onRetryUpload: (id: string) => void;
 }
@@ -89,12 +90,6 @@ function formatClockMs(durationMs: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
-function monotonicNowMs(): number {
-  // Use wall clock to stay aligned with telemetry timestamps even across
-  // browser/runtime clock-source differences.
-  return Date.now();
-}
-
 export default function UploadProgressList({
   queue,
   borderColor,
@@ -103,11 +98,13 @@ export default function UploadProgressList({
   accentBlue,
   accentGreen,
   accentRed,
+  finalizingColor,
   onCancelUpload,
   onRetryUpload,
 }: UploadProgressListProps) {
-  const finalizingColor = '#faad14';
-  const [nowMs, setNowMs] = useState(() => monotonicNowMs());
+  // Use wall clock to stay aligned with telemetry timestamps even across
+  // browser/runtime clock-source differences.
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const hasCompleting = useMemo(
     () => queue.some((item) => item.status === 'completing'),
     [queue],
@@ -115,7 +112,7 @@ export default function UploadProgressList({
 
   useEffect(() => {
     if (!hasCompleting) return;
-    const id = window.setInterval(() => setNowMs(monotonicNowMs()), 1000);
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, [hasCompleting]);
 

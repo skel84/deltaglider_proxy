@@ -3,7 +3,7 @@ import { Drawer, Button, Modal, message, Tag, Skeleton, Input, Spin } from 'antd
 import { DownloadOutlined, DeleteOutlined, LinkOutlined, FileOutlined, CloseOutlined, CheckCircleFilled, CopyOutlined, LoadingOutlined, EyeOutlined } from '@ant-design/icons';
 import { deleteObject, downloadObject, getPresignedUrl, getObjectUrl, headObject, getBucket } from '../s3client';
 import { GlobalOutlined } from '@ant-design/icons';
-import { formatBytes } from '../utils';
+import { formatBytes, getFileName, downloadBlobAsFile } from '../utils';
 import { summarizeObjectSavings } from '../savings';
 import type { S3Object } from '../types';
 import { useColors } from '../ThemeContext';
@@ -16,6 +16,14 @@ const SHARE_DURATIONS = [
   { label: '24 hours', seconds: 86400 },
   { label: '7 days', seconds: 7 * 24 * 3600 - 1 },
 ];
+
+/** Centered vertical stack used by every loading/result modal body. */
+const MODAL_CENTER_STACK = { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 } as const;
+
+/** Themed spinner used in the storage-stats and download/share modal states. */
+function LoadingSpinner({ size, color }: { size: number; color: string }) {
+  return <Spin indicator={<LoadingOutlined style={{ fontSize: size, color }} />} />;
+}
 
 interface BucketPolicyInfo {
   compressionEnabled: boolean;
@@ -315,7 +323,7 @@ export default function InspectorPanel({
 
   if (!object) return null;
 
-  const fileName = object.key.split('/').pop() || object.key;
+  const fileName = getFileName(object.key);
   const headers = headData?.headers ?? {};
   const storageType = headData?.storageType;
   const storedSize = headData?.storedSize;
@@ -382,14 +390,7 @@ export default function InspectorPanel({
 
   const triggerBlobDownload = () => {
     if (!blobRef.current) return;
-    const url = URL.createObjectURL(blobRef.current.blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = blobRef.current.name;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    downloadBlobAsFile(blobRef.current.blob, blobRef.current.name);
     setModalState(null);
   };
 
@@ -546,7 +547,7 @@ export default function InspectorPanel({
                   background: BG_SIDEBAR, borderRadius: 10, padding: '24px 16px',
                   display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
                 }}>
-                  <Spin indicator={<LoadingOutlined style={{ fontSize: 28, color: ACCENT_GREEN }} />} />
+                  <LoadingSpinner size={28} color={ACCENT_GREEN} />
                   <div style={{ fontSize: 11, color: TEXT_MUTED, fontFamily: 'var(--font-ui)' }}>
                     Loading bucket policy…
                   </div>
@@ -563,7 +564,7 @@ export default function InspectorPanel({
                     background: BG_SIDEBAR, borderRadius: 10, padding: '24px 16px',
                     display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
                   }}>
-                    <Spin indicator={<LoadingOutlined style={{ fontSize: 28, color: ACCENT_GREEN }} />} />
+                    <LoadingSpinner size={28} color={ACCENT_GREEN} />
                     <div style={{ fontSize: 11, color: TEXT_MUTED, fontFamily: 'var(--font-ui)' }}>
                       Loading compression stats...
                     </div>
@@ -722,8 +723,8 @@ export default function InspectorPanel({
         {modalState?.mode === 'download' && (
           <>
             {modalState.phase === 'loading' && (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
-                <Spin indicator={<LoadingOutlined style={{ fontSize: 40, color: ACCENT_GREEN }} />} />
+              <div style={MODAL_CENTER_STACK}>
+                <LoadingSpinner size={40} color={ACCENT_GREEN} />
                 <div>
                   <div style={{ fontSize: 16, fontWeight: 600, color: TEXT_PRIMARY, marginBottom: 6, fontFamily: "var(--font-ui)" }}>
                     Reconstructing file…
@@ -740,7 +741,7 @@ export default function InspectorPanel({
               </div>
             )}
             {modalState.phase === 'ready' && (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+              <div style={MODAL_CENTER_STACK}>
                 <CheckCircleFilled style={{ fontSize: 40, color: ACCENT_GREEN }} />
                 <div>
                   <div style={{ fontSize: 16, fontWeight: 600, color: TEXT_PRIMARY, marginBottom: 6, fontFamily: "var(--font-ui)" }}>
@@ -769,7 +770,7 @@ export default function InspectorPanel({
               </div>
             )}
             {modalState.phase === 'error' && (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+              <div style={MODAL_CENTER_STACK}>
                 <DeleteOutlined style={{ fontSize: 40, color: ACCENT_RED }} />
                 <div>
                   <div style={{ fontSize: 16, fontWeight: 600, color: ACCENT_RED, marginBottom: 6, fontFamily: "var(--font-ui)" }}>
@@ -787,8 +788,8 @@ export default function InspectorPanel({
         {modalState?.mode === 'share' && (
           <>
             {modalState.phase === 'loading' && (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
-                <Spin indicator={<LoadingOutlined style={{ fontSize: 40, color: ACCENT_BLUE }} />} />
+              <div style={MODAL_CENTER_STACK}>
+                <LoadingSpinner size={40} color={ACCENT_BLUE} />
                 <div>
                   <div style={{ fontSize: 16, fontWeight: 600, color: TEXT_PRIMARY, marginBottom: 6, fontFamily: "var(--font-ui)" }}>
                     Generating signed link…
@@ -800,7 +801,7 @@ export default function InspectorPanel({
               </div>
             )}
             {modalState.phase === 'ready' && (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+              <div style={MODAL_CENTER_STACK}>
                 <CheckCircleFilled style={{ fontSize: 40, color: ACCENT_BLUE }} />
                 <div style={{ width: '100%' }}>
                   <div style={{ fontSize: 16, fontWeight: 600, color: TEXT_PRIMARY, marginBottom: 4, fontFamily: "var(--font-ui)" }}>
@@ -837,7 +838,7 @@ export default function InspectorPanel({
               </div>
             )}
             {modalState.phase === 'error' && (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+              <div style={MODAL_CENTER_STACK}>
                 <DeleteOutlined style={{ fontSize: 40, color: ACCENT_RED }} />
                 <div>
                   <div style={{ fontSize: 16, fontWeight: 600, color: ACCENT_RED, marginBottom: 6, fontFamily: "var(--font-ui)" }}>

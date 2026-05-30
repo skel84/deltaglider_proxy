@@ -1,5 +1,6 @@
+import type { CSSProperties } from 'react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Table, Tag, Typography, Alert, Progress, Checkbox, theme, Button } from 'antd';
+import { Table, Typography, Alert, Progress, Checkbox, theme, Button } from 'antd';
 import { FolderOutlined, FileOutlined, LoadingOutlined, CalculatorOutlined, CloseCircleOutlined, WarningOutlined } from '@ant-design/icons';
 import type { S3Object } from '../types';
 import { formatBytes, displayName, timeAgo } from '../utils';
@@ -11,8 +12,16 @@ import { canRequestPrefixUsageScan, isVirtualFolderPrefix } from '../permissions
 import { usePersistedPageSize } from '../usePersistedPageSize';
 import { describeVisibleRange } from '../paginationLabels';
 import SimpleSelect from './SimpleSelect';
+import StorageTypeTag from './StorageTypeTag';
 
 const { Text } = Typography;
+
+// Static (theme-independent) parts of the column-header title style. The
+// theme-dependent `color` is merged in at each use site.
+const COL_HEADER_STYLE: CSSProperties = { fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-ui)' };
+
+// Static parts of the monospace value-cell style; `color` is merged per use.
+const MONO_CELL_STYLE: CSSProperties = { fontFamily: 'var(--font-mono)', fontSize: 12 };
 
 /**
  * Allowed object-table page sizes, smallest → largest. The S3 LIST
@@ -49,6 +58,97 @@ interface Props {
 }
 
 type RowData = { _isFolder: true; key: string; name: string } | (S3Object & { _isFolder: false; name: string });
+
+/**
+ * Size cell for a folder row: renders the scan state machine
+ * (virtual / not-scannable / loading / done / error / idle).
+ * Extracted from the Size column render to keep the column config flat.
+ */
+function FolderSizeCell({
+  folderPrefix,
+  sizeState,
+  canScanFolder,
+  isVirtual,
+  onComputeSize,
+  onCancelSize,
+}: {
+  folderPrefix: string;
+  sizeState: FolderSizeState | undefined;
+  canScanFolder: boolean;
+  isVirtual: boolean;
+  onComputeSize: (prefix: string) => void;
+  onCancelSize: (prefix: string) => void;
+}) {
+  const { TEXT_SECONDARY, TEXT_MUTED } = useColors();
+
+  if (isVirtual) {
+    return (
+      <span
+        title="Virtual folder from your permissions. It will become a real folder after upload."
+        style={{ fontSize: 11, color: TEXT_MUTED }}
+      >
+        Virtual
+      </span>
+    );
+  }
+  if (!canScanFolder) {
+    return (
+      <span style={{ fontSize: 12, color: TEXT_MUTED }} title="Open Settings and sign in as an administrator to show folder size">
+        —
+      </span>
+    );
+  }
+  if (sizeState?.loading) {
+    return (
+      <Button
+        title={sizeState.progress ? formatBytes(sizeState.progress.totalSize) + ' stored across ' + sizeState.progress.totalFiles.toLocaleString() + ' files so far...' : 'Starting...'}
+        type="text"
+        size="small"
+        icon={<CloseCircleOutlined />}
+        onClick={(e) => { e.stopPropagation(); onCancelSize(folderPrefix); }}
+        style={{ ...MONO_CELL_STYLE, fontSize: 11, color: TEXT_SECONDARY, padding: '0 4px', height: 'auto' }}
+      >
+        <LoadingOutlined style={{ marginRight: 4 }} />
+        {sizeState.progress ? formatBytes(sizeState.progress.totalSize) : '...'}
+      </Button>
+    );
+  }
+  if (sizeState?.progress?.done) {
+    return (
+      <span
+        title={`${sizeState.progress.totalFiles.toLocaleString()} files — stored (compressed) size`}
+        style={{ ...MONO_CELL_STYLE, color: TEXT_SECONDARY, cursor: 'default' }}
+      >
+        {formatBytes(sizeState.progress.totalSize)}
+      </span>
+    );
+  }
+  if (sizeState?.error) {
+    return (
+      <Button
+        title={sizeState.error}
+        type="text"
+        size="small"
+        icon={<CalculatorOutlined />}
+        onClick={(e) => { e.stopPropagation(); onComputeSize(folderPrefix); }}
+        style={{ fontSize: 11, color: TEXT_MUTED, padding: '0 4px', height: 'auto' }}
+      >
+        Retry
+      </Button>
+    );
+  }
+  return (
+    <Button
+      type="text"
+      size="small"
+      icon={<CalculatorOutlined />}
+      onClick={(e) => { e.stopPropagation(); onComputeSize(folderPrefix); }}
+      style={{ fontSize: 11, color: TEXT_MUTED, padding: '0 4px', height: 'auto' }}
+    >
+      Size
+    </Button>
+  );
+}
 
 export default function ObjectTable({
   objects,
@@ -140,24 +240,6 @@ export default function ObjectTable({
     return TEXT_MUTED;
   }
 
-  function compressionTag(storageType?: string) {
-    const label = !storageType || storageType === 'passthrough' ? 'Original'
-      : storageType.charAt(0).toUpperCase() + storageType.slice(1);
-    const c = STORAGE_TYPE_COLORS[storageType || 'passthrough'] || STORAGE_TYPE_DEFAULT;
-    return (
-      <Tag style={{
-        background: c.bg,
-        border: `1px solid ${c.border}`,
-        color: c.text,
-        borderRadius: 6,
-        fontFamily: "var(--font-mono)",
-        fontSize: 11,
-        fontWeight: 500,
-      }}>
-        {label}
-      </Tag>
-    );
-  }
   const folderRows: RowData[] = folders.map((f) => ({
     _isFolder: true as const,
     key: `folder:${f}`,
@@ -197,7 +279,7 @@ export default function ObjectTable({
       ),
     },
     {
-      title: () => <span style={{ fontSize: 11, fontWeight: 600, color: TEXT_MUTED, fontFamily: "var(--font-ui)" }}>Name</span>,
+      title: () => <span style={{ ...COL_HEADER_STYLE, color: TEXT_MUTED }}>Name</span>,
       dataIndex: 'name',
       key: 'name',
       sorter: (a, b) => a.name.localeCompare(b.name),
@@ -234,7 +316,7 @@ export default function ObjectTable({
       },
     },
     {
-      title: () => <span style={{ fontSize: 11, fontWeight: 600, color: TEXT_MUTED, fontFamily: "var(--font-ui)" }}>Size</span>,
+      title: () => <span style={{ ...COL_HEADER_STYLE, color: TEXT_MUTED }}>Size</span>,
       key: 'size',
       width: isMobile ? 80 : 100,
       sorter: (a, b) => {
@@ -252,82 +334,22 @@ export default function ObjectTable({
       render: (_: unknown, record: RowData) => {
         if (record._isFolder) {
           const folderPrefix = record.key.replace('folder:', '');
-          const isVirtual = isVirtualFolderPrefix(folderPrefix, virtualFolders);
-          const canScanFolder = canRequestPrefixUsageScan(folderPrefix, virtualFolders, hasAdminSession);
-          const sizeState = folderSizes[folderPrefix];
-          if (isVirtual) {
-            return (
-              <span
-                title="Virtual folder from your permissions. It will become a real folder after upload."
-                style={{ fontSize: 11, color: TEXT_MUTED }}
-              >
-                Virtual
-              </span>
-            );
-          }
-          if (!canScanFolder) {
-            return (
-              <span style={{ fontSize: 12, color: TEXT_MUTED }} title="Open Settings and sign in as an administrator to show folder size">
-                —
-              </span>
-            );
-          }
-          if (sizeState?.loading) {
-            return (
-              <Button
-                title={sizeState.progress ? formatBytes(sizeState.progress.totalSize) + ' stored across ' + sizeState.progress.totalFiles.toLocaleString() + ' files so far...' : 'Starting...'}
-                type="text"
-                size="small"
-                icon={<CloseCircleOutlined />}
-                onClick={(e) => { e.stopPropagation(); onCancelSize(folderPrefix); }}
-                style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: TEXT_SECONDARY, padding: '0 4px', height: 'auto' }}
-              >
-                <LoadingOutlined style={{ marginRight: 4 }} />
-                {sizeState.progress ? formatBytes(sizeState.progress.totalSize) : '...'}
-              </Button>
-            );
-          }
-          if (sizeState?.progress?.done) {
-            return (
-              <span
-                title={`${sizeState.progress.totalFiles.toLocaleString()} files — stored (compressed) size`}
-                style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: TEXT_SECONDARY, cursor: 'default' }}
-              >
-                {formatBytes(sizeState.progress.totalSize)}
-              </span>
-            );
-          }
-          if (sizeState?.error) {
-            return (
-              <Button
-                title={sizeState.error}
-                type="text"
-                size="small"
-                icon={<CalculatorOutlined />}
-                onClick={(e) => { e.stopPropagation(); onComputeSize(folderPrefix); }}
-                style={{ fontSize: 11, color: TEXT_MUTED, padding: '0 4px', height: 'auto' }}
-              >
-                Retry
-              </Button>
-            );
-          }
           return (
-            <Button
-              type="text"
-              size="small"
-              icon={<CalculatorOutlined />}
-              onClick={(e) => { e.stopPropagation(); onComputeSize(folderPrefix); }}
-              style={{ fontSize: 11, color: TEXT_MUTED, padding: '0 4px', height: 'auto' }}
-            >
-              Size
-            </Button>
+            <FolderSizeCell
+              folderPrefix={folderPrefix}
+              sizeState={folderSizes[folderPrefix]}
+              canScanFolder={canRequestPrefixUsageScan(folderPrefix, virtualFolders, hasAdminSession)}
+              isVirtual={isVirtualFolderPrefix(folderPrefix, virtualFolders)}
+              onComputeSize={onComputeSize}
+              onCancelSize={onCancelSize}
+            />
           );
         }
-        return <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: TEXT_SECONDARY }}>{formatBytes(record.size)}</span>;
+        return <span style={{ ...MONO_CELL_STYLE, color: TEXT_SECONDARY }}>{formatBytes(record.size)}</span>;
       },
     },
     {
-      title: () => <span style={{ fontSize: 11, fontWeight: 600, color: TEXT_MUTED, fontFamily: "var(--font-ui)" }}>Modified</span>,
+      title: () => <span style={{ ...COL_HEADER_STYLE, color: TEXT_MUTED }}>Modified</span>,
       key: 'modified',
       width: 200,
       responsive: ['lg'] as const,
@@ -348,7 +370,7 @@ export default function ObjectTable({
       },
     },
     {
-      title: () => <span style={{ fontSize: 11, fontWeight: 600, color: TEXT_MUTED, fontFamily: "var(--font-ui)" }}>Compression</span>,
+      title: () => <span style={{ ...COL_HEADER_STYLE, color: TEXT_MUTED }}>Compression</span>,
       key: 'compression',
       width: 130,
       align: 'center' as const,
@@ -358,7 +380,13 @@ export default function ObjectTable({
         const cached = headCache[record.key];
         if (!cached) return <LoadingOutlined style={{ fontSize: 12, color: TEXT_MUTED }} />;
         if (cached.error) return <WarningOutlined title="Failed to load metadata" style={{ fontSize: 12, color: ACCENT_AMBER }} />;
-        return compressionTag(cached.storageType);
+        return (
+          <StorageTypeTag
+            storageType={cached.storageType}
+            colors={STORAGE_TYPE_COLORS}
+            fallback={STORAGE_TYPE_DEFAULT}
+          />
+        );
       },
     },
   ];

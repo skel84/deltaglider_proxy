@@ -3,7 +3,7 @@ import { Modal, Spin, Alert, Button, Typography } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 import type { S3Object } from '../types';
 import { downloadObject, getPresignedUrl } from '../s3client';
-import { formatBytes } from '../utils';
+import { formatBytes, getFileName, downloadBlobAsFile } from '../utils';
 import { useColors } from '../ThemeContext';
 import { getPreviewMode } from './filePreviewMode';
 
@@ -24,7 +24,7 @@ export default function FilePreview({ open, object, onClose }: FilePreviewProps)
   const [textContent, setTextContent] = useState('');
   const [imageUrl, setImageUrl] = useState('');
 
-  const filename = object?.key.split('/').pop() ?? '';
+  const filename = object ? getFileName(object.key) : '';
   const mode = object ? getPreviewMode(object.key) : null;
   const tooLarge = mode === 'text' && (object?.size ?? 0) > MAX_TEXT_PREVIEW;
 
@@ -73,12 +73,7 @@ export default function FilePreview({ open, object, onClose }: FilePreviewProps)
     if (!object) return;
     try {
       const blob = await downloadObject(object.key);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlobAsFile(blob, filename);
     } catch {
       setError('Download failed');
     }

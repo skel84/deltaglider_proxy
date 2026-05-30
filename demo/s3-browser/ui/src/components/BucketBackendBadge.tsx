@@ -10,7 +10,6 @@ interface ProviderPalette {
 }
 
 interface ProviderBadge {
-  kind: ProviderKind;
   label: string;
   squared: boolean;
   light: ProviderPalette;
@@ -19,28 +18,24 @@ interface ProviderBadge {
 
 const BADGES: Record<ProviderKind, ProviderBadge> = {
   local: {
-    kind: 'local',
     label: 'LOC',
     squared: false,
     light: { bg: '#ccfbf1', fg: '#115e59', border: '#5eead4' },
     dark:  { bg: 'rgba(45, 212, 191, 0.18)', fg: '#5eead4', border: 'rgba(45, 212, 191, 0.45)' },
   },
   hetzner: {
-    kind: 'hetzner',
     label: 'HZ',
     squared: true,
     light: { bg: '#fee2e2', fg: '#991b1b', border: '#fca5a5' },
     dark:  { bg: 'rgba(248, 113, 113, 0.18)', fg: '#fca5a5', border: 'rgba(248, 113, 113, 0.50)' },
   },
   aws: {
-    kind: 'aws',
     label: 'AWS',
     squared: false,
     light: { bg: '#fef3c7', fg: '#92400e', border: '#fcd34d' },
     dark:  { bg: 'rgba(251, 191, 36, 0.18)', fg: '#fcd34d', border: 'rgba(251, 191, 36, 0.50)' },
   },
   s3: {
-    kind: 's3',
     label: 'S3',
     squared: false,
     light: { bg: '#e2e8f0', fg: '#334155', border: '#94a3b8' },

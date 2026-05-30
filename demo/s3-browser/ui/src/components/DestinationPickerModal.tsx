@@ -3,6 +3,7 @@ import { Modal, Input, Alert, Typography } from 'antd';
 import { WarningOutlined } from '@ant-design/icons';
 import { listBuckets, getBucket } from '../s3client';
 import { useColors } from '../ThemeContext';
+import { pluralize } from '../utils';
 import SimpleSelect from './SimpleSelect';
 
 const { Text } = Typography;
@@ -16,8 +17,19 @@ interface Props {
   loading: boolean;
 }
 
+/** "Move 3 items" / "Copy 1 item" — shared by the modal title and OK button. */
+function getModalTitle(mode: 'copy' | 'move', itemCount: number): string {
+  return `${mode === 'move' ? 'Move' : 'Copy'} ${pluralize(itemCount, 'item')}`;
+}
+
 export default function DestinationPickerModal({ open, mode, itemCount, onConfirm, onCancel, loading }: Props) {
   const colors = useColors();
+  /** Uppercase field caption shared by the bucket/path inputs. */
+  const SectionLabel = ({ children }: { children: React.ReactNode }) => (
+    <Text style={{ fontSize: 12, fontWeight: 600, color: colors.TEXT_MUTED, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 6 }}>
+      {children}
+    </Text>
+  );
   const [buckets, setBuckets] = useState<string[]>([]);
   const [destBucket, setDestBucket] = useState(getBucket());
   const [destPrefix, setDestPrefix] = useState('');
@@ -36,19 +48,17 @@ export default function DestinationPickerModal({ open, mode, itemCount, onConfir
   return (
     <Modal
       open={open}
-      title={`${mode === 'move' ? 'Move' : 'Copy'} ${itemCount} item${itemCount !== 1 ? 's' : ''}`}
+      title={getModalTitle(mode, itemCount)}
       onCancel={onCancel}
       onOk={() => onConfirm(destBucket, clean ? clean + '/' : '')}
-      okText={`${mode === 'move' ? 'Move' : 'Copy'} ${itemCount} item${itemCount !== 1 ? 's' : ''}`}
+      okText={getModalTitle(mode, itemCount)}
       okButtonProps={{ loading, disabled: !destBucket }}
       cancelButtonProps={{ disabled: loading }}
       destroyOnClose
       maskClosable={!loading}
     >
       <div style={{ marginBottom: 16 }}>
-        <Text style={{ fontSize: 12, fontWeight: 600, color: colors.TEXT_MUTED, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 6 }}>
-          Destination Bucket
-        </Text>
+        <SectionLabel>Destination Bucket</SectionLabel>
         <SimpleSelect
           value={destBucket}
           onChange={setDestBucket}
@@ -59,9 +69,7 @@ export default function DestinationPickerModal({ open, mode, itemCount, onConfir
       </div>
 
       <div style={{ marginBottom: 16 }}>
-        <Text style={{ fontSize: 12, fontWeight: 600, color: colors.TEXT_MUTED, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 6 }}>
-          Destination Path
-        </Text>
+        <SectionLabel>Destination Path</SectionLabel>
         <Input
           value={destPrefix}
           onChange={e => setDestPrefix(e.target.value)}

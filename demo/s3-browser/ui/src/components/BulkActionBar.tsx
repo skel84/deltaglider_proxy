@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Button, message } from 'antd';
 import { DeleteOutlined, CopyOutlined, ScissorOutlined, DownloadOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
+import { pluralize } from '../utils';
 import DestinationPickerModal from './DestinationPickerModal';
 
 interface Props {
@@ -30,7 +31,7 @@ export default function BulkActionBar({ selectedCount, onDelete, onCopy, onMove,
       if (result.failed > 0) {
         message.warning(`${result.succeeded} succeeded, ${result.failed} failed`);
       } else {
-        message.success(`${result.succeeded} item${result.succeeded !== 1 ? 's' : ''} ${op === 'copy' ? 'copied' : 'moved'}`);
+        message.success(`${pluralize(result.succeeded, 'item')} ${op === 'copy' ? 'copied' : 'moved'}`);
       }
     } catch (e) {
       message.error(e instanceof Error ? e.message : `${op} failed`);

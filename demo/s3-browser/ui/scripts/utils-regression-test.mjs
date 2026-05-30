@@ -13,7 +13,7 @@ const { outputText } = ts.transpileModule(source, {
   fileName: 'utils.ts',
 });
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`;
-const { clamp, dotPattern, ageLabel, formatBytes } = await import(moduleUrl);
+const { clamp, dotPattern, ageLabel, formatBytes, getFileName, pluralize } = await import(moduleUrl);
 
 // --- clamp -------------------------------------------------------------------
 assert.equal(clamp(50, 0, 100), 50);
@@ -55,5 +55,19 @@ assert.equal(ageLabel(new Date(now + 10_000).toISOString()), 'just now');
 assert.equal(formatBytes(0), '0 B');
 assert.equal(formatBytes(512), '512 B');
 assert.equal(formatBytes(1536), '1.5 KB');
+
+// --- getFileName (shared filename extraction for Inspector + Preview) ---------
+assert.equal(getFileName('a/b/c.txt'), 'c.txt');
+assert.equal(getFileName('flat.bin'), 'flat.bin');
+assert.equal(getFileName('deep/nested/path/'), 'deep/nested/path/'); // trailing slash -> falls back to key
+assert.equal(getFileName(''), '');
+assert.equal(getFileName('no-slash'), 'no-slash');
+
+// --- pluralize ---------------------------------------------------------------
+assert.equal(pluralize(1, 'item'), '1 item');
+assert.equal(pluralize(0, 'item'), '0 items');
+assert.equal(pluralize(3, 'item'), '3 items');
+assert.equal(pluralize(2, 'entry', 'entries'), '2 entries');
+assert.equal(pluralize(1, 'entry', 'entries'), '1 entry');
 
 console.log('utils regression checks passed');
