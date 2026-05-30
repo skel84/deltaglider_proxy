@@ -1,0 +1,78 @@
+// === Usage Scanner ===
+import { throwApiError } from '../errorHandling';
+import { adminFetch, safeJson } from './core';
+
+interface ChildUsage {
+  size: number;
+  objects: number;
+}
+
+interface UsageEntry {
+  prefix: string;
+  bucket: string;
+  total_size: number;
+  total_objects: number;
+  children: Record<string, ChildUsage>;
+  computed_at: string;
+  stale_seconds: number;
+}
+
+/** Trigger a background usage scan for a bucket/prefix. */
+export async function scanPrefixUsage(bucket: string, prefix: string): Promise<void> {
+  const res = await adminFetch('/api/admin/usage/scan', 'POST', { bucket, prefix });
+  if (!res.ok) await throwApiError(res, 'Prefix usage scan');
+}
+
+/** Get cached usage entry for a bucket/prefix, or null if not cached. */
+export async function getPrefixUsage(bucket: string, prefix: string): Promise<UsageEntry | null> {
+  const params = new URLSearchParams({ bucket, prefix });
+  const res = await adminFetch(`/api/admin/usage?${params}`);
+  if (res.status === 404) return null;
+  if (!res.ok) await throwApiError(res, 'Usage query');
+  return safeJson(res);
+}
+
+/**
+ * Per-prefix delta-compression savings, reference-aware.
+ *
+ * Backed by `src/api/admin/savings.rs` + the central `SavingsTotals`
+ * accumulator. Unlike a client-side aggregation over `headCache`, this
+ * includes the on-disk `reference.bin` cost in `stored_bytes`, so the
+ * chip never displays "100% saved" while a reference still lives on
+ * disk. Server-side cached for 30 s.
+ */
+export interface PrefixSavingsTotals {
+  original_bytes: number;
+  stored_bytes: number;
+  reference_bytes: number;
+  delta_stored_bytes: number;
+  passthrough_bytes: number;
+  reference_count: number;
+  delta_count: number;
+  passthrough_count: number;
+}
+
+export interface PrefixSavingsResponse {
+  bucket: string;
+  prefix: string;
+  totals: PrefixSavingsTotals;
+  /** 0..=99.99, or null when there's nothing measurable under the prefix. */
+  savings_percentage: number | null;
+  truncated: boolean;
+  computed_at: string;
+}
+
+export async function getPrefixSavings(
+  bucket: string,
+  prefix: string,
+): Promise<PrefixSavingsResponse | null> {
+  const params = new URLSearchParams({ bucket, prefix });
+  const res = await adminFetch(`/api/admin/deltaspace/savings?${params}`);
+  if (!res.ok) {
+    // 401/403 (no admin session) is expected on bootstrap-only S3
+    // browsers — we silently degrade and the chip stays hidden.
+    if (res.status === 401 || res.status === 403) return null;
+    await throwApiError(res, 'Prefix savings query');
+  }
+  return safeJson(res);
+}
