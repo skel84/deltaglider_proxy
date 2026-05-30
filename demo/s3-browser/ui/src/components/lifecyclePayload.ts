@@ -16,6 +16,7 @@ import type {
   StorageSectionBody,
 } from '../adminApi';
 import { normalizePrefix } from '../storagePath';
+import { nextUniqueRuleName } from './ruleNames';
 
 export const DEFAULT_LIFECYCLE: LifecycleConfig = {
   enabled: false,
@@ -25,14 +26,8 @@ export const DEFAULT_LIFECYCLE: LifecycleConfig = {
 };
 
 export function emptyRule(existing: LifecycleRuleConfig[]): LifecycleRuleConfig {
-  let n = existing.length + 1;
-  let name = `expire-old-${n}`;
-  while (existing.some((r) => r.name === name)) {
-    n += 1;
-    name = `expire-old-${n}`;
-  }
   return {
-    name,
+    name: nextUniqueRuleName(existing, 'expire-old'),
     enabled: false,
     bucket: '',
     prefix: '',

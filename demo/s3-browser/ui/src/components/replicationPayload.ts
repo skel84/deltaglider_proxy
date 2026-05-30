@@ -16,6 +16,7 @@ import type {
   StorageSectionBody,
 } from '../adminApi';
 import { normalizePrefix } from '../storagePath';
+import { nextUniqueRuleName } from './ruleNames';
 
 export const DEFAULT_REPLICATION: ReplicationConfig = {
   enabled: true,
@@ -27,14 +28,8 @@ export const DEFAULT_REPLICATION: ReplicationConfig = {
 };
 
 export function emptyRule(existing: ReplicationRuleConfig[]): ReplicationRuleConfig {
-  let n = existing.length + 1;
-  let name = `rule-${n}`;
-  while (existing.some((r) => r.name === name)) {
-    n += 1;
-    name = `rule-${n}`;
-  }
   return {
-    name,
+    name: nextUniqueRuleName(existing, 'rule'),
     enabled: true,
     source: { bucket: '', prefix: '' },
     destination: { bucket: '', prefix: '' },

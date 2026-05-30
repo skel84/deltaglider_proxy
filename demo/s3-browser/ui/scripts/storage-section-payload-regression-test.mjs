@@ -23,13 +23,17 @@ function dataUrl(source) {
   return `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 }
 
-// storagePath is the only runtime dependency the payload modules pull in.
+// Pure runtime deps the payload modules pull in: `../storagePath` (all three)
+// and `./ruleNames` (lifecycle + replication, for next-unique-rule-name). Both
+// are React-free, so transpile them to data URLs and rewrite the specifiers.
 const storagePathUrl = dataUrl(await transpile('../src/storagePath.ts', 'storagePath.ts'));
+const ruleNamesUrl = dataUrl(await transpile('../src/components/ruleNames.ts', 'ruleNames.ts'));
 
 async function loadPayloadModule(relPath, fileName) {
   let out = await transpile(relPath, fileName);
-  // Rewrite the bare `../storagePath` specifier to the transpiled data URL.
+  // Rewrite bare relative specifiers to their transpiled data URLs.
   out = out.replace(/(['"])\.\.\/storagePath\1/g, JSON.stringify(storagePathUrl));
+  out = out.replace(/(['"])\.\/ruleNames\1/g, JSON.stringify(ruleNamesUrl));
   return import(dataUrl(out));
 }
 

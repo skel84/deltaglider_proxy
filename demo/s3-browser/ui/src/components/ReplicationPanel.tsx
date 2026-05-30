@@ -38,6 +38,7 @@ import {
 import { listBuckets } from '../s3client';
 import { useColors } from '../ThemeContext';
 import { useCardStyles } from './shared-styles';
+import RuleListEditor, { RuleRowLine, RuleRowTitle } from './RuleListEditor';
 import SectionHeader from './SectionHeader';
 import BucketPrefixInput from './BucketPrefixInput';
 import ApplyDialog from './ApplyDialog';
@@ -67,7 +68,6 @@ function statusTone(status: string, paused: boolean, enabled: boolean): 'success
 }
 
 export default function ReplicationPanel({ onSessionExpired }: Props) {
-  const colors = useColors();
   const { cardStyle, inputRadius } = useCardStyles();
   const {
     value: replication,
@@ -333,105 +333,87 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
         </AdvancedDisclosure>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 16 }}>
-        <div style={cardStyle}>
-          <SectionHeader
-            icon={<SyncOutlined />}
-            title="Rules"
-            description={loading ? 'Loading...' : `${replication.rules.length} configured rule${replication.rules.length === 1 ? '' : 's'}.`}
-          />
-          <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {replication.rules.map((rule) => {
-              const runtime = overview.find((r) => r.name === rule.name);
-              return (
-                <button
-                  key={rule.name}
-                  onClick={() => setSelected(rule.name)}
-                  style={{
-                    textAlign: 'left',
-                    border: `1px solid ${selectedRule?.name === rule.name ? colors.ACCENT_BLUE : colors.BORDER}`,
-                    borderRadius: 10,
-                    padding: 12,
-                    background: selectedRule?.name === rule.name ? `${colors.ACCENT_BLUE}12` : colors.BG_ELEVATED,
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                    <Text strong style={{ fontSize: 13 }}>{rule.name}</Text>
-                    <Tag color={statusTone(runtime?.last_status || 'idle', runtime?.paused || false, rule.enabled)}>
-                      {runtime?.paused ? 'paused' : rule.enabled ? runtime?.last_status || 'idle' : 'disabled'}
-                    </Tag>
-                  </div>
-                  <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
-                    {rule.source.bucket || 'source'} / {rule.source.prefix || 'all'} → {rule.destination.bucket || 'destination'} / {rule.destination.prefix || 'same'}
-                  </Text>
-                  <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
-                    Every {rule.interval || '—'} · {rule.conflict}
-                  </Text>
-                </button>
-              );
-            })}
-            <Button icon={<PlusOutlined />} type="dashed" onClick={addRule} block>
-              Add rule
-            </Button>
-          </div>
-        </div>
-
-        <div style={cardStyle}>
-          {!selectedRule ? (
-            <EmptyReplicationState onAdd={addRule} />
-          ) : (
+      <RuleListEditor
+        rules={replication.rules}
+        selectedName={selected}
+        getName={(rule) => rule.name}
+        onSelect={setSelected}
+        onAdd={addRule}
+        icon={<SyncOutlined />}
+        loading={loading}
+        emptyState={<EmptyReplicationState onAdd={addRule} />}
+        renderListItem={(rule) => {
+          const runtime = overview.find((r) => r.name === rule.name);
+          return (
             <>
-              <RuleEditor
-                rule={selectedRule}
-                runtime={selectedRuntime || null}
-                buckets={buckets}
-                inputRadius={inputRadius}
-                onChange={(patch) => updateRule(selectedRule.name, patch)}
-                onRename={(nextName) => {
-                  updateRule(selectedRule.name, { name: nextName });
-                  setSelected(nextName);
-                }}
+              <RuleRowTitle
+                name={rule.name}
+                status={
+                  <Tag color={statusTone(runtime?.last_status || 'idle', runtime?.paused || false, rule.enabled)}>
+                    {runtime?.paused ? 'paused' : rule.enabled ? runtime?.last_status || 'idle' : 'disabled'}
+                  </Tag>
+                }
               />
-
-              <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <Button
-                  type="primary"
-                  icon={<RocketOutlined />}
-                  disabled={!canRun}
-                  title={runReason}
-                  loading={actionLoading === `run:${selectedRule.name}`}
-                  onClick={() => void runAction(selectedRule.name, 'run')}
-                >
-                  Run now
-                </Button>
-                {selectedRuntime?.paused ? (
-                  <Button
-                    icon={<PlayCircleOutlined />}
-                    loading={actionLoading === `resume:${selectedRule.name}`}
-                    onClick={() => void runAction(selectedRule.name, 'resume')}
-                  >
-                    Resume
-                  </Button>
-                ) : (
-                  <Button
-                    icon={<PauseCircleOutlined />}
-                    loading={actionLoading === `pause:${selectedRule.name}`}
-                    onClick={() => void runAction(selectedRule.name, 'pause')}
-                  >
-                    Pause
-                  </Button>
-                )}
-                <Button danger onClick={() => removeRule(selectedRule.name)}>
-                  Remove rule
-                </Button>
-              </div>
-
-              <RuntimeDetails history={history} failures={failures} />
+              <RuleRowLine>
+                {rule.source.bucket || 'source'} / {rule.source.prefix || 'all'} → {rule.destination.bucket || 'destination'} / {rule.destination.prefix || 'same'}
+              </RuleRowLine>
+              <RuleRowLine marginTop={2}>
+                Every {rule.interval || '—'} · {rule.conflict}
+              </RuleRowLine>
             </>
-          )}
-        </div>
-      </div>
+          );
+        }}
+        renderDetail={(rule) => (
+          <>
+            <RuleEditor
+              rule={rule}
+              runtime={selectedRuntime || null}
+              buckets={buckets}
+              inputRadius={inputRadius}
+              onChange={(patch) => updateRule(rule.name, patch)}
+              onRename={(nextName) => {
+                updateRule(rule.name, { name: nextName });
+                setSelected(nextName);
+              }}
+            />
+
+            <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <Button
+                type="primary"
+                icon={<RocketOutlined />}
+                disabled={!canRun}
+                title={runReason}
+                loading={actionLoading === `run:${rule.name}`}
+                onClick={() => void runAction(rule.name, 'run')}
+              >
+                Run now
+              </Button>
+              {selectedRuntime?.paused ? (
+                <Button
+                  icon={<PlayCircleOutlined />}
+                  loading={actionLoading === `resume:${rule.name}`}
+                  onClick={() => void runAction(rule.name, 'resume')}
+                >
+                  Resume
+                </Button>
+              ) : (
+                <Button
+                  icon={<PauseCircleOutlined />}
+                  loading={actionLoading === `pause:${rule.name}`}
+                  onClick={() => void runAction(rule.name, 'pause')}
+                >
+                  Pause
+                </Button>
+              )}
+              <Button danger onClick={() => removeRule(rule.name)}>
+                Remove rule
+              </Button>
+            </div>
+
+            <RuntimeDetails history={history} failures={failures} />
+          </>
+        )}
+      />
 
       <ApplyDialog
         open={applyOpen}

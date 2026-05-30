@@ -14,8 +14,7 @@ function sectionPanelStyle(
     ? { background: '#f8fafc', borderColor: 'rgba(15,23,42,0.08)' }
     : { background: '#f1f5f9', borderColor: 'rgba(15,23,42,0.07)' };
 }
-import { useOnClickOutside } from '../useDocumentEvent';
-import { useFixedOverlayPosition } from '../useFixedOverlayPosition';
+import { useOverlayDropdown } from '../useOverlayDropdown';
 import { BORDER_RADIUS, getOverlayBaseStyles } from './overlayStyles';
 
 /**
@@ -96,8 +95,6 @@ export default function SimpleAutoComplete({
   const [open, setOpen] = useState(false);
   const [focused, setFocused] = useState(false);
   const [highlightIndex, setHighlightIndex] = useState(0);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const dropRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   // The blur handler defers `setFocused(false)` so a click on a dropdown option
   // (which blurs the input) lands before the dropdown unmounts. Track the timer
@@ -124,11 +121,12 @@ export default function SimpleAutoComplete({
   const flatEntries = useMemo(() => displayGroups.flatMap((g) => g.entries), [displayGroups]);
 
   const showDrop = open && focused && flatEntries.length > 0;
-  const pos = useFixedOverlayPosition(wrapRef, showDrop);
+  const { triggerRef: wrapRef, setOverlay, pos } = useOverlayDropdown({
+    visible: showDrop,
+    onClose: () => setOpen(false),
+  });
   const useSectionPanels =
     displayGroups.length > 1 || displayGroups.some((g) => Boolean(g.label?.trim()));
-
-  useOnClickOutside([wrapRef, dropRef], () => setOpen(false), showDrop);
 
   useEffect(() => {
     setHighlightIndex(0);
@@ -218,7 +216,7 @@ export default function SimpleAutoComplete({
 
       {showDrop && (
         <div
-          ref={dropRef}
+          ref={setOverlay}
           id={listId}
           role="listbox"
           style={{

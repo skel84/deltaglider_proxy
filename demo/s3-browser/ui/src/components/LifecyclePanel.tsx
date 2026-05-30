@@ -43,6 +43,7 @@ import ApplyDialog from './ApplyDialog';
 import BucketPrefixInput from './BucketPrefixInput';
 import { AdvancedDisclosure, Field } from './ruleEditorFields';
 import { fmtUnix, formRow, lineList, lines } from './ruleEditorHelpers';
+import RuleListEditor, { RuleRowLine, RuleRowTitle } from './RuleListEditor';
 import SectionHeader from './SectionHeader';
 import SimpleSelect from './SimpleSelect';
 import { useCardStyles } from './shared-styles';
@@ -74,7 +75,6 @@ function statusTone(status: string, enabled: boolean): 'success' | 'warning' | '
 }
 
 export default function LifecyclePanel({ onSessionExpired }: Props) {
-  const colors = useColors();
   const { cardStyle, inputRadius } = useCardStyles();
   const {
     value: lifecycle,
@@ -425,99 +425,82 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
         <Metric label="Lifetime affected" value={`${lifetimeAffected} · ${formatBytes(lifetimeBytes)}`} />
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 320px) minmax(0, 1fr)', gap: 16 }}>
-        <div style={cardStyle}>
-          <SectionHeader
-            icon={<ClockCircleOutlined />}
-            title="Rules"
-            description={loading ? 'Loading...' : `${lifecycle.rules.length} configured rule${lifecycle.rules.length === 1 ? '' : 's'}.`}
-          />
-          <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {lifecycle.rules.map((rule) => {
-              const runtime = overview.find((r) => r.name === rule.name);
-              return (
-                <button
-                  key={rule.name}
-                  onClick={() => setSelected(rule.name)}
-                  style={{
-                    textAlign: 'left',
-                    border: `1px solid ${selectedRule?.name === rule.name ? colors.ACCENT_BLUE : colors.BORDER}`,
-                    borderRadius: 10,
-                    padding: 12,
-                    background: selectedRule?.name === rule.name ? `${colors.ACCENT_BLUE}12` : colors.BG_ELEVATED,
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                    <Text strong style={{ fontSize: 13 }}>{rule.name}</Text>
-                    <Tag color={statusTone(runtime?.last_status || 'idle', rule.enabled)}>
-                      {rule.enabled ? runtime?.last_status || 'idle' : 'disabled'}
-                    </Tag>
-                  </div>
-                  <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
-                    {rule.bucket || 'bucket'} / {rule.prefix || 'all'} · older than {rule.expire_after || '—'}
-                  </Text>
-                  <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
-                    Lifetime affected: {runtime?.objects_affected_lifetime || 0} objects · {formatBytes(runtime?.bytes_affected_lifetime || 0)}
-                  </Text>
-                </button>
-              );
-            })}
-            <Button icon={<PlusOutlined />} type="dashed" onClick={addRule} block>
-              Add rule
-            </Button>
-          </div>
-        </div>
-
-        <div style={cardStyle}>
-          {!selectedRule ? (
-            <EmptyLifecycleState onAdd={addRule} />
-          ) : (
+      <RuleListEditor
+        rules={lifecycle.rules}
+        selectedName={selected}
+        getName={(rule) => rule.name}
+        onSelect={setSelected}
+        onAdd={addRule}
+        icon={<ClockCircleOutlined />}
+        loading={loading}
+        listColumn="minmax(260px, 320px)"
+        emptyState={<EmptyLifecycleState onAdd={addRule} />}
+        renderListItem={(rule) => {
+          const runtime = overview.find((r) => r.name === rule.name);
+          return (
             <>
-              <RuleEditor
-                rule={selectedRule}
-                runtime={selectedRuntime || null}
-                buckets={buckets}
-                inputRadius={inputRadius}
-                onChange={(patch) => updateRule(selectedRule.name, patch)}
-                onRename={(nextName) => {
-                  updateRule(selectedRule.name, { name: nextName });
-                  setSelected(nextName);
-                }}
+              <RuleRowTitle
+                name={rule.name}
+                status={
+                  <Tag color={statusTone(runtime?.last_status || 'idle', rule.enabled)}>
+                    {rule.enabled ? runtime?.last_status || 'idle' : 'disabled'}
+                  </Tag>
+                }
               />
-
-              <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <Button
-                  icon={<EyeOutlined />}
-                  disabled={!canPreview}
-                  title={canPreview ? 'Preview matching expired objects without deleting.' : runReason}
-                  loading={previewLoading}
-                  onClick={() => selectedRule && void previewRule(selectedRule.name)}
-                >
-                  Preview
-                </Button>
-                <Button
-                  danger
-                  type="primary"
-                  icon={<DeleteOutlined />}
-                  disabled={!canRun}
-                  title={runReason}
-                  loading={runLoading}
-                  onClick={() => selectedRule && selectedPreview && confirmRunNow(selectedRule, selectedPreview)}
-                >
-                  Run {actionKind(selectedRule.action) === 'transition' ? 'transition' : 'delete'} now
-                </Button>
-                <Button danger onClick={() => confirmRemoveRule(selectedRule.name)}>
-                  Remove rule
-                </Button>
-              </div>
-
-              <PreviewPanel outcome={selectedPreview} maxCandidates={lifecycle.max_failures_retained} />
-              <RuntimeDetails history={history} failures={failures} runtimeError={runtimeError} />
+              <RuleRowLine>
+                {rule.bucket || 'bucket'} / {rule.prefix || 'all'} · older than {rule.expire_after || '—'}
+              </RuleRowLine>
+              <RuleRowLine marginTop={2}>
+                Lifetime affected: {runtime?.objects_affected_lifetime || 0} objects · {formatBytes(runtime?.bytes_affected_lifetime || 0)}
+              </RuleRowLine>
             </>
-          )}
-        </div>
-      </div>
+          );
+        }}
+        renderDetail={(rule) => (
+          <>
+            <RuleEditor
+              rule={rule}
+              runtime={selectedRuntime || null}
+              buckets={buckets}
+              inputRadius={inputRadius}
+              onChange={(patch) => updateRule(rule.name, patch)}
+              onRename={(nextName) => {
+                updateRule(rule.name, { name: nextName });
+                setSelected(nextName);
+              }}
+            />
+
+            <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <Button
+                icon={<EyeOutlined />}
+                disabled={!canPreview}
+                title={canPreview ? 'Preview matching expired objects without deleting.' : runReason}
+                loading={previewLoading}
+                onClick={() => void previewRule(rule.name)}
+              >
+                Preview
+              </Button>
+              <Button
+                danger
+                type="primary"
+                icon={<DeleteOutlined />}
+                disabled={!canRun}
+                title={runReason}
+                loading={runLoading}
+                onClick={() => selectedPreview && confirmRunNow(rule, selectedPreview)}
+              >
+                Run {actionKind(rule.action) === 'transition' ? 'transition' : 'delete'} now
+              </Button>
+              <Button danger onClick={() => confirmRemoveRule(rule.name)}>
+                Remove rule
+              </Button>
+            </div>
+
+            <PreviewPanel outcome={selectedPreview} maxCandidates={lifecycle.max_failures_retained} />
+            <RuntimeDetails history={history} failures={failures} runtimeError={runtimeError} />
+          </>
+        )}
+      />
 
       <ApplyDialog
         open={applyOpen}

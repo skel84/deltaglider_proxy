@@ -539,6 +539,7 @@ jobs:
           npm run test:backend-encryption-payload
           npm run test:master-detail-filter
           npm run test:trace-request
+          npm run test:rule-names
           npm run test:upload-telemetry
       - name: npm audit
         run: cd demo/s3-browser/ui && npm audit --audit-level=high || true  # warn-only

@@ -1,7 +1,6 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useColors } from '../ThemeContext';
-import { useEscapeKey, useOnClickOutside } from '../useDocumentEvent';
-import { useFixedOverlayPosition } from '../useFixedOverlayPosition';
+import { useOverlayDropdown } from '../useOverlayDropdown';
 import { BORDER_RADIUS, getOverlayBaseStyles } from './overlayStyles';
 
 /**
@@ -35,19 +34,7 @@ export default function SimpleSelect({ value, onChange, options, placeholder, al
   const colors = useColors();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const triggerRef = useRef<HTMLDivElement>(null);
-  const dropdownRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  // Track the overlay element as state so `useFixedOverlayPosition`
-  // re-runs when the dropdown mounts and can flip above the trigger
-  // when there's no room below. The callback ref also feeds
-  // `dropdownRef` for `useOnClickOutside`.
-  const [overlayEl, setOverlayEl] = useState<HTMLDivElement | null>(null);
-  const setOverlay = useCallback((el: HTMLDivElement | null) => {
-    dropdownRef.current = el;
-    setOverlayEl(el);
-  }, []);
-  const pos = useFixedOverlayPosition(triggerRef, open, { overlayEl });
 
   const selected = options.find(o => o.value === value);
   const isSmall = size === 'small';
@@ -58,8 +45,12 @@ export default function SimpleSelect({ value, onChange, options, placeholder, al
   }, [open]);
 
   const close = () => { setOpen(false); setSearch(''); };
-  useOnClickOutside([triggerRef, dropdownRef], close, open);
-  useEscapeKey(close, open);
+  const { triggerRef, setOverlay, pos } = useOverlayDropdown({
+    visible: open,
+    onClose: close,
+    flipWhenNoRoom: true,
+    closeOnEscape: true,
+  });
 
   const filtered = options.filter(o =>
     o.label.toLowerCase().includes(search.toLowerCase()) ||
