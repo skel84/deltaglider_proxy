@@ -46,6 +46,7 @@ import { useColors } from '../ThemeContext';
 import { useCardStyles } from './shared-styles';
 import { useSectionEditor } from '../useSectionEditor';
 import type { UseSectionEditorResult } from '../useSectionEditor';
+import { undefinedToNullSubset } from './advancedPayload';
 import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import ApplyDialog from './ApplyDialog';
@@ -170,6 +171,12 @@ function useAdvancedSubset<T extends Partial<AdvancedSectionBody>>(
       }
       return out;
     },
+    // RFC 7396 merge-patch: map each owned field's `undefined` (a
+    // user-cleared scalar) to explicit JSON `null` so it DELETES the
+    // field. Without this, `JSON.stringify` drops the `undefined` key
+    // and the clear is silently a no-op. Never-set fields are already
+    // absent server-side, so null = delete = no-op there.
+    toPayload: (v) => undefinedToNullSubset(v, keys) as AdvancedSectionBody,
   });
 }
 

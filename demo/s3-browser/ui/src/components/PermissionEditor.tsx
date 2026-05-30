@@ -6,6 +6,7 @@ import { useColors } from '../ThemeContext';
 import { listBuckets } from '../s3client';
 import { parseResourcePattern } from '../storagePath';
 import type { PermissionRow } from './permissionRows';
+import { getConditionValue, setConditionValue, hasConditions } from './permissionConditions';
 import ResourcePatternInput from './ResourcePatternInput';
 import ConditionPrefixInput from './ConditionPrefixInput';
 
@@ -19,55 +20,6 @@ const ACTION_OPTIONS = [
   { label: 'Admin (Bucket ops)', value: 'admin' },
   { label: 'All (*)', value: '*' },
 ];
-
-/** Extract a simple condition value for UI display */
-function getConditionValue(
-  conditions: Record<string, Record<string, string | string[]>> | undefined,
-  operator: string,
-  key: string,
-): string {
-  if (!conditions) return '';
-  const opBlock = conditions[operator];
-  if (!opBlock) return '';
-  const val = opBlock[key];
-  if (Array.isArray(val)) return val.join(', ');
-  return val || '';
-}
-
-/** Set a condition value, creating operator/key structure as needed */
-function setConditionValue(
-  conditions: Record<string, Record<string, string | string[]>> | undefined,
-  operator: string,
-  key: string,
-  value: string,
-): Record<string, Record<string, string | string[]>> {
-  const result = conditions ? { ...conditions } : {};
-  if (!value.trim()) {
-    // Remove the key
-    if (result[operator]) {
-      const { [key]: _, ...rest } = result[operator];
-      if (Object.keys(rest).length === 0) {
-        delete result[operator];
-      } else {
-        result[operator] = rest;
-      }
-    }
-    return result;
-  }
-  const parsedValue = value.includes(',')
-    ? value.split(',').map(v => v.trim())
-    : value.trim();
-  result[operator] = { ...(result[operator] || {}), [key]: parsedValue };
-  return result;
-}
-
-/** Check if a rule has any conditions set */
-function hasConditions(conditions?: Record<string, Record<string, string | string[]>>): boolean {
-  if (!conditions) return false;
-  return Object.values(conditions).some(kv => Object.values(kv).some(v =>
-    typeof v === 'string' ? v.trim() !== '' : v.length > 0
-  ));
-}
 
 function firstConcreteResourceBucket(resources: string): string {
   for (const part of resources.split(',')) {

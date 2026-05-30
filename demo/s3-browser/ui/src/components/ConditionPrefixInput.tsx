@@ -1,30 +1,17 @@
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from 'antd';
 import { listCommonPrefixes } from '../s3client';
 import { normalizePrefix } from '../storagePath';
+import {
+  freshRowId,
+  normalizePrefixPattern,
+  parseRows,
+  serializeRows,
+  type PrefixRow,
+} from '../conditionPrefixRows';
 import { useColors } from '../ThemeContext';
 import SimpleAutoComplete, { type AutoCompleteEntry, type AutoCompleteGroup } from './SimpleAutoComplete';
-
-function normalizePrefixPattern(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === '.*' || trimmed === '*') return trimmed;
-
-  if (trimmed.endsWith('*')) {
-    const base = trimmed.slice(0, -1);
-    return `${normalizePrefix(base)}*`;
-  }
-
-  return normalizePrefix(trimmed);
-}
-
-function normalizeList(value: string): string {
-  return value
-    .split(',')
-    .map((part) => normalizePrefixPattern(part))
-    .filter(Boolean)
-    .join(', ');
-}
 
 interface ConditionPrefixInputProps {
   value: string;
@@ -54,22 +41,51 @@ function prefixQueryFromPattern(value: string): string {
   return normalizePrefix(trimmed.replace(/\*$/, ''));
 }
 
-function splitRows(value: string): string[] {
-  const rows = value.split(',').map((part) => part.trim());
-  return rows.length > 0 ? rows : [''];
-}
-
-function serializeRows(rows: string[]): string {
-  if (rows.every((row) => !row.trim())) return rows.length > 1 ? rows.map(() => '').join(', ') : '';
-  return rows.map((row) => row.trim()).join(', ');
-}
-
 export default function ConditionPrefixInput({ value, onChange, bucket = '', style }: ConditionPrefixInputProps) {
   const colors = useColors();
   const [prefixOptions, setPrefixOptions] = useState<string[]>([]);
-  const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
-  const rows = useMemo(() => splitRows(value), [value]);
-  const activeValue = focusedIndex === null ? '' : rows[focusedIndex] || '';
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+
+  // Local editing state is the single source of truth WHILE editing. The
+  // `value` prop only seeds it, and only when the prop changes from something
+  // this component did NOT just emit (external/programmatic updates).
+  const [rows, setRows] = useState<PrefixRow[]>(() => parseRows(value));
+  // Mirror of `rows` read synchronously by `emit` so a burst of edits within
+  // one tick always builds on the freshest rows, never a stale render snapshot.
+  const rowsRef = useRef<PrefixRow[]>(rows);
+  rowsRef.current = rows;
+  // The last comma string we emitted upward — used to distinguish our own
+  // echoes (ignore) from genuine external prop changes (re-seed local rows).
+  const lastEmitted = useRef<string>(serializeRows(rows));
+
+  useEffect(() => {
+    // Ignore the prop change if it's the value we just emitted (echo).
+    if (value === lastEmitted.current) return;
+    // Genuine external change: re-seed local rows from the new prop.
+    lastEmitted.current = value;
+    const seeded = parseRows(value);
+    rowsRef.current = seeded;
+    setRows(seeded);
+  }, [value]);
+
+  // Apply a row mutation against the LATEST committed rows. We read the live
+  // rows via the rowsRef (kept in sync by the render below) rather than the
+  // closed-over `rows` snapshot — that snapshot staleness is the whole bug
+  // class we're killing. The setRows updater stays pure; the ref/onChange
+  // side effects run exactly once here, outside React's StrictMode double-render.
+  const emit = (mutate: (current: PrefixRow[]) => PrefixRow[]) => {
+    const next = mutate(rowsRef.current);
+    rowsRef.current = next;
+    setRows(next);
+    const serialized = serializeRows(next);
+    if (serialized !== lastEmitted.current) {
+      lastEmitted.current = serialized;
+      onChange(serialized);
+    }
+  };
+
+  const focusedRow = focusedId === null ? null : rows.find((r) => r.id === focusedId) || null;
+  const activeValue = focusedRow?.text || '';
   const prefixQuery = useMemo(() => prefixQueryFromPattern(activeValue), [activeValue]);
   const templateSuggestions = useMemo(
     () => ['home/${username}/*', 'keys/${access_key_id}/*', '.*'] as string[],
@@ -152,46 +168,58 @@ export default function ConditionPrefixInput({ value, onChange, bucket = '', sty
     };
   }, [bucket, prefixQuery]);
 
-  const updateRow = (index: number, nextValue: string) => {
-    const nextRows = [...rows];
-    nextRows[index] = nextValue.replace(/\r?\n/g, ' ');
-    onChange(serializeRows(nextRows));
+  const updateRow = (id: string, nextValue: string) => {
+    emit((current) =>
+      current.map((row) => (row.id === id ? { ...row, text: nextValue.replace(/\r?\n/g, ' ') } : row)),
+    );
   };
 
   const addRow = () => {
-    onChange(serializeRows([...rows, '']));
+    // Keep the new empty row in LOCAL state only (don't emit — an empty row
+    // contributes nothing to the persisted string and re-parsing it would be
+    // a no-op anyway). It becomes persistable once the user types into it.
+    const next = [...rowsRef.current, { id: freshRowId(), text: '' }];
+    rowsRef.current = next;
+    setRows(next);
   };
 
-  const deleteRow = (index: number) => {
-    const nextRows = rows.filter((_, rowIndex) => rowIndex !== index);
-    onChange(serializeRows(nextRows.length > 0 ? nextRows : ['']));
-    setFocusedIndex((current) => {
-      if (current === null) return null;
-      if (current === index) return null;
-      return current > index ? current - 1 : current;
+  const deleteRow = (id: string) => {
+    emit((current) => {
+      const remaining = current.filter((row) => row.id !== id);
+      return remaining.length > 0 ? remaining : [{ id: freshRowId(), text: '' }];
     });
+    setFocusedId((current) => (current === id ? null : current));
+  };
+
+  const normalizeRowOnBlur = (id: string) => {
+    setFocusedId(null);
+    // Normalize ONLY the row that blurred, in local state. No reparse of the
+    // comma string, no stale closure over the prop — so other rows can never
+    // be affected by one row losing focus.
+    emit((current) =>
+      current.map((row) =>
+        row.id === id ? { ...row, text: normalizePrefixPattern(row.text) } : row,
+      ),
+    );
   };
 
   const applySuggestion = (pattern: string) => {
-    if (focusedIndex === null) return;
-    updateRow(focusedIndex, pattern);
+    if (focusedId === null) return;
+    updateRow(focusedId, pattern);
   };
 
   return (
     <div style={{ width: '100%' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: style?.marginTop }}>
-        {rows.map((row, index) => (
-          <div key={index} style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%' }}>
-            <div style={{ flex: 1, minWidth: 0 }} onFocusCapture={() => setFocusedIndex(index)}>
+        {rows.map((row) => (
+          <div key={row.id} style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%' }}>
+            <div style={{ flex: 1, minWidth: 0 }} onFocusCapture={() => setFocusedId(row.id)}>
               <SimpleAutoComplete
-                value={row}
-                filterText={row}
-                autoComplete={`dgp-prefix-${bucket || 'nobucket'}-${index}`}
-                onChange={(v) => updateRow(index, v)}
-                onBlur={() => {
-                  setFocusedIndex(null);
-                  onChange(normalizeList(value));
-                }}
+                value={row.text}
+                filterText={row.text}
+                autoComplete={`dgp-prefix-${bucket || 'nobucket'}-${row.id}`}
+                onChange={(v) => updateRow(row.id, v)}
+                onBlur={() => normalizeRowOnBlur(row.id)}
                 optionGroups={optionGroups}
                 placeholder="uploads/*"
                 style={{ ...inputStyle, marginTop: 0 }}
@@ -204,7 +232,7 @@ export default function ConditionPrefixInput({ value, onChange, bucket = '', sty
                 size="small"
                 icon={<DeleteOutlined />}
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => deleteRow(index)}
+                onClick={() => deleteRow(row.id)}
                 style={{ flex: '0 0 auto' }}
               />
             )}
@@ -222,7 +250,7 @@ export default function ConditionPrefixInput({ value, onChange, bucket = '', sty
       >
         Add prefix
       </Button>
-      {focusedIndex !== null && (
+      {focusedId !== null && (
         <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
           {chipSuggestions.map((pattern) => (
             <Button
