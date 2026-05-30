@@ -29,6 +29,7 @@
     "test:master-detail-filter": "node scripts/master-detail-filter-regression-test.mjs",
     "test:trace-request": "node scripts/trace-request-regression-test.mjs",
     "test:rule-names": "node scripts/rule-names-regression-test.mjs",
+    "test:lifecycle-helpers": "node scripts/lifecycle-helpers-regression-test.mjs",
     "test:upload-telemetry": "node scripts/upload-telemetry-regression-test.mjs",
     "test:page-size": "node scripts/page-size-regression-test.mjs",
     "e2e": "playwright test",

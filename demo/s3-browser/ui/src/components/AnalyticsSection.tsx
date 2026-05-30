@@ -29,9 +29,7 @@
  * staleness is never invisible.
  */
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Button } from 'antd';
 import { XAxis, YAxis, ResponsiveContainer, Tooltip as RechartsTooltip, AreaChart, Area } from 'recharts';
-import { ClockCircleOutlined, PlayCircleOutlined, StopOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import { listBuckets } from '../s3client';
 import type { AdminConfig } from '../adminApi';
@@ -43,7 +41,7 @@ import {
   type BucketScanResult,
   type BucketScanProgress,
 } from '../adminApi';
-import { formatBytes, ageLabel, dotPattern } from '../utils';
+import { formatBytes, ageLabel } from '../utils';
 import { summarizeScopeSavings } from '../savings';
 import DashboardGrid from './dashboard/DashboardGrid';
 import Panel from './dashboard/Panel';
@@ -52,6 +50,9 @@ import HeroSavingsPanel from './HeroSavingsPanel';
 import ByTheNumbersGrid from './ByTheNumbersGrid';
 import FleetHealthGauge from './FleetHealthGauge';
 import TopBucketsSortSelect from './TopBucketsSortSelect';
+import BucketFleetList from './BucketFleetList';
+import TopBucketsList from './TopBucketsList';
+import ScanStatusBanner from './ScanStatusBanner';
 import { SORT_LABELS, type TopBucketsSortKey } from './topBucketsSort';
 
 /** Row shape consumed by chart + table. Derived from cache + live progress. */
@@ -413,127 +414,22 @@ export default function AnalyticsSection({ config }: Props) {
 
   return (
     <>
-      {/*
-        Scan-status banner. Lives ABOVE the grid so a "Re-scan in
-        progress" pulse doesn't shake the panel heights. The banner
-        is the contract with the user:
-          - On first paint they see "Cache: N of M buckets · oldest
-            scanned X ago". No ghosting, no spinner.
-          - Click Re-scan all → banner switches to a live progress
-            row with bucket name, objects scanned, bytes seen, Stop.
-          - The KPIs and panels below update LIVE per SSE frame so
-            you can watch the totals tick up rather than wait for
-            the whole bucket to finish.
-      */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-          padding: '10px 14px',
-          marginBottom: 12,
-          background: colors.BG_CARD,
-          border: `1px solid ${colors.BORDER}`,
-          borderRadius: 8,
-        }}
-      >
-        <ClockCircleOutlined style={{ color: colors.TEXT_MUTED, fontSize: 14 }} />
-        <div style={{ fontSize: 12, color: colors.TEXT_SECONDARY, flex: 1, minWidth: 0 }}>
-          {liveProgress ? (
-            <>
-              <span style={{ color: colors.ACCENT_BLUE, fontWeight: 700 }}>
-                Scanning {liveProgress.bucket}
-              </span>{' '}
-              · {fmtNum(liveProgress.objects)} objects ·{' '}
-              {formatBytes(liveProgress.original_bytes)} seen ·{' '}
-              {liveProgress.pages_done} pages
-              {queue.length > 1 && (
-                <span style={{ color: colors.TEXT_MUTED }}>
-                  {' '}· {queue.length - 1} more queued
-                </span>
-              )}
-            </>
-          ) : cachedRows.length === 0 ? (
-            <span>
-              No scans yet. Click <strong>Run full scan</strong> — results persist on disk and survive restarts.
-            </span>
-          ) : (
-            <>
-              <strong>{cachedRows.length}</strong> of{' '}
-              <strong>{bucketRows.length}</strong> buckets scanned · Newest:{' '}
-              <span style={{ color: colors.TEXT_PRIMARY }}>{ageLabel(newestCompletedAt)}</span>
-              {oldestCompletedAt && oldestCompletedAt !== newestCompletedAt && (
-                <>
-                  {' '}· Oldest:{' '}
-                  <span style={{ color: colors.TEXT_PRIMARY }}>{ageLabel(oldestCompletedAt)}</span>
-                </>
-              )}
-              {unscannedCount > 0 && (
-                <span style={{ color: colors.ACCENT_AMBER }}>
-                  {' '}· {unscannedCount} unscanned excluded from totals
-                </span>
-              )}
-            </>
-          )}
-        </div>
-        {isScanning ? (
-          <Button
-            size="small"
-            danger
-            icon={<StopOutlined />}
-            onClick={handleStop}
-          >
-            Stop
-          </Button>
-        ) : (
-          /*
-            Two affordances side-by-side:
-            - **Scan missing (N)** is the primary action when any
-              bucket is uncached. Doing a full re-scan in that case
-              would waste 30+ minutes redoing the 1.4 TB beshu bucket
-              just to learn the same number we already have.
-            - **Re-scan all** is the explicit "I want fresh numbers
-              everywhere" — surfaced as a smaller secondary button.
-            When everything is already cached, "Scan missing" hides
-            and only "Re-scan all" remains as the primary.
-          */
-          <div style={{ display: 'flex', gap: 6 }}>
-            {unscannedCount > 0 && (
-              <Button
-                size="small"
-                type="primary"
-                icon={<PlayCircleOutlined />}
-                onClick={handleScanMissing}
-                disabled={allBuckets.length === 0 || !scansLoaded}
-              >
-                Scan missing ({unscannedCount})
-              </Button>
-            )}
-            <Button
-              size="small"
-              type={unscannedCount === 0 ? 'primary' : 'default'}
-              icon={
-                cachedRows.length === 0 ? (
-                  <PlayCircleOutlined />
-                ) : (
-                  <ReloadOutlined />
-                )
-              }
-              onClick={handleRescanAll}
-              disabled={allBuckets.length === 0 || !scansLoaded}
-              title={
-                unscannedCount > 0
-                  ? 'Force a fresh scan of every bucket, including ones already cached. Expensive — only do this if you suspect data drift.'
-                  : undefined
-              }
-            >
-              {cachedRows.length === 0
-                ? 'Run full scan'
-                : `Re-scan all (${allBuckets.length})`}
-            </Button>
-          </div>
-        )}
-      </div>
+      <ScanStatusBanner
+        colors={colors}
+        liveProgress={liveProgress}
+        queue={queue}
+        cachedCount={cachedRows.length}
+        bucketCount={bucketRows.length}
+        newestCompletedAt={newestCompletedAt}
+        oldestCompletedAt={oldestCompletedAt}
+        unscannedCount={unscannedCount}
+        allBucketsCount={allBuckets.length}
+        scansLoaded={scansLoaded}
+        isScanning={isScanning}
+        onStop={handleStop}
+        onScanMissing={handleScanMissing}
+        onRescanAll={handleRescanAll}
+      />
 
     <DashboardGrid>
       {/* ── Row 1: HERO ─────────────────────────────────────────
@@ -598,135 +494,7 @@ export default function AnalyticsSection({ config }: Props) {
         empty={bucketRows.length === 0 ? { title: 'No bucket data yet', hint: 'Create a bucket and upload a few objects to populate analytics.' } : undefined}
       >
         {bucketRows.length > 0 && (
-          <div
-            style={{
-              flex: 1,
-              minHeight: 0,
-              overflow: 'auto',
-              display: 'flex',
-              flexDirection: 'column',
-              // Distribute rows evenly to fill panel height when row
-              // count is small — no more dead space at the bottom.
-              justifyContent: bucketRows.length <= 4 ? 'space-evenly' : 'flex-start',
-              gap: 14,
-              paddingRight: 4,
-            }}
-          >
-            {bucketRows.map(b => {
-              const isLargest = b.totalOriginal === Math.max(...bucketRows.map(r => r.totalOriginal));
-              const maxOriginal = Math.max(1, ...bucketRows.map(r => r.totalOriginal));
-              const footprintPct = (b.totalOriginal / maxOriginal) * 100;
-              const hasData = b.totalOriginal > 0;
-              const keptPct = hasData ? 100 - b.savingsPercent : 0;
-              return (
-                <div key={b.bucket} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  {/* Header: bucket name · ratio % · raw bytes */}
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'baseline',
-                      justifyContent: 'space-between',
-                      gap: 12,
-                      fontFamily: 'var(--font-ui)',
-                    }}
-                  >
-                    <span
-                      style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 12,
-                        fontWeight: 600,
-                        color: colors.TEXT_PRIMARY,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        minWidth: 0,
-                        flex: 1,
-                      }}
-                    >
-                      {b.bucket}
-                      {isLargest && bucketRows.length > 1 && (
-                        <span style={{ marginLeft: 6, fontSize: 9, color: colors.TEXT_FAINT, fontFamily: 'var(--font-ui)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>
-                          largest
-                        </span>
-                      )}
-                    </span>
-                    <span style={{ fontSize: 11, color: colors.TEXT_MUTED, fontVariantNumeric: 'tabular-nums' }}>
-                      {hasData ? `${formatBytes(b.totalOriginal)} → ${formatBytes(b.totalStored)}` : '—'}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 700,
-                        color: hasData && b.savingsPercent >= 50 ? colors.ACCENT_GREEN : hasData && b.savingsPercent >= 20 ? colors.ACCENT_BLUE_LIGHT : colors.TEXT_PRIMARY,
-                        fontVariantNumeric: 'tabular-nums',
-                        minWidth: 52,
-                        textAlign: 'right',
-                      }}
-                    >
-                      {hasData ? `${b.savingsPercent.toFixed(1)}%` : '—'}
-                    </span>
-                  </div>
-                  {/* Ratio bar — always 100% wide. Communicates compression quality. */}
-                  <div
-                    style={{
-                      width: '100%',
-                      height: 14,
-                      background: colors.BG_CARD,
-                      border: `1px solid ${colors.BORDER}`,
-                      borderRadius: 4,
-                      overflow: 'hidden',
-                      display: 'flex',
-                      boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.2)',
-                    }}
-                    role="img"
-                    aria-label={hasData ? `${b.bucket}: ${b.savingsPercent.toFixed(1)}% saved` : `${b.bucket}: no data`}
-                  >
-                    {hasData && (
-                      <>
-                        <div
-                          style={{
-                            width: `${keptPct}%`,
-                            background: `linear-gradient(180deg, ${colors.ACCENT_BLUE} 0%, ${colors.ACCENT_BLUE_LIGHT} 100%)`,
-                            transition: 'width 0.4s ease-out',
-                          }}
-                          title={`Kept: ${formatBytes(b.totalStored)}`}
-                        />
-                        <div
-                          style={{
-                            width: `${b.savingsPercent}%`,
-                            backgroundImage: dotPattern(colors.TEXT_FAINT),
-                            transition: 'width 0.4s ease-out',
-                          }}
-                          title={`Saved: ${formatBytes(b.savings)}`}
-                        />
-                      </>
-                    )}
-                  </div>
-                  {/* Footprint bar — relative to largest. Magnitude story. */}
-                  <div
-                    style={{
-                      width: '100%',
-                      height: 3,
-                      background: colors.BG_CARD,
-                      borderRadius: 2,
-                      overflow: 'hidden',
-                    }}
-                    title={`${formatBytes(b.totalOriginal)} (${footprintPct.toFixed(1)}% of largest)`}
-                  >
-                    <div
-                      style={{
-                        width: `${Math.max(1, footprintPct)}%`,
-                        height: '100%',
-                        background: colors.TEXT_MUTED,
-                        opacity: 0.55,
-                        transition: 'width 0.4s ease-out',
-                      }}
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <BucketFleetList bucketRows={bucketRows} colors={colors} />
         )}
       </Panel>
       <Panel
@@ -742,224 +510,16 @@ export default function AnalyticsSection({ config }: Props) {
         ) : undefined}
       >
         {topBuckets.length > 0 && (
-          <div style={{ flex: 1, overflow: 'auto', fontSize: 12 }}>
-            {topBuckets.map((b, i) => (
-              <div
-                key={b.bucket}
-                style={{
-                  // Three columns: name + meta · savings/streaming
-                  // numerics · per-row action button. The action is
-                  // visually quiet (icon-only ghost button) until
-                  // hover; we keep it always-visible to avoid the
-                  // "where do I click to re-scan this bucket?"
-                  // discoverability problem.
-                  display: 'grid',
-                  gridTemplateColumns: '1fr auto auto',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '8px 0',
-                  borderTop: i === 0 ? 'none' : `1px solid ${colors.BORDER}`,
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div style={{
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 12,
-                    color: colors.TEXT_PRIMARY,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                  }}>
-                    {b.bucket}
-                    {b.scanning && (
-                      <span
-                        title="Live scan in progress"
-                        style={{
-                          width: 6,
-                          height: 6,
-                          borderRadius: 6,
-                          background: colors.ACCENT_BLUE,
-                          animation: 'dgScanPulse 1.2s ease-in-out infinite',
-                        }}
-                      />
-                    )}
-                    {!b.scanning && !b.completedAt && (
-                      <span
-                        title="Never scanned — not included in totals"
-                        style={{
-                          fontSize: 10,
-                          color: colors.ACCENT_AMBER,
-                          fontFamily: 'var(--font-ui)',
-                        }}
-                      >
-                        unscanned
-                      </span>
-                    )}
-                    {(() => {
-                      // Backend chip — shows which named backend the
-                      // bucket lives on (Hetzner / AWS / filesystem
-                      // etc.). The hover tooltip carries the endpoint
-                      // for operators who manage multiple named
-                      // backends of the same type.
-                      const backendName = backendOf(b.bucket);
-                      if (!backendName) return null;
-                      const backendMeta = config?.backends?.find(x => x.name === backendName);
-                      const tip = backendMeta
-                        ? `${backendMeta.backend_type}${backendMeta.endpoint ? ` · ${backendMeta.endpoint}` : ''}`
-                        : backendName;
-                      return (
-                        <span
-                          title={tip}
-                          style={{
-                            fontSize: 9.5,
-                            fontWeight: 600,
-                            color: colors.TEXT_MUTED,
-                            background: colors.BG_CARD,
-                            border: `1px solid ${colors.BORDER}`,
-                            borderRadius: 3,
-                            padding: '1px 5px',
-                            fontFamily: 'var(--font-ui)',
-                            letterSpacing: '0.02em',
-                            textTransform: 'lowercase',
-                            cursor: 'help',
-                            flexShrink: 0,
-                          }}
-                        >
-                          {backendName}
-                        </span>
-                      );
-                    })()}
-                  </div>
-                  <div style={{ fontSize: 10.5, color: colors.TEXT_MUTED, marginTop: 2 }}>
-                    {/*
-                      During a scan the first SSE frame may arrive in
-                      <1s but until then `objectCount` is 0; rendering
-                      "0 objects · 0 B" is more misleading than
-                      "Scanning…" so we suppress numerics in that
-                      window. Same logic for the right-hand column.
-                    */}
-                    {b.scanning && b.objectCount === 0 ? (
-                      <span style={{ color: colors.ACCENT_BLUE }}>Scanning…</span>
-                    ) : (
-                      <>
-                        {fmtNum(b.objectCount)} objects · {formatBytes(b.totalOriginal)} original
-                        {b.completedAt && (
-                          <>
-                            {' '}· <span title={new Date(b.completedAt).toLocaleString()}>{ageLabel(b.completedAt)}</span>
-                          </>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-                <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, minWidth: 88 }}>
-                  {b.scanning && b.objectCount === 0 ? (
-                    <div style={{ fontSize: 11, color: colors.TEXT_MUTED, fontStyle: 'italic' }}>
-                      streaming
-                    </div>
-                  ) : (
-                    <>
-                      <div style={{
-                        fontSize: 13,
-                        fontWeight: 700,
-                        color: b.savingsPercent > 10 ? colors.ACCENT_GREEN : colors.TEXT_PRIMARY,
-                        fontFamily: 'var(--font-ui)',
-                        fontVariantNumeric: 'tabular-nums',
-                      }}>
-                        {b.savingsPercent.toFixed(1)}%
-                      </div>
-                      {/* Tiny inline mini-bar echoing the bigger fleet
-                          view — gives the eye a glance-level confirmation
-                          of how dramatic this bucket's compression is. */}
-                      {b.totalOriginal > 0 && (
-                        <div
-                          style={{
-                            width: 76,
-                            height: 4,
-                            background: colors.BG_CARD,
-                            border: `1px solid ${colors.BORDER}`,
-                            borderRadius: 2,
-                            overflow: 'hidden',
-                            display: 'flex',
-                          }}
-                        >
-                          <div
-                            style={{
-                              width: `${100 - b.savingsPercent}%`,
-                              background: colors.ACCENT_BLUE_LIGHT,
-                            }}
-                          />
-                          <div
-                            style={{
-                              width: `${b.savingsPercent}%`,
-                              backgroundImage: dotPattern(colors.TEXT_FAINT),
-                            }}
-                          />
-                        </div>
-                      )}
-                      <div style={{ fontSize: 10.5, color: colors.TEXT_MUTED }}>
-                        {formatBytes(b.savings)} saved
-                      </div>
-                    </>
-                  )}
-                </div>
-                {/*
-                  Per-row scan affordance. Always visible so users can
-                  refresh ONE bucket's totals without re-scanning the
-                  multi-TB neighbours. While the bucket is the live SSE
-                  target the button becomes Stop; while it's queued
-                  (but not yet running) the button cancels its queue
-                  entry; otherwise it kicks off a single-bucket scan.
-                  Disabled if the bucket is queued behind a different
-                  one — clicking again would be a no-op anyway, but
-                  showing it disabled signals "already queued".
-                */}
-                {(() => {
-                  const isHeadRunning = b.scanning;
-                  const isQueuedNonHead = !isHeadRunning && queue.includes(b.bucket);
-                  if (isHeadRunning) {
-                    return (
-                      <Button
-                        size="small"
-                        danger
-                        icon={<StopOutlined />}
-                        onClick={() => handleStopOne(b.bucket)}
-                        title={`Stop scanning ${b.bucket}`}
-                      />
-                    );
-                  }
-                  if (isQueuedNonHead) {
-                    return (
-                      <Button
-                        size="small"
-                        type="default"
-                        icon={<StopOutlined />}
-                        onClick={() => handleStopOne(b.bucket)}
-                        title={`Remove ${b.bucket} from scan queue`}
-                      />
-                    );
-                  }
-                  return (
-                    <Button
-                      size="small"
-                      type="text"
-                      icon={b.completedAt ? <ReloadOutlined /> : <PlayCircleOutlined />}
-                      onClick={() => handleScanOne(b.bucket)}
-                      title={
-                        b.completedAt
-                          ? `Re-scan ${b.bucket} (currently ${ageLabel(b.completedAt)})`
-                          : `Scan ${b.bucket}`
-                      }
-                      disabled={!scansLoaded}
-                    />
-                  );
-                })()}
-              </div>
-            ))}
-          </div>
+          <TopBucketsList
+            topBuckets={topBuckets}
+            colors={colors}
+            config={config}
+            queue={queue}
+            scansLoaded={scansLoaded}
+            backendOf={backendOf}
+            onStopOne={handleStopOne}
+            onScanOne={handleScanOne}
+          />
         )}
       </Panel>
 
