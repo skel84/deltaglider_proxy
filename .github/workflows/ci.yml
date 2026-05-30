@@ -535,6 +535,10 @@ jobs:
           npm run test:yaml-utils
           npm run test:utils
           npm run test:request-id-suffix
+          npm run test:storage-section-payload
+          npm run test:backend-encryption-payload
+          npm run test:master-detail-filter
+          npm run test:trace-request
           npm run test:upload-telemetry
       - name: npm audit
         run: cd demo/s3-browser/ui && npm audit --audit-level=high || true  # warn-only

@@ -26,18 +26,14 @@ import type {
   ReplicationRuleConfig,
   ReplicationRuleOverview,
   StorageSectionBody,
-  SectionApplyResponse,
 } from '../adminApi';
 import {
   getReplicationFailures,
   getReplicationHistory,
   getReplicationOverview,
-  getSection,
   pauseReplicationRule,
-  putSection,
   resumeReplicationRule,
   runReplicationNow,
-  validateSection,
 } from '../adminApi';
 import { listBuckets } from '../s3client';
 import { useColors } from '../ThemeContext';
@@ -47,62 +43,20 @@ import BucketPrefixInput from './BucketPrefixInput';
 import ApplyDialog from './ApplyDialog';
 import { AdvancedDisclosure, Field } from './ruleEditorFields';
 import { fmtUnix, lineList, lines } from './ruleEditorHelpers';
-import { useApplyHandler, useDirtySection } from '../useDirtySection';
+import { useApplyHandler } from '../useDirtySection';
+import { useSectionEditor } from '../useSectionEditor';
 import { formatBytes } from '../utils';
-import { normalizePrefix } from '../storagePath';
+import {
+  buildReplicationPayload,
+  DEFAULT_REPLICATION,
+  emptyRule,
+  normalizeReplication,
+} from './replicationPayload';
 
 const { Text } = Typography;
 
 interface Props {
   onSessionExpired?: () => void;
-}
-
-const DEFAULT_REPLICATION: ReplicationConfig = {
-  enabled: true,
-  tick_interval: '30s',
-  lease_ttl: '60s',
-  heartbeat_interval: '20s',
-  max_failures_retained: 100,
-  rules: [],
-};
-
-function emptyRule(existing: ReplicationRuleConfig[]): ReplicationRuleConfig {
-  let n = existing.length + 1;
-  let name = `rule-${n}`;
-  while (existing.some((r) => r.name === name)) {
-    n += 1;
-    name = `rule-${n}`;
-  }
-  return {
-    name,
-    enabled: true,
-    source: { bucket: '', prefix: '' },
-    destination: { bucket: '', prefix: '' },
-    interval: '15m',
-    batch_size: 100,
-    replicate_deletes: false,
-    conflict: 'newer-wins',
-    include_globs: [],
-    exclude_globs: ['.dg/*'],
-  };
-}
-
-function normalizeReplication(input: Partial<ReplicationConfig> | undefined): ReplicationConfig {
-  const cfg = { ...DEFAULT_REPLICATION, ...(input || {}) };
-  return {
-    ...cfg,
-    rules: (cfg.rules || []).map((r) => ({
-      ...emptyRule([]),
-      ...r,
-      source: { bucket: r.source?.bucket || '', prefix: r.source?.prefix || '' },
-      destination: {
-        bucket: r.destination?.bucket || '',
-        prefix: r.destination?.prefix || '',
-      },
-      include_globs: r.include_globs || [],
-      exclude_globs: r.exclude_globs || ['.dg/*'],
-    })),
-  };
 }
 
 function statusTone(status: string, paused: boolean, enabled: boolean): 'success' | 'warning' | 'error' | 'default' {
@@ -120,22 +74,36 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
     setValue: setReplication,
     isDirty,
     discard,
-    markApplied,
-    resetWith,
-  } = useDirtySection<ReplicationConfig>('storage', DEFAULT_REPLICATION);
+    loading,
+    error,
+    applyOpen,
+    applyResponse,
+    applying,
+    pendingBody,
+    runApply: editorRunApply,
+    cancelApply,
+    confirmApply,
+  } = useSectionEditor<StorageSectionBody, ReplicationConfig>({
+    section: 'storage',
+    initial: DEFAULT_REPLICATION,
+    onSessionExpired,
+    noun: 'replication',
+    pick: (body) => normalizeReplication(body.replication),
+    // The guarded `runApply` below blocks the apply on validation
+    // failure, so this only runs for a valid config; `{}` is an
+    // unreachable type-non-null fallback.
+    toPayload: (v) => {
+      const res = buildReplicationPayload(v);
+      return res.ok ? res.body : {};
+    },
+  });
 
   const [overview, setOverview] = useState<ReplicationRuleOverview[]>([]);
   const [history, setHistory] = useState<ReplicationHistoryEntry[]>([]);
   const [failures, setFailures] = useState<ReplicationFailureEntry[]>([]);
   const [buckets, setBuckets] = useState<string[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [applyOpen, setApplyOpen] = useState(false);
-  const [applyResponse, setApplyResponse] = useState<SectionApplyResponse | null>(null);
-  const [pendingBody, setPendingBody] = useState<StorageSectionBody | null>(null);
-  const [applying, setApplying] = useState(false);
 
   const selectedRule = replication.rules.find((r) => r.name === selected) || replication.rules[0] || null;
   const selectedRuleName = selectedRule?.name;
@@ -143,37 +111,29 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
     ? overview.find((r) => r.name === selectedRule.name)
     : null;
 
-  const refresh = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [section, repl, realBuckets] = await Promise.all([
-        getSection<StorageSectionBody>('storage'),
-        getReplicationOverview().catch(() => null),
-        listBuckets().catch(() => [] as Array<{ name: string }>),
-      ]);
-      const next = normalizeReplication(section.replication);
-      resetWith(next);
-      setOverview(repl?.rules || []);
-      setBuckets(realBuckets.map((b) => b.name));
-      setSelected((cur) => {
-        if (cur && next.rules.some((r) => r.name === cur)) return cur;
-        return next.rules[0]?.name || null;
-      });
-      setError(null);
-    } catch (e) {
-      if (e instanceof Error && e.message.includes('401')) {
-        onSessionExpired?.();
-        return;
-      }
-      setError(e instanceof Error ? e.message : 'Failed to load replication');
-    } finally {
-      setLoading(false);
-    }
-  }, [onSessionExpired, resetWith]);
+  // Runtime data (overview + buckets) is NOT part of the storage section
+  // body — load it independently. Reloaded after apply / run-now exactly
+  // where the old monolithic refresh() did.
+  const reloadRuntime = useCallback(async () => {
+    const [repl, realBuckets] = await Promise.all([
+      getReplicationOverview().catch(() => null),
+      listBuckets().catch(() => [] as Array<{ name: string }>),
+    ]);
+    setOverview(repl?.rules || []);
+    setBuckets(realBuckets.map((b) => b.name));
+  }, []);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void reloadRuntime();
+  }, [reloadRuntime]);
+
+  // Keep `selected` aligned with the rules the section editor loaded.
+  useEffect(() => {
+    setSelected((cur) => {
+      if (cur && replication.rules.some((r) => r.name === cur)) return cur;
+      return replication.rules[0]?.name || null;
+    });
+  }, [replication.rules]);
 
   useEffect(() => {
     if (!selectedRuleName) {
@@ -222,67 +182,25 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
     setSelected(next[0]?.name || null);
   };
 
-  const buildPayload = useCallback((): StorageSectionBody | null => {
-    const normalizedRules = replication.rules.map((rule) => ({
-      ...rule,
-      source: { ...rule.source, prefix: normalizePrefix(rule.source.prefix) },
-      destination: { ...rule.destination, prefix: normalizePrefix(rule.destination.prefix) },
-    }));
-    const names = normalizedRules.map((r) => r.name.trim()).filter(Boolean);
-    const duplicate = names.find((name, idx) => names.indexOf(name) !== idx);
-    if (duplicate) {
-      message.error(`Duplicate rule name: ${duplicate}`);
-      return null;
-    }
-    for (const rule of normalizedRules) {
-      if (!rule.name.trim()) {
-        message.error('Every replication rule needs a name.');
-        return null;
-      }
-      if (!rule.source.bucket || !rule.destination.bucket) {
-        message.error(`Rule ${rule.name}: source and destination buckets are required.`);
-        return null;
-      }
-    }
-    return { replication: { ...replication, rules: normalizedRules } };
-  }, [replication]);
-
+  // Guarded apply: run the client-side validation first and surface the
+  // first error, otherwise delegate to the section editor's validate →
+  // ApplyDialog → PUT flow (which re-derives the same body via
+  // `toPayload`, keeping the validate/PUT body byte-identical).
   const runApply = useCallback(async () => {
-    const body = buildPayload();
-    if (!body) return;
-    try {
-      const resp = await validateSection('storage', body);
-      setApplyResponse(resp);
-      setPendingBody(body);
-      setApplyOpen(true);
-    } catch (e) {
-      message.error(`Validate failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    const res = buildReplicationPayload(replication);
+    if (!res.ok) {
+      message.error(res.error);
+      return;
     }
-  }, [buildPayload]);
+    await editorRunApply();
+  }, [replication, editorRunApply]);
 
-  const confirmApply = useCallback(async () => {
-    if (!pendingBody) return;
-    setApplying(true);
-    try {
-      const resp = await putSection('storage', pendingBody);
-      if (!resp.ok) {
-        message.error(resp.error || 'Apply failed');
-        return;
-      }
-      message.success(resp.persisted_path ? `Applied + persisted to ${resp.persisted_path}` : 'Applied');
-      markApplied();
-      setApplyOpen(false);
-      setPendingBody(null);
-      await refresh();
-    } catch (e) {
-      message.error(`Apply failed: ${e instanceof Error ? e.message : 'unknown'}`);
-      setApplyOpen(false);
-      setPendingBody(null);
-      await refresh();
-    } finally {
-      setApplying(false);
-    }
-  }, [markApplied, pendingBody, refresh]);
+  // On a successful apply, reload runtime overview/buckets — the same
+  // side effect the old confirmApply ran via its bundled refresh().
+  const confirmApplyAndReload = useCallback(async () => {
+    await confirmApply();
+    await reloadRuntime();
+  }, [confirmApply, reloadRuntime]);
 
   const runAction = async (name: string, action: 'run' | 'pause' | 'resume') => {
     setActionLoading(`${action}:${name}`);
@@ -297,7 +215,7 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
         await resumeReplicationRule(name);
         message.success(`Resumed ${name}`);
       }
-      await refresh();
+      await reloadRuntime();
     } catch (e) {
       message.error(e instanceof Error ? e.message : `${action} failed`);
     } finally {
@@ -519,11 +437,8 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
         open={applyOpen}
         section="storage"
         response={applyResponse}
-        onApply={confirmApply}
-        onCancel={() => {
-          setApplyOpen(false);
-          setPendingBody(null);
-        }}
+        onApply={confirmApplyAndReload}
+        onCancel={cancelApply}
         loading={applying}
         summary={
           pendingBody?.replication ? (

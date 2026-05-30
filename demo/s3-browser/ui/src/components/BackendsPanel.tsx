@@ -9,7 +9,9 @@ import { useColors } from '../ThemeContext';
 import { useNavigation } from '../NavigationContext';
 import { useCardStyles } from './shared-styles';
 import SectionHeader from './SectionHeader';
+import FormField from './FormField';
 import BackendEncryptionEditor, { type BackendEncryptionPatch } from './BackendEncryptionEditor';
+import { buildEncryptionSectionBody } from '../backendEncryptionPayload';
 
 const { Text } = Typography;
 
@@ -19,7 +21,7 @@ interface Props {
 
 export default function BackendsPanel({ onSessionExpired }: Props) {
   const colors = useColors();
-  const { cardStyle, labelStyle, inputRadius } = useCardStyles();
+  const { cardStyle, inputRadius } = useCardStyles();
   // Query client lets mutations close the loop with `invalidateQueries`
   // instead of the local `refresh()` having to coordinate with siblings.
   const qc = useQueryClient();
@@ -157,69 +159,20 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
   };
 
   /**
-   * Apply a per-backend encryption change.
-   *
-   * Composes a `storage` section-PUT body that mutates ONLY the
-   * target backend's `encryption` block and leaves every sibling
-   * backend + every non-encryption field untouched. The server's
-   * RFC 7396 merge-patch semantics guarantee siblings are preserved
-   * — we just need to send the correct shape for the path we want
-   * to replace.
-   *
-   * Path:
-   *   * Singleton (synthetic "default" backend surfaced by the
-   *     server when `backends` is empty) → `{ backend_encryption:
-   *     <patch> }`.
-   *   * Named entry (any other name) → `{ backends: [{name, encryption}] }`.
-   *     Note the server replaces `backends` as a whole array on a
-   *     section PUT; for per-entry edits we send the FULL list with
-   *     only the target entry's `encryption` swapped.
+   * Apply a per-backend encryption change via a targeted `storage`
+   * section PUT. The wire body (singleton vs named-list shape) is
+   * composed by the pure `buildEncryptionSectionBody` builder; this
+   * handler owns only the I/O + result-message bookkeeping around it.
    */
   const handleEncryptionApply = async (
     backendName: string,
     patch: BackendEncryptionPatch,
   ): Promise<void> => {
-    // Translate the patch into the wire shape. null-clears for
-    // `legacy_key` pass through; absent fields rely on the server's
-    // three-state preservation to keep the previous value.
-    const encBody: Record<string, unknown> = { mode: patch.mode };
-    if (patch.key !== undefined) encBody.key = patch.key;
-    if (patch.key_id !== undefined) encBody.key_id = patch.key_id;
-    if (patch.kms_key_id !== undefined) encBody.kms_key_id = patch.kms_key_id;
-    if (patch.bucket_key_enabled !== undefined) encBody.bucket_key_enabled = patch.bucket_key_enabled;
-    if (patch.legacy_key !== undefined) encBody.legacy_key = patch.legacy_key;
-    if (patch.legacy_key_id !== undefined) encBody.legacy_key_id = patch.legacy_key_id;
-
-    // Build the section-PUT payload. The singleton ("default") path
-    // and the named-entries path have different shapes on disk.
-    let body: Record<string, unknown>;
-    if (backendName === 'default' && backends.length === 1 && backends[0].name === 'default') {
-      // Legacy singleton path — synthesise the singleton
-      // `backend_encryption` block. The server handles the
-      // preservation for us.
-      body = { backend_encryption: encBody };
-    } else {
-      // Named-backend path: replace the whole list with the edited
-      // encryption entry. The server's `preserve_backend_secrets`
-      // keeps non-encryption fields intact (e.g. S3 creds); the
-      // `preserve_backend_encryption_secrets` walker preserves
-      // sibling fields inside the encryption block itself.
-      const list = backends.map((b) => {
-        const backendShape: Record<string, unknown> = {
-          name: b.name,
-          type: b.backend_type,
-        };
-        if (b.path) backendShape.path = b.path;
-        if (b.endpoint) backendShape.endpoint = b.endpoint;
-        if (b.region) backendShape.region = b.region;
-        if (b.force_path_style !== null) backendShape.force_path_style = b.force_path_style;
-        if (b.name === backendName) {
-          backendShape.encryption = encBody;
-        }
-        return backendShape;
-      });
-      body = { backends: list };
-    }
+    // Compose the section-PUT body via the pure builder (singleton vs
+    // named-list shape, encryption-block translation). Extracted to
+    // `backendEncryptionPayload.ts` so the wire shape is unit-tested
+    // byte-for-byte and can't silently drift.
+    const body = buildEncryptionSectionBody(backendName, patch, backends);
 
     // Tracks whether the try-block already set a precise result message this
     // run. Using a local (not the closed-over `saveResult` state, which is the
@@ -377,46 +330,41 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
           <div style={cardStyle}>
             <SectionHeader icon={<PlusOutlined />} title="New Backend" />
             <div style={{ marginTop: 16 }}>
-              <span style={labelStyle}>Name</span>
-              <Input value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="e.g. local, hetzner, aws-prod" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
+              <FormField label="Name" yamlPath="storage.backends[].name">
+                <Input value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="e.g. local, hetzner, aws-prod" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
+              </FormField>
+              <FormField label="Type" yamlPath="storage.backends[].type">
+                <Radio.Group value={formType} onChange={(e) => setFormType(e.target.value)} style={{ display: 'flex', gap: 0 }}>
+                  <Radio.Button value="filesystem" style={{ fontSize: 13 }}>Filesystem</Radio.Button>
+                  <Radio.Button value="s3" style={{ fontSize: 13 }}>S3</Radio.Button>
+                </Radio.Group>
+              </FormField>
+              {formType === 'filesystem' && (
+                <FormField label="Data Directory" yamlPath="storage.backends[].path">
+                  <Input value={formPath} onChange={(e) => setFormPath(e.target.value)} placeholder="./data" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
+                </FormField>
+              )}
+              {formType === 's3' && (
+                <>
+                  <FormField label="Endpoint" yamlPath="storage.backends[].endpoint">
+                    <Input value={formEndpoint} onChange={(e) => setFormEndpoint(e.target.value)} placeholder="https://fsn1.your-objectstorage.com" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
+                  </FormField>
+                  <FormField label="Region" yamlPath="storage.backends[].region">
+                    <Input value={formRegion} onChange={(e) => setFormRegion(e.target.value)} placeholder="us-east-1" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
+                  </FormField>
+                  <div style={{ marginBottom: 20, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Switch checked={formForcePathStyle} onChange={setFormForcePathStyle} size="small" />
+                    <Text style={{ fontSize: 13, fontFamily: 'var(--font-ui)' }}>Force path-style URLs</Text>
+                  </div>
+                  <FormField label="Access Key ID" yamlPath="storage.backends[].access_key_id">
+                    <Input value={formAccessKey} onChange={(e) => setFormAccessKey(e.target.value)} placeholder="AKIAIOSFODNN7EXAMPLE" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
+                  </FormField>
+                  <FormField label="Secret Access Key" yamlPath="storage.backends[].secret_access_key">
+                    <Input.Password value={formSecretKey} onChange={(e) => setFormSecretKey(e.target.value)} placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLE" style={{ ...inputRadius }} />
+                  </FormField>
+                </>
+              )}
             </div>
-            <div style={{ marginTop: 12 }}>
-              <span style={labelStyle}>Type</span>
-              <Radio.Group value={formType} onChange={(e) => setFormType(e.target.value)} style={{ display: 'flex', gap: 0 }}>
-                <Radio.Button value="filesystem" style={{ fontSize: 13 }}>Filesystem</Radio.Button>
-                <Radio.Button value="s3" style={{ fontSize: 13 }}>S3</Radio.Button>
-              </Radio.Group>
-            </div>
-            {formType === 'filesystem' && (
-              <div style={{ marginTop: 12 }}>
-                <span style={labelStyle}>Data Directory</span>
-                <Input value={formPath} onChange={(e) => setFormPath(e.target.value)} placeholder="./data" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
-              </div>
-            )}
-            {formType === 's3' && (
-              <>
-                <div style={{ marginTop: 12 }}>
-                  <span style={labelStyle}>Endpoint</span>
-                  <Input value={formEndpoint} onChange={(e) => setFormEndpoint(e.target.value)} placeholder="https://fsn1.your-objectstorage.com" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
-                </div>
-                <div style={{ marginTop: 8 }}>
-                  <span style={labelStyle}>Region</span>
-                  <Input value={formRegion} onChange={(e) => setFormRegion(e.target.value)} placeholder="us-east-1" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
-                </div>
-                <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Switch checked={formForcePathStyle} onChange={setFormForcePathStyle} size="small" />
-                  <Text style={{ fontSize: 13, fontFamily: 'var(--font-ui)' }}>Force path-style URLs</Text>
-                </div>
-                <div style={{ marginTop: 12 }}>
-                  <span style={labelStyle}>Access Key ID</span>
-                  <Input value={formAccessKey} onChange={(e) => setFormAccessKey(e.target.value)} placeholder="AKIAIOSFODNN7EXAMPLE" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
-                </div>
-                <div style={{ marginTop: 8 }}>
-                  <span style={labelStyle}>Secret Access Key</span>
-                  <Input.Password value={formSecretKey} onChange={(e) => setFormSecretKey(e.target.value)} placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLE" style={{ ...inputRadius }} />
-                </div>
-              </>
-            )}
             <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
               <Switch checked={formSetDefault} onChange={setFormSetDefault} size="small" />
               <Text style={{ fontSize: 13, fontFamily: 'var(--font-ui)' }}>Set as default backend</Text>

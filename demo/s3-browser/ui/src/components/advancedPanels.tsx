@@ -152,7 +152,7 @@ function RestartChip({ reason }: { reason: string }) {
 function useAdvancedSubset<T extends Partial<AdvancedSectionBody>>(
   initial: T,
   onSessionExpired?: () => void
-): UseSectionEditorResult<T> {
+): UseSectionEditorResult<T, AdvancedSectionBody> {
   const keys = Object.keys(initial) as Array<keyof T>;
   return useSectionEditor<AdvancedSectionBody, T>({
     section: 'advanced',

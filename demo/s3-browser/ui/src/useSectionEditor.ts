@@ -67,11 +67,13 @@ interface UseSectionEditorOptions<Wire, Local = Wire> {
   noun?: string;
 }
 
-export interface UseSectionEditorResult<Local> {
+export interface UseSectionEditorResult<Local, Wire = Local> {
   /** Current editable value. */
   value: Local;
-  /** Replace the value (bypasses snapshot — callers drive equality). */
-  setValue: (next: Local) => void;
+  /** Replace the value (bypasses snapshot — callers drive equality).
+   *  Accepts a value or a functional updater (`prev => next`) so callers
+   *  can mutate-by-id without closing over a stale snapshot. */
+  setValue: (next: Local | ((prev: Local) => Local)) => void;
   /** Revert to the last-applied snapshot. */
   discard: () => void;
   /** True when `value` differs from the snapshot. */
@@ -84,6 +86,13 @@ export interface UseSectionEditorResult<Local> {
   applyOpen: boolean;
   applyResponse: SectionApplyResponse | null;
   applying: boolean;
+  /**
+   * The exact wire body captured at validate time (§F5). Non-null only
+   * while the ApplyDialog is open. Consumers that render a body-derived
+   * <ApplyDialog summary={...}> read this so the summary reflects the
+   * validated payload, not later edits made under the dialog.
+   */
+  pendingBody: Wire | null;
   /** Opens the validate → dialog flow. */
   runApply: () => Promise<void>;
   /** Close the dialog without persisting. */
@@ -96,7 +105,7 @@ export interface UseSectionEditorResult<Local> {
 
 export function useSectionEditor<Wire, Local = Wire>(
   opts: UseSectionEditorOptions<Wire, Local>
-): UseSectionEditorResult<Local> {
+): UseSectionEditorResult<Local, Wire> {
   const {
     section,
     initial,
@@ -217,6 +226,7 @@ export function useSectionEditor<Wire, Local = Wire>(
     applyOpen,
     applyResponse,
     applying,
+    pendingBody,
     runApply,
     cancelApply,
     confirmApply,

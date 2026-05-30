@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Button, Typography, Spin, Alert, Input, Divider, Checkbox } from 'antd';
-import { PlusOutlined, SearchOutlined, FolderOutlined, DeleteOutlined, CopyOutlined } from '@ant-design/icons';
+import { Button, Typography, Alert, Input, Divider, Checkbox } from 'antd';
+import { PlusOutlined, FolderOutlined, DeleteOutlined, CopyOutlined } from '@ant-design/icons';
 import type { IamGroup, IamMode, IamUser } from '../adminApi';
 import { getAdminConfig, getGroups, createGroup, updateGroup, deleteGroup, addGroupMember, removeGroupMember, getUsers, cloneGroup } from '../adminApi';
 import { useCardStyles } from './shared-styles';
@@ -8,16 +8,11 @@ import FormLabel from './FormLabel';
 import { useColors } from '../ThemeContext';
 import PermissionEditor from './PermissionEditor';
 import { permissionsToRows, rowsToPermissions, type PermissionRow } from './permissionRows';
+import { groupPermissionSummary, filterItems } from '../masterDetailFilter';
+import MasterDetailPanel from './MasterDetailPanel';
 import IamSourceBanner from './IamSourceBanner';
 
 const { Text, Title } = Typography;
-
-function permissionSummary(group: IamGroup): string {
-  if (group.permissions.length === 0) return 'No permissions';
-  const hasAll = group.permissions.some(p => p.actions.includes('*') && p.resources.includes('*'));
-  if (hasAll) return 'Full access';
-  return `${group.permissions.length} rule${group.permissions.length !== 1 ? 's' : ''}`;
-}
 
 interface GroupsPanelProps {
   onSessionExpired?: () => void;
@@ -78,9 +73,7 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
   }, [initialGroupId, groups.length, onGroupSelected]);
 
   const selectedGroup = groups.find(g => g.id === selectedId) ?? null;
-  const filtered = search
-    ? groups.filter(g => g.name.toLowerCase().includes(search.toLowerCase()))
-    : groups;
+  const filtered = filterItems(groups, search, g => [g.name]);
 
   const handleSelect = (group: IamGroup) => {
     setCreating(false);
@@ -132,164 +125,119 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
     }
   };
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-      {/* IAM source-of-truth banner — same explainer as UsersPanel. */}
-      <div style={{ padding: '12px 16px 0' }}>
-        <IamSourceBanner iamMode={iamMode} resource="groups" />
-      </div>
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-      {/* Left: Group List */}
-      <div style={{
-        width: 300,
-        minWidth: 260,
-        borderRight: `1px solid ${colors.BORDER}`,
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-      }}>
-        <div style={{ padding: '16px 16px 12px', borderBottom: `1px solid ${colors.BORDER}` }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <Text strong style={{ fontSize: 14 }}>Groups</Text>
-            <Button type="primary" size="small" icon={<PlusOutlined />} onClick={handleCreate}>
-              New
-            </Button>
-          </div>
-          <Input
-            prefix={<SearchOutlined style={{ color: colors.TEXT_MUTED }} />}
-            placeholder="Search groups..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            allowClear
-            size="small"
-            style={{ borderRadius: 6 }}
-          />
-        </div>
-
-        <div style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}>
-          {loading && groups.length === 0 && (
-            <div style={{ textAlign: 'center', padding: 32 }}><Spin /></div>
-          )}
-          {error && (
-            <Alert type="error" message={error} showIcon style={{ margin: 8, borderRadius: 8 }} />
-          )}
-          {!loading && groups.length === 0 && !error && (
-            <div style={{ padding: 20, textAlign: 'center' }}>
-              <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>No groups yet</Text>
-              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 12 }}>
-                Create groups to share permissions across multiple users.
-              </Text>
-              <Button type="primary" size="small" icon={<PlusOutlined />} onClick={handleCreate}>
-                Create Group
-              </Button>
-            </div>
-          )}
-          {filtered.map(group => {
-            const isSelected = group.id === selectedId && !creating;
-            return (
-              <div
-                key={group.id}
-                onClick={() => handleSelect(group)}
-                style={{
-                  padding: '10px 16px',
-                  cursor: 'pointer',
-                  background: isSelected ? colors.ACCENT_BLUE + '18' : 'transparent',
-                  borderLeft: isSelected ? `3px solid ${colors.ACCENT_BLUE}` : '3px solid transparent',
-                  transition: 'all 0.15s ease',
-                }}
-                onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = colors.BORDER + '40'; }}
-                onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <FolderOutlined style={{ color: colors.TEXT_MUTED, flexShrink: 0 }} />
-                  <Text strong style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                    {group.name}
-                  </Text>
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={<CopyOutlined />}
-                    title="Duplicate group"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void handleClone(group);
-                    }}
-                    style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0 }}
-                    onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
-                    onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
-                  />
-                  <Button
-                    type="text"
-                    danger
-                    size="small"
-                    icon={<DeleteOutlined />}
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      if (!window.confirm(`Delete group "${group.name}"? This cannot be undone.`)) return;
-                      try {
-                        await deleteGroup(group.id);
-                        handleDeleted();
-                      } catch (err) {
-                        console.error('Delete group failed:', err);
-                      }
-                    }}
-                    style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0 }}
-                    onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
-                    onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
-                  />
-                </div>
-                <div style={{ marginLeft: 22, marginTop: 2 }}>
-                  <Text type="secondary" style={{ fontSize: 11 }}>
-                    {group.member_ids.length} member{group.member_ids.length !== 1 ? 's' : ''}
-                    {' \u00b7 '}
-                    {permissionSummary(group)}
-                  </Text>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Right: Detail Form */}
-      <div style={{ flex: 1, overflow: 'auto', background: colors.BG_CARD }}>
-        {creating ? (
-          <GroupForm
-            group={null}
-            users={users}
-            onSaved={handleSaved}
-            onCancel={() => setCreating(false)}
-            onSavingChange={onSavingChange}
-          />
-        ) : selectedGroup ? (
-          <GroupForm
-            key={selectedGroup.id}
-            group={selectedGroup}
-            users={users}
-            onSaved={handleSaved}
-            onDeleted={handleDeleted}
-            onSavingChange={onSavingChange}
-          />
+  const detail = creating ? (
+    <GroupForm
+      group={null}
+      users={users}
+      onSaved={handleSaved}
+      onCancel={() => setCreating(false)}
+      onSavingChange={onSavingChange}
+    />
+  ) : selectedGroup ? (
+    <GroupForm
+      key={selectedGroup.id}
+      group={selectedGroup}
+      users={users}
+      onSaved={handleSaved}
+      onDeleted={handleDeleted}
+      onSavingChange={onSavingChange}
+    />
+  ) : (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: colors.TEXT_MUTED }}>
+      <div style={{ textAlign: 'center', maxWidth: 360, padding: 24 }}>
+        {groups.length === 0 ? (
+          <>
+            <FolderOutlined style={{ fontSize: 40, marginBottom: 12, color: colors.TEXT_MUTED }} />
+            <div><Text type="secondary" style={{ fontSize: 15, fontWeight: 500 }}>Permission Groups</Text></div>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
+              Create groups to share permissions across multiple users. Users inherit all permissions from their groups.
+            </Text>
+          </>
         ) : (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: colors.TEXT_MUTED }}>
-            <div style={{ textAlign: 'center', maxWidth: 360, padding: 24 }}>
-              {groups.length === 0 ? (
-                <>
-                  <FolderOutlined style={{ fontSize: 40, marginBottom: 12, color: colors.TEXT_MUTED }} />
-                  <div><Text type="secondary" style={{ fontSize: 15, fontWeight: 500 }}>Permission Groups</Text></div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
-                    Create groups to share permissions across multiple users. Users inherit all permissions from their groups.
-                  </Text>
-                </>
-              ) : (
-                <Text type="secondary" style={{ fontSize: 14 }}>Select a group to edit, or create a new one</Text>
-              )}
-            </div>
-          </div>
+          <Text type="secondary" style={{ fontSize: 14 }}>Select a group to edit, or create a new one</Text>
         )}
       </div>
-      </div>
     </div>
+  );
+
+  return (
+    <MasterDetailPanel<IamGroup>
+      // IAM source-of-truth banner — same explainer as UsersPanel.
+      banner={<IamSourceBanner iamMode={iamMode} resource="groups" />}
+      title="Groups"
+      searchPlaceholder="Search groups..."
+      items={filtered}
+      getId={group => group.id}
+      isSelected={group => group.id === selectedId && !creating}
+      onSelect={handleSelect}
+      rowPadding="10px 16px"
+      onCreate={handleCreate}
+      search={search}
+      onSearchChange={setSearch}
+      loading={loading}
+      error={error}
+      listEmptyState={(
+        <div style={{ padding: 20, textAlign: 'center' }}>
+          <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>No groups yet</Text>
+          <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 12 }}>
+            Create groups to share permissions across multiple users.
+          </Text>
+          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={handleCreate}>
+            Create Group
+          </Button>
+        </div>
+      )}
+      renderRowBody={group => (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <FolderOutlined style={{ color: colors.TEXT_MUTED, flexShrink: 0 }} />
+            <Text strong style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+              {group.name}
+            </Text>
+            <Button
+              type="text"
+              size="small"
+              icon={<CopyOutlined />}
+              title="Duplicate group"
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleClone(group);
+              }}
+              style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0 }}
+              onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
+              onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
+            />
+            <Button
+              type="text"
+              danger
+              size="small"
+              icon={<DeleteOutlined />}
+              onClick={async (e) => {
+                e.stopPropagation();
+                if (!window.confirm(`Delete group "${group.name}"? This cannot be undone.`)) return;
+                try {
+                  await deleteGroup(group.id);
+                  handleDeleted();
+                } catch (err) {
+                  console.error('Delete group failed:', err);
+                }
+              }}
+              style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0 }}
+              onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
+              onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
+            />
+          </div>
+          <div style={{ marginLeft: 22, marginTop: 2 }}>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {group.member_ids.length} member{group.member_ids.length !== 1 ? 's' : ''}
+              {' · '}
+              {groupPermissionSummary(group)}
+            </Text>
+          </div>
+        </>
+      )}
+      detail={detail}
+    />
   );
 }
 

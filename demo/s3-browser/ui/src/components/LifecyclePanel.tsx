@@ -25,24 +25,20 @@ import type {
   LifecycleRuleConfig,
   LifecycleRuleOverview,
   LifecycleRunOutcome,
-  SectionApplyResponse,
   StorageSectionBody,
 } from '../adminApi';
 import {
   getLifecycleFailures,
   getLifecycleHistory,
   getLifecycleOverview,
-  getSection,
   previewLifecycleRule,
-  putSection,
   runLifecycleNow,
-  validateSection,
 } from '../adminApi';
 import { listBuckets } from '../s3client';
 import { useColors } from '../ThemeContext';
-import { useApplyHandler, useDirtySection } from '../useDirtySection';
+import { useApplyHandler } from '../useDirtySection';
+import { useSectionEditor } from '../useSectionEditor';
 import { formatBytes } from '../utils';
-import { normalizePrefix } from '../storagePath';
 import ApplyDialog from './ApplyDialog';
 import BucketPrefixInput from './BucketPrefixInput';
 import { AdvancedDisclosure, Field } from './ruleEditorFields';
@@ -50,74 +46,19 @@ import { fmtUnix, formRow, lineList, lines } from './ruleEditorHelpers';
 import SectionHeader from './SectionHeader';
 import SimpleSelect from './SimpleSelect';
 import { useCardStyles } from './shared-styles';
+import {
+  actionKind,
+  actionLabel,
+  buildLifecyclePayload,
+  DEFAULT_LIFECYCLE,
+  emptyRule,
+  normalizeLifecycle,
+} from './lifecyclePayload';
 
 const { Text } = Typography;
 
 interface Props {
   onSessionExpired?: () => void;
-}
-
-const DEFAULT_LIFECYCLE: LifecycleConfig = {
-  enabled: false,
-  tick_interval: '1h',
-  max_failures_retained: 100,
-  rules: [],
-};
-
-function emptyRule(existing: LifecycleRuleConfig[]): LifecycleRuleConfig {
-  let n = existing.length + 1;
-  let name = `expire-old-${n}`;
-  while (existing.some((r) => r.name === name)) {
-    n += 1;
-    name = `expire-old-${n}`;
-  }
-  return {
-    name,
-    enabled: false,
-    bucket: '',
-    prefix: '',
-    action: 'delete',
-    expire_after: '30d',
-    include_globs: [],
-    exclude_globs: ['.deltaglider/**'],
-    batch_size: 100,
-  };
-}
-
-function normalizeLifecycle(input: Partial<LifecycleConfig> | undefined): LifecycleConfig {
-  const cfg = { ...DEFAULT_LIFECYCLE, ...(input || {}) };
-  return {
-    ...cfg,
-    rules: (cfg.rules || []).map((rule) => ({
-      ...emptyRule([]),
-      ...rule,
-      action: normalizeAction(rule.action),
-      prefix: rule.prefix || '',
-      include_globs: rule.include_globs || [],
-      exclude_globs: rule.exclude_globs || ['.deltaglider/**'],
-      batch_size: rule.batch_size || 100,
-    })),
-  };
-}
-
-function actionKind(action: LifecycleRuleConfig['action']): 'delete' | 'transition' {
-  return typeof action === 'object' && action?.type ? 'transition' : 'delete';
-}
-
-function normalizeAction(action: LifecycleRuleConfig['action']): LifecycleRuleConfig['action'] {
-  if (actionKind(action) === 'delete' || typeof action !== 'object') return 'delete';
-  return {
-    type: 'transition',
-    destination: {
-      bucket: action.destination?.bucket?.trim() || '',
-      prefix: normalizePrefix(action.destination?.prefix || ''),
-    },
-    delete_source_after_success: Boolean(action.delete_source_after_success),
-  };
-}
-
-function actionLabel(action: LifecycleRuleConfig['action'] | string | undefined): string {
-  return actionKind(action as LifecycleRuleConfig['action']) === 'transition' ? 'archive/move' : 'delete';
 }
 
 function fmtDate(value: string): string {
@@ -140,9 +81,29 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
     setValue: setLifecycle,
     isDirty,
     discard,
-    markApplied,
-    resetWith,
-  } = useDirtySection<LifecycleConfig>('storage', DEFAULT_LIFECYCLE);
+    loading,
+    error,
+    applyOpen,
+    applyResponse,
+    applying,
+    pendingBody,
+    runApply: editorRunApply,
+    cancelApply,
+    confirmApply,
+  } = useSectionEditor<StorageSectionBody, LifecycleConfig>({
+    section: 'storage',
+    initial: DEFAULT_LIFECYCLE,
+    onSessionExpired,
+    noun: 'lifecycle',
+    pick: (body) => normalizeLifecycle(body.lifecycle),
+    // The guarded `runApply` below blocks the apply on validation
+    // failure, so this only runs for a valid config; `{}` is an
+    // unreachable type-non-null fallback.
+    toPayload: (v) => {
+      const res = buildLifecyclePayload(v);
+      return res.ok ? res.body : {};
+    },
+  });
 
   const [overview, setOverview] = useState<LifecycleRuleOverview[]>([]);
   const [history, setHistory] = useState<LifecycleHistoryEntry[]>([]);
@@ -150,15 +111,9 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [buckets, setBuckets] = useState<string[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [runLoading, setRunLoading] = useState(false);
   const [previews, setPreviews] = useState<Record<string, LifecycleRunOutcome>>({});
-  const [applyOpen, setApplyOpen] = useState(false);
-  const [applyResponse, setApplyResponse] = useState<SectionApplyResponse | null>(null);
-  const [pendingBody, setPendingBody] = useState<StorageSectionBody | null>(null);
-  const [applying, setApplying] = useState(false);
 
   const selectedRule = lifecycle.rules.find((r) => r.name === selected) || lifecycle.rules[0] || null;
   const selectedRuleName = selectedRule?.name;
@@ -171,37 +126,30 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
   const lifetimeAffected = overview.reduce((sum, rule) => sum + rule.objects_affected_lifetime, 0);
   const lifetimeBytes = overview.reduce((sum, rule) => sum + rule.bytes_affected_lifetime, 0);
 
-  const refresh = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [section, lifecycleOverview, realBuckets] = await Promise.all([
-        getSection<StorageSectionBody>('storage'),
-        getLifecycleOverview().catch(() => null),
-        listBuckets().catch(() => [] as Array<{ name: string }>),
-      ]);
-      const next = normalizeLifecycle(section.lifecycle);
-      resetWith(next);
-      setOverview(lifecycleOverview?.rules || []);
-      setBuckets(realBuckets.map((b) => b.name));
-      setSelected((cur) => {
-        if (cur && next.rules.some((r) => r.name === cur)) return cur;
-        return next.rules[0]?.name || null;
-      });
-      setError(null);
-    } catch (e) {
-      if (e instanceof Error && e.message.includes('401')) {
-        onSessionExpired?.();
-        return;
-      }
-      setError(e instanceof Error ? e.message : 'Failed to load lifecycle');
-    } finally {
-      setLoading(false);
-    }
-  }, [onSessionExpired, resetWith]);
+  // Runtime data (overview + buckets) is NOT part of the storage
+  // section body — load it independently. Reloaded after apply / run-now
+  // exactly where the old monolithic refresh() did. `selected` tracks
+  // the section rules, which the section editor now owns.
+  const reloadRuntime = useCallback(async () => {
+    const [lifecycleOverview, realBuckets] = await Promise.all([
+      getLifecycleOverview().catch(() => null),
+      listBuckets().catch(() => [] as Array<{ name: string }>),
+    ]);
+    setOverview(lifecycleOverview?.rules || []);
+    setBuckets(realBuckets.map((b) => b.name));
+  }, []);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void reloadRuntime();
+  }, [reloadRuntime]);
+
+  // Keep `selected` aligned with the rules the section editor loaded.
+  useEffect(() => {
+    setSelected((cur) => {
+      if (cur && lifecycle.rules.some((r) => r.name === cur)) return cur;
+      return lifecycle.rules[0]?.name || null;
+    });
+  }, [lifecycle.rules]);
 
   useEffect(() => {
     if (!selectedRuleName) {
@@ -287,92 +235,26 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
     });
   };
 
-  const buildPayload = useCallback((): StorageSectionBody | null => {
-    const normalizedRules = lifecycle.rules.map((rule) => ({
-      ...rule,
-      action: normalizeAction(rule.action),
-      name: rule.name.trim(),
-      bucket: rule.bucket.trim(),
-      prefix: normalizePrefix(rule.prefix),
-      expire_after: rule.expire_after.trim(),
-      batch_size: rule.batch_size || 100,
-    }));
-    const names = normalizedRules.map((r) => r.name).filter(Boolean);
-    const duplicate = names.find((name, idx) => names.indexOf(name) !== idx);
-    if (duplicate) {
-      message.error(`Duplicate rule name: ${duplicate}`);
-      return null;
-    }
-    for (const rule of normalizedRules) {
-      if (!rule.name) {
-        message.error('Every lifecycle rule needs a name.');
-        return null;
-      }
-      if (!/^[A-Za-z0-9_.-]{1,64}$/.test(rule.name)) {
-        message.error(`Rule ${rule.name}: names must match [A-Za-z0-9_.-]{1,64}.`);
-        return null;
-      }
-      if (!rule.bucket) {
-        message.error(`Rule ${rule.name}: bucket is required.`);
-        return null;
-      }
-      if (!rule.expire_after) {
-        message.error(`Rule ${rule.name}: expire_after is required.`);
-        return null;
-      }
-      if (actionKind(rule.action) === 'transition') {
-        const action = rule.action as Exclude<LifecycleRuleConfig['action'], 'delete' | undefined>;
-        if (!action.destination.bucket.trim()) {
-          message.error(`Rule ${rule.name}: transition destination bucket is required.`);
-          return null;
-        }
-      }
-    }
-    return {
-      lifecycle: {
-        ...lifecycle,
-        rules: normalizedRules,
-      },
-    };
-  }, [lifecycle]);
-
+  // Guarded apply: run the client-side validation first and surface the
+  // first error, otherwise delegate to the section editor's validate →
+  // ApplyDialog → PUT flow (which re-derives the same body via
+  // `toPayload`, keeping the validate/PUT body byte-identical).
   const runApply = useCallback(async () => {
-    const body = buildPayload();
-    if (!body) return;
-    try {
-      const resp = await validateSection('storage', body);
-      setApplyResponse(resp);
-      setPendingBody(body);
-      setApplyOpen(true);
-    } catch (e) {
-      message.error(`Validate failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    const res = buildLifecyclePayload(lifecycle);
+    if (!res.ok) {
+      message.error(res.error);
+      return;
     }
-  }, [buildPayload]);
+    await editorRunApply();
+  }, [lifecycle, editorRunApply]);
 
-  const confirmApply = useCallback(async () => {
-    if (!pendingBody) return;
-    setApplying(true);
-    try {
-      const resp = await putSection('storage', pendingBody);
-      if (!resp.ok) {
-        message.error(resp.error || 'Apply failed');
-        return;
-      }
-      message.success(resp.persisted_path ? `Applied + persisted to ${resp.persisted_path}` : 'Applied');
-      markApplied();
-      setApplyOpen(false);
-      setPendingBody(null);
-      setPreviews({});
-      await refresh();
-    } catch (e) {
-      message.error(`Apply failed: ${e instanceof Error ? e.message : 'unknown'}`);
-      setApplyOpen(false);
-      setPendingBody(null);
-      await refresh();
-    } finally {
-      setApplying(false);
-    }
-  }, [markApplied, pendingBody, refresh]);
+  // On a successful apply, reload runtime overview/buckets and clear
+  // stale previews — exactly the side effects the old confirmApply ran.
+  const confirmApplyAndReload = useCallback(async () => {
+    await confirmApply();
+    setPreviews({});
+    await reloadRuntime();
+  }, [confirmApply, reloadRuntime]);
 
   const previewRule = async (name: string) => {
     setPreviewLoading(true);
@@ -433,7 +315,7 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
           message.success(
             `Lifecycle run ${result.status}: ${isTransition ? 'transitioned' : 'deleted'} ${result.objects_affected}, skipped ${result.objects_skipped}, errors ${result.errors}.`
           );
-          await refresh();
+          await reloadRuntime();
         } catch (e) {
           message.error(e instanceof Error ? e.message : 'Run-now failed');
         } finally {
@@ -641,11 +523,8 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
         open={applyOpen}
         section="storage"
         response={applyResponse}
-        onApply={confirmApply}
-        onCancel={() => {
-          setApplyOpen(false);
-          setPendingBody(null);
-        }}
+        onApply={confirmApplyAndReload}
+        onCancel={cancelApply}
         loading={applying}
         summary={
           pendingBody?.lifecycle ? (

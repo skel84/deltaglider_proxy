@@ -39,6 +39,8 @@ import {
   CloseCircleOutlined,
 } from '@ant-design/icons';
 import { adminFetch } from '../adminApi';
+import { throwApiError, normalizeUiError } from '../errorHandling';
+import { buildTraceBody } from '../traceRequest';
 import { useColors } from '../ThemeContext';
 import { useCardStyles } from './shared-styles';
 import { METHODS } from '../schemas/admissionSchema';
@@ -48,14 +50,6 @@ import FormField from './FormField';
 const { Text, Paragraph } = Typography;
 
 type Method = (typeof METHODS)[number];
-
-interface TraceRequest {
-  method: string;
-  path: string;
-  query?: string;
-  source_ip?: string;
-  authenticated: boolean;
-}
 
 interface TraceResolved {
   method: string;
@@ -99,25 +93,17 @@ export default function TracePanel({ onSessionExpired }: Props) {
     setRunning(true);
     setError(null);
     setResult(null);
-    const body: TraceRequest = {
-      method,
-      path,
-      authenticated,
-    };
-    if (query.trim()) body.query = query.trim();
-    if (sourceIp.trim()) body.source_ip = sourceIp.trim();
+    const body = buildTraceBody({ method, path, query, sourceIp, authenticated });
     try {
       const res = await adminFetch('/api/admin/config/trace', 'POST', body);
       if (!res.ok) {
-        const t = await res.text();
-        setError(t || `Trace failed (${res.status})`);
         if (res.status === 401) onSessionExpired?.();
-        return;
+        await throwApiError(res, 'Trace');
       }
       const data = (await res.json()) as TraceResponse;
       setResult(data);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'unknown error');
+      setError(normalizeUiError(e, 'unknown error'));
     } finally {
       setRunning(false);
     }
@@ -249,37 +235,11 @@ export default function TracePanel({ onSessionExpired }: Props) {
           />
           <DecisionSummary result={result} />
           <div style={{ marginTop: 16, borderTop: `1px solid ${colors.BORDER}`, paddingTop: 14 }}>
-            <Text
-              style={{
-                fontSize: 10,
-                fontWeight: 700,
-                letterSpacing: 0.5,
-                textTransform: 'uppercase',
-                color: colors.TEXT_MUTED,
-                fontFamily: 'var(--font-ui)',
-                display: 'block',
-                marginBottom: 8,
-              }}
-            >
-              Reason path
-            </Text>
+            <Text style={subHeaderStyle(colors.TEXT_MUTED)}>Reason path</Text>
             <ReasonPath result={result} />
           </div>
           <div style={{ marginTop: 16, borderTop: `1px solid ${colors.BORDER}`, paddingTop: 14 }}>
-            <Text
-              style={{
-                fontSize: 10,
-                fontWeight: 700,
-                letterSpacing: 0.5,
-                textTransform: 'uppercase',
-                color: colors.TEXT_MUTED,
-                fontFamily: 'var(--font-ui)',
-                display: 'block',
-                marginBottom: 8,
-              }}
-            >
-              Resolved request
-            </Text>
+            <Text style={subHeaderStyle(colors.TEXT_MUTED)}>Resolved request</Text>
             <ResolvedRequest resolved={result.resolved} />
           </div>
           <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
@@ -326,6 +286,20 @@ export default function TracePanel({ onSessionExpired }: Props) {
 }
 
 // ─── Helpers ─────────────────────────────────────────
+
+/** Shared uppercase eyebrow style for the result sub-section headers. */
+function subHeaderStyle(color: string): React.CSSProperties {
+  return {
+    fontSize: 10,
+    fontWeight: 700,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    color,
+    fontFamily: 'var(--font-ui)',
+    display: 'block',
+    marginBottom: 8,
+  };
+}
 
 function decisionTone(decision: string): 'allow' | 'deny' | 'continue' {
   if (decision === 'allow-anonymous') return 'allow';

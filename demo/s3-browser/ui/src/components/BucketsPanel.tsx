@@ -40,8 +40,8 @@ import {
   ExclamationCircleOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
-import type { AdminConfig, BackendInfo, SectionApplyResponse } from '../adminApi';
-import { getAdminConfig, getBackends, putSection, validateSection } from '../adminApi';
+import type { AdminConfig, BackendInfo } from '../adminApi';
+import { getAdminConfig, getBackends } from '../adminApi';
 import { resolveBackendFor, describeEncryption } from '../encryptionUi';
 import { listBuckets } from '../s3client';
 import { useColors } from '../ThemeContext';
@@ -51,112 +51,18 @@ import SimpleSelect from './SimpleSelect';
 import SimpleAutoComplete from './SimpleAutoComplete';
 import ApplyDialog from './ApplyDialog';
 import { formRow } from './ruleEditorHelpers';
-import { useApplyHandler, useDirtySection } from '../useDirtySection';
+import { useApplyHandler } from '../useDirtySection';
+import { useSectionEditor } from '../useSectionEditor';
+import type { BucketPolicyRow, PrefixEntry } from './bucketPolicyPayload';
+import { buildBucketPayload, freshId, policyToRow } from './bucketPolicyPayload';
 
 const { Text } = Typography;
-
-let rowIdCounter = 0;
-
-/** Monotonic, collision-free row id (stable React key; never reused). */
-const freshId = (): string => `bkt-${++rowIdCounter}`;
-
-/** A public-prefix entry carrying a stable synthetic id so the
- *  prefix list keys by identity, not array index. */
-interface PrefixEntry {
-  id: string;
-  value: string;
-}
-
-/** Local working shape — mirrors the backend `BucketPolicyConfig`
- *  but normalises nulls to undefined for the form controllers. */
-interface BucketPolicyRow {
-  /** Stable synthetic id — React key + mutate-by-id target. Never serialised. */
-  _id: string;
-  name: string;
-  /** `null` = omit key / YAML null — inherit engine default (delta enabled). */
-  compression: boolean | null;
-  max_delta_ratio: number | null;
-  backend: string;
-  alias: string;
-  /** Tri-state source of truth for the anonymous-read radio group. */
-  publicMode: 'none' | 'entire' | 'prefixes';
-  /** Specific prefixes — only surfaced when `publicMode === 'prefixes'`.
-   *  Local editing shape carries stable ids; converted to/from the wire
-   *  `string[]` in policyToRow / rowToPolicy. */
-  public_prefixes: PrefixEntry[];
-  quota_bytes: number | null;
-}
 
 interface Props {
   onSessionExpired?: () => void;
 }
 
-function policyToRow(
-  name: string,
-  p: NonNullable<AdminConfig['bucket_policies']>[string]
-): BucketPolicyRow {
-  // Determine the tri-state from the persisted shape:
-  //   * `public: true` (shorthand)          -> entire
-  //   * `public_prefixes: [""]` (expanded)   -> entire
-  //   * `public_prefixes: ["builds/", ...]`  -> prefixes
-  //   * anything else                        -> none
-  let publicMode: 'none' | 'entire' | 'prefixes' = 'none';
-  let prefixes: string[] = [];
-  if (p.public === true) {
-    publicMode = 'entire';
-  } else if (p.public_prefixes && p.public_prefixes.length > 0) {
-    if (p.public_prefixes.length === 1 && p.public_prefixes[0] === '') {
-      publicMode = 'entire';
-    } else {
-      publicMode = 'prefixes';
-      prefixes = p.public_prefixes.slice();
-    }
-  }
-  return {
-    _id: freshId(),
-    name,
-    compression:
-      p.compression === undefined || p.compression === null ? null : p.compression,
-    max_delta_ratio: p.max_delta_ratio ?? null,
-    backend: p.backend ?? '',
-    alias: p.alias ?? '',
-    publicMode,
-    public_prefixes: prefixes.map((value) => ({ id: freshId(), value })),
-    quota_bytes: p.quota_bytes ?? null,
-  };
-}
-
-function rowToPolicy(row: BucketPolicyRow): {
-  /** Omitted or explicit bool; JSON `null` clears inherit (RFC 7396 merge removes key). */
-  compression?: boolean | null;
-  max_delta_ratio?: number;
-  backend?: string;
-  alias?: string;
-  public_prefixes?: string[];
-  quota_bytes?: number;
-} {
-  // Serialise the tri-state back to the wire shape the backend
-  // accepts. `entire` uses the empty-string sentinel `[""]` — the
-  // backend's `BucketPolicyConfig::normalize` collapses it to
-  // `public: true` on re-serialisation, lossless round-trip.
-  const out: ReturnType<typeof rowToPolicy> = {};
-  // Section storage merge is RFC 7396 per nested object: omitting `compression`
-  // leaves the previous value; JSON `null` removes the key → inherit default.
-  out.compression = row.compression === null ? null : row.compression;
-  if (row.max_delta_ratio != null) out.max_delta_ratio = row.max_delta_ratio;
-  if (row.backend) out.backend = row.backend;
-  if (row.alias) out.alias = row.alias;
-  if (row.quota_bytes != null) out.quota_bytes = row.quota_bytes;
-  if (row.publicMode === 'entire') {
-    out.public_prefixes = [''];
-  } else if (row.publicMode === 'prefixes') {
-    const cleaned = row.public_prefixes
-      .map((p) => p.value.trim())
-      .filter((p) => p.length > 0);
-    if (cleaned.length > 0) out.public_prefixes = cleaned;
-  }
-  return out;
-}
+type BucketWire = { buckets: AdminConfig['bucket_policies'] };
 
 export default function BucketsPanel({ onSessionExpired }: Props) {
   const { cardStyle, inputRadius } = useCardStyles();
@@ -166,62 +72,94 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
     setValue: setRows,
     isDirty: dirty,
     discard,
-    markApplied,
-    resetWith,
-  } = useDirtySection<BucketPolicyRow[]>('storage', []);
-  const [applyOpen, setApplyOpen] = useState(false);
-  const [applyResponse, setApplyResponse] = useState<SectionApplyResponse | null>(null);
-  const [pendingBody, setPendingBody] = useState<{ buckets: AdminConfig['bucket_policies'] } | null>(null);
-  const [applying, setApplying] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+    applyOpen,
+    applyResponse,
+    applying,
+    runApply: editorRunApply,
+    cancelApply,
+    confirmApply,
+    loading,
+    error,
+  } = useSectionEditor<BucketWire, BucketPolicyRow[]>({
+    section: 'storage',
+    initial: [],
+    onSessionExpired,
+    noun: 'bucket policies',
+    // The fetch path also side-loads backends / availableBuckets via a
+    // separate effect below; `pick` only owns the row-editing shape.
+    pick: (body) => {
+      const nextRows = Object.entries(body.buckets || {}).map(([name, p]) =>
+        policyToRow(name, p)
+      );
+      nextRows.sort((a, b) => a.name.localeCompare(b.name));
+      return nextRows;
+    },
+    // `toPayload` re-runs the pure builder. The guarded `runApply`
+    // below blocks the apply on validation failure, so this only runs
+    // for a valid set of rows; the `{}` fallback is unreachable in
+    // practice but keeps the type non-null.
+    toPayload: (v) => {
+      const res = buildBucketPayload(v);
+      return res.ok ? res.body : { buckets: {} };
+    },
+  });
+
   const [backends, setBackends] = useState<BackendInfo[]>([]);
   const [defaultBackend, setDefaultBackend] = useState<string | null>(null);
   const [availableBuckets, setAvailableBuckets] = useState<string[]>([]);
 
-  const refresh = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [cfg, bs, realBuckets] = await Promise.all([
-        getAdminConfig(),
-        getBackends().then((r) => r.backends).catch(() => [] as BackendInfo[]),
-        listBuckets().catch(() => [] as Array<{ name: string }>),
-      ]);
-      if (!cfg) {
-        onSessionExpired?.();
-        return;
-      }
-      const nextRows = Object.entries(cfg.bucket_policies || {}).map(([name, p]) =>
-        policyToRow(name, p)
-      );
-      nextRows.sort((a, b) => a.name.localeCompare(b.name));
-      resetWith(nextRows);
-      // Prefer the /api/admin/config response's `backends` array —
-      // it synthesises a "default" entry on the singleton-backend
-      // path, so the per-bucket encryption badge works uniformly
-      // regardless of YAML shape. Fall back to /api/admin/backends
-      // when the primary endpoint doesn't carry backends (legacy
-      // response shapes).
-      setBackends(cfg.backends && cfg.backends.length > 0 ? cfg.backends : bs);
-      setDefaultBackend(cfg.default_backend ?? null);
-      setAvailableBuckets(realBuckets.map((b) => b.name));
-      setError(null);
-    } catch (e) {
-      if (e instanceof Error && e.message.includes('401')) {
-        onSessionExpired?.();
-        return;
-      }
-      setError(
-        `Failed to load bucket policies: ${e instanceof Error ? e.message : 'unknown'}`
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [onSessionExpired, resetWith]);
-
+  // Side-loaded data (backends, default backend, available buckets) is
+  // NOT part of the storage section body — fetch it independently. The
+  // section editor owns the row-editing shape + apply pipeline.
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [cfg, bs, realBuckets] = await Promise.all([
+          getAdminConfig(),
+          getBackends().then((r) => r.backends).catch(() => [] as BackendInfo[]),
+          listBuckets().catch(() => [] as Array<{ name: string }>),
+        ]);
+        if (cancelled) return;
+        if (!cfg) {
+          onSessionExpired?.();
+          return;
+        }
+        // Prefer the /api/admin/config response's `backends` array —
+        // it synthesises a "default" entry on the singleton-backend
+        // path, so the per-bucket encryption badge works uniformly
+        // regardless of YAML shape. Fall back to /api/admin/backends
+        // when the primary endpoint doesn't carry backends (legacy
+        // response shapes).
+        setBackends(cfg.backends && cfg.backends.length > 0 ? cfg.backends : bs);
+        setDefaultBackend(cfg.default_backend ?? null);
+        setAvailableBuckets(realBuckets.map((b) => b.name));
+      } catch (e) {
+        if (cancelled) return;
+        if (e instanceof Error && e.message.includes('401')) onSessionExpired?.();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [onSessionExpired]);
+
+  // Guarded apply: run the client-side duplicate-name check first and
+  // surface the error, otherwise delegate to the section editor's
+  // validate → ApplyDialog → PUT flow (which re-derives the same body
+  // via `toPayload`, keeping the validate/PUT body byte-identical).
+  const runApply = useCallback(async () => {
+    const res = buildBucketPayload(rows);
+    if (!res.ok) {
+      message.error(res.error);
+      return;
+    }
+    await editorRunApply();
+  }, [rows, editorRunApply]);
+
+  // ⌘S routes through the guard (registered after the hook's own
+  // handler, so this most-recently-mounted one wins the dispatch).
+  useApplyHandler('storage', runApply, dirty);
 
   const updateRow = (id: string, patch: Partial<BucketPolicyRow>) => {
     setRows((cur) => cur.map((r) => (r._id === id ? { ...r, ...patch } : r)));
@@ -263,71 +201,6 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
       },
     });
   };
-
-  const buildPayload = useCallback((): { buckets: AdminConfig['bucket_policies'] } | null => {
-    // Validate — bucket names must be non-empty + lowercase +
-    // [a-z0-9.\-] (what the backend accepts). Empty names are
-    // genuinely-unfilled rows (just dropped); duplicates surface
-    // as an error.
-    const cleaned = rows.filter((r) => r.name.trim());
-    const names = cleaned.map((r) => r.name);
-    const dupes = names.filter((n, i) => names.indexOf(n) !== i);
-    if (dupes.length > 0) {
-      message.error(`Duplicate bucket name: ${dupes[0]}`);
-      return null;
-    }
-    const bp: AdminConfig['bucket_policies'] = {};
-    for (const row of cleaned) {
-      bp[row.name] = rowToPolicy(row);
-    }
-    return { buckets: bp };
-  }, [rows]);
-
-  const runApply = useCallback(async () => {
-    const body = buildPayload();
-    if (!body) return;
-    try {
-      const resp = await validateSection('storage', body);
-      setApplyResponse(resp);
-      setPendingBody(body);
-      setApplyOpen(true);
-    } catch (e) {
-      message.error(`Validate failed: ${e instanceof Error ? e.message : 'unknown'}`);
-    }
-  }, [buildPayload]);
-
-  const confirmApply = useCallback(async () => {
-    if (!pendingBody) return;
-    setApplying(true);
-    try {
-      const resp = await putSection('storage', pendingBody);
-      if (!resp.ok) {
-        message.error(resp.error || 'Apply failed');
-        return;
-      }
-      message.success(
-        resp.persisted_path ? `Applied + persisted to ${resp.persisted_path}` : 'Applied'
-      );
-      markApplied();
-      setApplyOpen(false);
-      setPendingBody(null);
-      await refresh();
-    } catch (e) {
-      message.error(`Apply failed: ${e instanceof Error ? e.message : 'unknown'}`);
-      setApplyOpen(false);
-      setPendingBody(null);
-      await refresh();
-    } finally {
-      setApplying(false);
-    }
-  }, [markApplied, pendingBody, refresh]);
-
-  const cancelApply = useCallback(() => {
-    setApplyOpen(false);
-    setPendingBody(null);
-  }, []);
-
-  useApplyHandler('storage', runApply, dirty);
 
   if (error) {
     return <Alert type="error" showIcon message="Failed to load" description={error} />;
