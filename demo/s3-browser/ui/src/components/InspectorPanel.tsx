@@ -246,6 +246,18 @@ export default function InspectorPanel({
   const objectKey = object?.key;
   const cachedHead = objectKey ? headCache?.[objectKey] : undefined;
 
+  // Request-identity guard for the async button handlers (download / share /
+  // delete). Same root cause and fix as the headObject + bucketPolicy effect
+  // cancellation guards below: a handler captures `object.key` at call time,
+  // but the `object` prop can change (user clicks a different row) while the
+  // request is in flight. Without a guard, the stale promise resolves and
+  // commits state (blobRef / modalState / onClose) against the wrong object.
+  // We can't use a per-call `cancelled` flag like an effect because these are
+  // event handlers, so instead we keep a ref pointing at the *currently*
+  // selected key and bail any commit whose captured key no longer matches.
+  const latestKeyRef = useRef<string | undefined>(objectKey);
+  useEffect(() => { latestKeyRef.current = objectKey; }, [objectKey]);
+
   // Fetch bucket policy (compression + public prefixes) once per bucket — skip when the user
   // has not signed in through Settings (would 403).
   const lastBucketRef = useRef<string>('');
@@ -367,8 +379,12 @@ export default function InspectorPanel({
   const canReadObject = canRead || headReadable;
 
   const handleDelete = async () => {
+    const reqKey = object.key;
     try {
-      await deleteObject(object.key);
+      await deleteObject(reqKey);
+      // If the user switched to a different object mid-delete, still refresh the
+      // list (A really was deleted) but do NOT deselect the now-current object B.
+      if (latestKeyRef.current !== reqKey) { onDeleted(); return; }
       onClose();
       onDeleted();
     } catch {
@@ -377,13 +393,18 @@ export default function InspectorPanel({
   };
 
   const handleDownload = async () => {
+    const reqKey = object.key;
+    const reqName = fileName;
     setModalState({ mode: 'download', phase: 'loading' });
     blobRef.current = null;
     try {
-      const blob = await downloadObject(object.key);
-      blobRef.current = { blob, name: fileName };
+      const blob = await downloadObject(reqKey);
+      // Stale-commit guard: drop the result if the selection changed mid-flight.
+      if (latestKeyRef.current !== reqKey) return;
+      blobRef.current = { blob, name: reqName };
       setModalState({ mode: 'download', phase: 'ready' });
     } catch (e) {
+      if (latestKeyRef.current !== reqKey) return;
       setModalState({ mode: 'download', phase: 'error', error: String(e) });
     }
   };
@@ -395,18 +416,22 @@ export default function InspectorPanel({
   };
 
   const handleCopyLink = async (expiresInSeconds?: number) => {
+    const reqKey = object.key;
     setModalState({ mode: 'share', phase: 'loading' });
     setShareDuration(expiresInSeconds ?? SHARE_DURATIONS[2].seconds);
     try {
       let url: string;
       try {
-        url = await getPresignedUrl(object.key, expiresInSeconds);
+        url = await getPresignedUrl(reqKey, expiresInSeconds);
       } catch (e) {
         console.warn('Presigned URL failed, falling back to direct URL:', e);
-        url = getObjectUrl(object.key);
+        url = getObjectUrl(reqKey);
       }
+      // Stale-commit guard: don't surface A's URL after the user moved to B.
+      if (latestKeyRef.current !== reqKey) return;
       setModalState({ mode: 'share', phase: 'ready', url });
     } catch (e) {
+      if (latestKeyRef.current !== reqKey) return;
       setModalState({ mode: 'share', phase: 'error', error: String(e) });
     }
   };

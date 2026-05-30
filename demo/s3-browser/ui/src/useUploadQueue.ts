@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { uploadObject, type UploadTelemetry } from './s3client';
 import { summarizeObjectSavings } from './savings';
-import { clampPercent, type UploadStatus } from './uploadTelemetry';
+import { clampPercent, mergeTotalBytes, type UploadStatus } from './uploadTelemetry';
 
 export interface UploadQueueItem {
   id: string;
@@ -94,7 +94,7 @@ export default function useUploadQueue(destination: string) {
                 ...item,
                 status: nextStatus,
                 transferredBytes: telemetry.loadedBytes,
-                totalBytes: telemetry.totalBytes || item.totalBytes,
+                totalBytes: mergeTotalBytes(telemetry.totalBytes, item.totalBytes),
                 percent: clampPercent(telemetry.percent),
                 speedBytesPerSec: telemetry.speedBytesPerSec,
                 totalParts: telemetry.totalParts,

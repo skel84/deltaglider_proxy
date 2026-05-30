@@ -32,12 +32,20 @@ const {
   estimateCompletedParts,
   estimateInFlightParts,
   estimateTotalParts,
+  mergeTotalBytes,
   movingAverageSpeedBps,
 } = await import(moduleUrl);
 
 assert.equal(clampPercent(-10), 0);
 assert.equal(clampPercent(140), 100);
 assert.equal(clampPercent(42.5), 42.5);
+
+// A legitimate 0-byte telemetry total must NOT fall back to the item size
+// (the `||` bug). undefined/null still fall back; a real positive wins.
+assert.equal(mergeTotalBytes(0, 1024), 0);
+assert.equal(mergeTotalBytes(undefined, 1024), 1024);
+assert.equal(mergeTotalBytes(2048, 1024), 2048);
+assert.equal(mergeTotalBytes(null, 1024), 1024);
 
 const partSize = 16 * 1024 * 1024;
 const totalBytes = 50 * 1024 * 1024;

@@ -4,6 +4,7 @@ import { WarningOutlined } from '@ant-design/icons';
 import { listBuckets, getBucket } from '../s3client';
 import { useColors } from '../ThemeContext';
 import { pluralize } from '../utils';
+import { normalizeDestPrefix } from './destPrefix';
 import SimpleSelect from './SimpleSelect';
 
 const { Text } = Typography;
@@ -42,7 +43,7 @@ export default function DestinationPickerModal({ open, mode, itemCount, onConfir
     }
   }, [open]);
 
-  const clean = destPrefix.replace(/^\/+/, '').replace(/\/+$/, '');
+  const clean = normalizeDestPrefix(destPrefix);
   const preview = `${destBucket}/${clean ? clean + '/' : ''}`;
 
   return (

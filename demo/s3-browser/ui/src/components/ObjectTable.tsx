@@ -10,7 +10,7 @@ import type { FolderSizeState } from '../useComputeSize';
 import { getPreviewMode } from './filePreviewMode';
 import { canRequestPrefixUsageScan, isVirtualFolderPrefix } from '../permissions';
 import { usePersistedPageSize } from '../usePersistedPageSize';
-import { describeVisibleRange } from '../paginationLabels';
+import { clampPageToData, describeVisibleRange } from '../paginationLabels';
 import SimpleSelect from './SimpleSelect';
 import StorageTypeTag from './StorageTypeTag';
 
@@ -193,15 +193,26 @@ export default function ObjectTable({
     setTimeout(() => { navigatingRef.current = false; }, 300);
   }, [onNavigate]);
 
-  // Reset to page 1 when data changes (prefix navigation, search, etc.)
-  useEffect(() => { setCurrentPage(1); }, [prefix]);
+  // Reset to page 1 when the data set changes shape: prefix navigation OR a
+  // search/filter that shrinks (or grows) the row count. Depending on
+  // `objects.length` rather than `objects` avoids a spurious reset on
+  // identity-only re-renders (e.g. HEAD enrichment replaces the array but
+  // keeps the same count). Without this, a search that drops 500 rows to 50
+  // while sitting on page 3 left `currentPage` stale and `enrichPage`
+  // computing an out-of-range slice against the shrunken list.
+  useEffect(() => { setCurrentPage(1); }, [prefix, objects.length]);
 
   // Compute visible file keys for the current page and request HEAD enrichment
   const enrichPage = useCallback((page: number, size: number) => {
     const folderRows = folders.length;
     const allRows = folderRows + objects.length;
-    const start = (page - 1) * size;
-    const end = Math.min(page * size, allRows);
+    // Clamp to the page actually backed by data: when a search shrinks the
+    // list, the page-reset effect and this enrich effect run in the same
+    // render pass with `currentPage` still stale, so without clamping `start`
+    // could land past the end and request keys that no longer exist.
+    const safePage = clampPageToData(page, allRows, size);
+    const start = (safePage - 1) * size;
+    const end = Math.min(safePage * size, allRows);
     const fileKeys: string[] = [];
     for (let i = start; i < end; i++) {
       if (i >= folderRows) {

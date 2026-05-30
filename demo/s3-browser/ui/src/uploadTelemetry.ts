@@ -21,6 +21,18 @@ export function clampPercent(value: number): number {
   return clamp(value, 0, 100);
 }
 
+// Merge an incoming telemetry totalBytes against the queue item's known size.
+// A legitimate 0 (0-byte upload) must be preserved, so use nullish coalescing
+// rather than `||` (which would treat 0 as "no value" and fall back). The
+// fallback still covers telemetry events that arrive before the size is known
+// (undefined/null totalBytes).
+export function mergeTotalBytes(
+  telemetryTotal: number | null | undefined,
+  itemTotal: number,
+): number {
+  return telemetryTotal ?? itemTotal;
+}
+
 export function estimateTotalParts(totalBytes: number, partSize: number): number {
   if (partSize <= 0 || totalBytes <= 0) return 0;
   return Math.max(1, Math.ceil(totalBytes / partSize));

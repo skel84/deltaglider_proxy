@@ -539,6 +539,8 @@ jobs:
           npm run test:backend-encryption-payload
           npm run test:master-detail-filter
           npm run test:trace-request
+          npm run test:bulk-clear-selection
+          npm run test:dest-prefix
           npm run test:rule-names
           npm run test:lifecycle-helpers
           npm run test:upload-telemetry

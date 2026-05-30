@@ -322,9 +322,13 @@ export default function useS3Browser(options: UseS3BrowserOptions = {}) {
       dest_prefix: destPrefix,
       items: items.map(({ source, relative }) => ({ source_key: source, relative })),
     });
+    // Clear selection only on the post-await success path (matches bulkMove /
+    // bulkDelete): a thrown/rejected bulkCopyObjects above preserves the
+    // selection so the user can retry.
+    clearSelection();
     refresh();
     return { succeeded: result.succeeded, failed: result.failed };
-  }, [resolveSelectionWithRelativeKeys, refresh]);
+  }, [clearSelection, resolveSelectionWithRelativeKeys, refresh]);
 
   const bulkMove = useCallback(async (destBucket: string, destPrefix: string) => {
     // Server-side move with the same atomicity rule as before:
