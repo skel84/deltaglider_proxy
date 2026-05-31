@@ -321,6 +321,67 @@ export async function applyConfigYaml(yaml: string): Promise<ConfigApplyResponse
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Full-IAM YAML export / import.
+//
+// Distinct from the runtime-config YAML above: this round-trips the
+// ENTIRE IAM state (users, groups, OAuth providers, group-mapping
+// rules) as an `access:`-shaped declarative YAML. Export includes
+// REAL secrets (secret_access_key, client_secret) so the round-trip
+// is lossless — the file holds live credentials, so the UI warns
+// prominently. Import is validate (dry-run diff) → confirm → apply.
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Export the full IAM state as declarative YAML. With
+ * `includeSecrets` (the default for this flow), the document carries
+ * real `secret_access_key` / `client_secret` values so a re-import
+ * is lossless. ⚠️ The returned text contains LIVE credentials.
+ */
+export async function exportFullIamYaml(includeSecrets = true): Promise<string> {
+  const qs = includeSecrets ? '?include_secrets=true' : '';
+  const res = await adminFetch(`/api/admin/config/declarative-iam-export${qs}`);
+  if (!res.ok) await throwApiError(res, 'Full IAM export');
+  return res.text();
+}
+
+/** Per-category change counts returned by the IAM import dry-run and apply. */
+export interface IamImportSummary {
+  users_created: number;
+  users_updated: number;
+  users_deleted: number;
+  groups_created: number;
+  groups_updated: number;
+  groups_deleted: number;
+  providers_created: number;
+  providers_updated: number;
+  providers_deleted: number;
+  mapping_rules_replaced: number;
+  no_changes: boolean;
+}
+
+/**
+ * Dry-run a full-IAM YAML import: parse + diff against the live DB,
+ * returning the change summary WITHOUT mutating any state. Powers the
+ * confirm-before-apply preview.
+ */
+export async function validateFullIamYaml(yaml: string): Promise<IamImportSummary> {
+  const res = await adminFetch('/api/admin/config/declarative-iam-validate', 'POST', { yaml });
+  if (!res.ok) await throwApiError(res, 'Full IAM import validation');
+  return safeJson(res);
+}
+
+/**
+ * Apply a full-IAM YAML import: reconcile the entire IAM set
+ * atomically (single SQLite transaction), rebuild the index, sync to
+ * peers, and audit each mutation. Returns the applied change summary.
+ */
+export async function applyFullIamYaml(yaml: string): Promise<IamImportSummary> {
+  const res = await adminFetch('/api/admin/config/declarative-iam-apply', 'POST', { yaml });
+  if (!res.ok) await throwApiError(res, 'Full IAM import apply');
+  return safeJson(res);
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Section-level config API (Wave 1 of the admin UI revamp).
 // ═══════════════════════════════════════════════════════════════════
 

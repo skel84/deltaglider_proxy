@@ -10,8 +10,10 @@ import {
   ImportOutlined,
   LogoutOutlined,
   MoonOutlined,
+  SafetyCertificateOutlined,
   SettingOutlined,
   SunOutlined,
+  TeamOutlined,
   UpOutlined,
 } from '@ant-design/icons';
 import { useTheme } from '../ThemeContext';
@@ -22,6 +24,8 @@ export interface AccountMenuConfigProps {
   configSection?: SectionName;
   onShowFullConfigYaml?: () => void;
   onImportFullConfigYaml?: () => void;
+  onExportFullIam?: () => void;
+  onImportFullIam?: () => void;
 }
 
 interface Props extends AccountMenuConfigProps {
@@ -53,6 +57,8 @@ export default function AccountMenu({
   configSection,
   onShowFullConfigYaml,
   onImportFullConfigYaml,
+  onExportFullIam,
+  onImportFullIam,
 }: Props) {
   const { isDark, toggleTheme } = useTheme();
   const [open, setOpen] = useState(false);
@@ -91,11 +97,20 @@ export default function AccountMenu({
 
   const close = () => setOpen(false);
   const isAdmin = canAdmin === true;
-  const hasConfigActions = isAdmin && Boolean(configSection || onShowFullConfigYaml || onImportFullConfigYaml);
+  const hasConfigActions =
+    isAdmin &&
+    Boolean(
+      configSection ||
+        onShowFullConfigYaml ||
+        onImportFullConfigYaml ||
+        onExportFullIam ||
+        onImportFullIam
+    );
   const configLabel = configSection
     ? `${configSection.charAt(0).toUpperCase()}${configSection.slice(1)} section YAML`
     : 'Section YAML';
   const settingsHelp = 'Runtime configuration only; excludes the encrypted IAM DB and full backup bundles.';
+  const iamHelp = 'Full IAM (users, groups, providers, rules). Export includes LIVE secrets — handle like a password file.';
   const confirmLogout = () => {
     if (window.confirm('Sign out? This will clear your credentials and return to the login screen.')) {
       onLogout?.();
@@ -201,6 +216,39 @@ export default function AccountMenu({
                 >
                   <ImportOutlined aria-hidden style={iconStyle} />
                   <span>Import settings YAML</span>
+                </button>
+              )}
+              {(onExportFullIam || onImportFullIam) && (
+                <div className="account-menu-section-help" title={iamHelp}>{iamHelp}</div>
+              )}
+              {onExportFullIam && (
+                <button
+                  type="button"
+                  className="account-menu-item"
+                  role="menuitem"
+                  title={iamHelp}
+                  onClick={() => {
+                    close();
+                    onExportFullIam();
+                  }}
+                >
+                  <SafetyCertificateOutlined aria-hidden style={iconStyle} />
+                  <span>Export full IAM (YAML)</span>
+                </button>
+              )}
+              {onImportFullIam && (
+                <button
+                  type="button"
+                  className="account-menu-item"
+                  role="menuitem"
+                  title={iamHelp}
+                  onClick={() => {
+                    close();
+                    onImportFullIam();
+                  }}
+                >
+                  <TeamOutlined aria-hidden style={iconStyle} />
+                  <span>Import full IAM (YAML)</span>
                 </button>
               )}
             </div>

@@ -78,8 +78,9 @@ pub(super) fn unknown_section_error(name: &str) -> String {
 }
 
 pub use document_level::{
-    apply_config_doc, config_defaults, export_config, export_declarative_iam, validate_config_doc,
-    ConfigApplyResponse, ConfigDocumentRequest, ConfigValidateResponse,
+    apply_config_doc, apply_declarative_iam, config_defaults, export_config,
+    export_declarative_iam, validate_config_doc, validate_declarative_iam, ConfigApplyResponse,
+    ConfigDocumentRequest, ConfigValidateResponse,
 };
 pub use field_level::{
     get_config, update_config, BackendInfoResponse, ConfigResponse, ConfigUpdateRequest,

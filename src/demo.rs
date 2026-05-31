@@ -154,6 +154,17 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
             "/_/api/admin/config/declarative-iam-export",
             get(admin::export_declarative_iam),
         )
+        // Full-IAM YAML import: dry-run validate (no state change) + apply
+        // (atomic reconcile). Counterpart to declarative-iam-export; works in
+        // any iam_mode (the reconciler is mode-agnostic) as a GUI round-trip.
+        .route(
+            "/_/api/admin/config/declarative-iam-validate",
+            post(admin::validate_declarative_iam),
+        )
+        .route(
+            "/_/api/admin/config/declarative-iam-apply",
+            post(admin::apply_declarative_iam),
+        )
         .route("/_/api/admin/config/defaults", get(admin::config_defaults))
         .route(
             "/_/api/admin/config/validate",

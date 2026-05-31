@@ -48,6 +48,7 @@ import { useNavigation } from '../NavigationContext';
 import { buildViewUrl } from '../urlState';
 import TabHeader from './TabHeader';
 import { YamlImportExportModal } from './YamlImportExportModal';
+import { FullIamYamlModal } from './FullIamYamlModal';
 import { useDirtyGlobalIndicators, requestApplyCurrent } from '../useDirtySection';
 import type { SectionName } from '../adminApi';
 import type { AccountMenuConfigProps } from './AccountMenu';
@@ -217,6 +218,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
   // (paste YAML → validate → apply) and 'export' (fetch current
   // canonical YAML → copy to clipboard).
   const [yamlModalMode, setYamlModalMode] = useState<'import' | 'export' | null>(null);
+  const [iamYamlMode, setIamYamlMode] = useState<'import' | 'export' | null>(null);
   const [restoreFile, setRestoreFile] = useState<File | null>(null);
 
   // Global keyboard shortcuts (Wave 10 / 10.1 §10.3):
@@ -830,6 +832,8 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         configSection: activeSection,
         onShowFullConfigYaml: () => setYamlModalMode('export'),
         onImportFullConfigYaml: () => setYamlModalMode('import'),
+        onExportFullIam: () => setIamYamlMode('export'),
+        onImportFullIam: () => setIamYamlMode('import'),
       })
     : accountMenu;
 
@@ -866,6 +870,16 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
           // from the updated /config endpoint. The alternative (piping
           // refresh signals to every tab's child component) is too
           // fragile for a surface this cross-cutting.
+          window.location.reload();
+        }}
+      />
+      <FullIamYamlModal
+        open={iamYamlMode !== null}
+        mode={iamYamlMode ?? 'export'}
+        onClose={() => setIamYamlMode(null)}
+        onApplied={() => {
+          // Full IAM was reconciled — reload so every IAM-aware panel
+          // (Users, Groups, Auth providers) re-fetches from the DB.
           window.location.reload();
         }}
       />

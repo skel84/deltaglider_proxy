@@ -285,6 +285,24 @@ impl IamDiff {
 /// let yaml = serde_yaml::to_string(&snapshot)?;
 /// ```
 pub fn export_as_declarative(db: &ConfigDb) -> Result<DeclarativeIam, String> {
+    export_as_declarative_inner(db, false)
+}
+
+/// Like [`export_as_declarative`] but optionally emits the REAL secrets
+/// (`secret_access_key` / `client_secret`) instead of redacting them.
+///
+/// `include_secrets = true` is used by the dedicated "Export full IAM (YAML)"
+/// affordance, which produces a lossless round-trippable file: re-importing it
+/// restores every credential verbatim. The trade-off is that the resulting YAML
+/// contains LIVE credentials, so the export endpoint guards it behind an admin
+/// session and the UI warns the operator to treat the file as a secret.
+///
+/// `include_secrets = false` is the redaction policy the canonical YAML exporter
+/// uses (secrets blanked; operator wires them from env at deploy time).
+pub fn export_as_declarative_inner(
+    db: &ConfigDb,
+    include_secrets: bool,
+) -> Result<DeclarativeIam, String> {
     let db_users = db.load_users().map_err(|e| format!("load users: {e}"))?;
     let db_groups = db.load_groups().map_err(|e| format!("load groups: {e}"))?;
     let db_providers = db
@@ -315,9 +333,13 @@ pub fn export_as_declarative(db: &ConfigDb) -> Result<DeclarativeIam, String> {
             DeclarativeUser {
                 name: u.name.clone(),
                 access_key_id: u.access_key_id.clone(),
-                // Secret redacted — operator wires via env. Same
-                // redaction policy the canonical YAML exporter uses.
-                secret_access_key: String::new(),
+                // Redacted by default (operator wires via env). The full-IAM
+                // export passes include_secrets=true for a lossless round trip.
+                secret_access_key: if include_secrets {
+                    u.secret_access_key.clone()
+                } else {
+                    String::new()
+                },
                 enabled: u.enabled,
                 groups,
                 permissions: u.permissions.clone(),
@@ -343,8 +365,12 @@ pub fn export_as_declarative(db: &ConfigDb) -> Result<DeclarativeIam, String> {
             priority: p.priority,
             display_name: p.display_name.clone(),
             client_id: p.client_id.clone(),
-            // client_secret redacted (infra secret).
-            client_secret: None,
+            // Redacted by default; full-IAM export includes the real secret.
+            client_secret: if include_secrets {
+                p.client_secret.clone()
+            } else {
+                None
+            },
             issuer_url: p.issuer_url.clone(),
             scopes: p.scopes.clone(),
             extra_config: p.extra_config.clone(),

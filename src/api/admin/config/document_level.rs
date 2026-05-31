@@ -507,7 +507,18 @@ pub async fn apply_config_doc(
 ///
 /// Returns 404 when no config DB is initialised (bootstrap-disabled
 /// deployments have nothing to export).
-pub async fn export_declarative_iam(State(state): State<Arc<AdminState>>) -> impl IntoResponse {
+#[derive(serde::Deserialize, Default)]
+pub struct ExportIamQuery {
+    /// When true, emit real `secret_access_key` / `client_secret` values so the
+    /// export round-trips losslessly on re-import. Default false (redacted).
+    #[serde(default)]
+    pub include_secrets: bool,
+}
+
+pub async fn export_declarative_iam(
+    State(state): State<Arc<AdminState>>,
+    axum::extract::Query(q): axum::extract::Query<ExportIamQuery>,
+) -> impl IntoResponse {
     let Some(db_arc) = state.config_db.as_ref() else {
         return (
             StatusCode::NOT_FOUND,
@@ -516,7 +527,10 @@ pub async fn export_declarative_iam(State(state): State<Arc<AdminState>>) -> imp
             .into_response();
     };
     let db = db_arc.lock().await;
-    let snapshot = match crate::iam::export_as_declarative(&db) {
+    // `include_secrets=true` produces a lossless, round-trippable full-IAM file
+    // (the "Export full IAM (YAML)" affordance). The file then contains LIVE
+    // credentials — the UI warns the operator and the route is admin-gated.
+    let snapshot = match crate::iam::export_as_declarative_inner(&db, q.include_secrets) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -570,5 +584,300 @@ pub async fn export_declarative_iam(State(state): State<Arc<AdminState>>) -> imp
             format!("serialize declarative IAM to YAML: {}", e),
         )
             .into_response(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Full-IAM YAML import (validate dry-run + apply).
+//
+// The counterpart to `export_declarative_iam`. Takes the same `access:` shaped
+// YAML and reconciles it into the IAM DB via the existing declarative engine
+// (`preview_declarative_iam` for the dry-run diff, `reconcile_declarative_iam`
+// for the atomic apply). UNLIKE the declarative-mode config-apply path, this
+// works regardless of `iam_mode` (the reconciler is mode-agnostic) — it's a GUI
+// convenience for full IAM round-trips. The route is admin-GUI-session gated.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// `{ created, updated, deleted, mapping_rules_replaced }` summary returned by
+/// both the dry-run (`/validate`) and the apply.
+#[derive(Serialize, Default)]
+pub struct IamImportSummary {
+    pub users_created: usize,
+    pub users_updated: usize,
+    pub users_deleted: usize,
+    pub groups_created: usize,
+    pub groups_updated: usize,
+    pub groups_deleted: usize,
+    pub providers_created: usize,
+    pub providers_updated: usize,
+    pub providers_deleted: usize,
+    pub mapping_rules_replaced: usize,
+    /// True when applying this YAML would change nothing.
+    pub no_changes: bool,
+}
+
+/// Parse the incoming `access:`-shaped YAML into a `DeclarativeIam` snapshot.
+/// Returns a 400-friendly error string on malformed YAML.
+fn parse_iam_yaml(yaml: &str) -> Result<crate::iam::DeclarativeIam, String> {
+    let sectioned: crate::config_sections::SectionedConfig =
+        serde_yaml::from_str(yaml).map_err(|e| format!("invalid YAML: {e}"))?;
+    let access = sectioned.access;
+    Ok(crate::iam::snapshot_from_access(
+        &access.iam_users,
+        &access.iam_groups,
+        &access.auth_providers,
+        &access.group_mapping_rules,
+    ))
+}
+
+/// `POST /_/api/admin/config/declarative-iam-validate` — dry-run a full-IAM
+/// YAML import: parse + diff against the live DB, return the change summary
+/// WITHOUT touching state. Powers the Apply-dialog preview.
+pub async fn validate_declarative_iam(
+    State(state): State<Arc<AdminState>>,
+    Json(body): Json<ConfigDocumentRequest>,
+) -> impl IntoResponse {
+    let Some(db_arc) = state.config_db.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            "config DB not initialised — IAM import unavailable".to_string(),
+        )
+            .into_response();
+    };
+    let snapshot = match parse_iam_yaml(&body.yaml) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let db = db_arc.lock().await;
+    match crate::iam::preview_declarative_iam(&db, &snapshot) {
+        Ok(diff) => Json(summarise_diff(&diff)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, format!("validation failed: {e}")).into_response(),
+    }
+}
+
+/// `POST /_/api/admin/config/declarative-iam-apply` — apply a full-IAM YAML
+/// import: parse, reconcile atomically, rebuild the index, sync, audit.
+pub async fn apply_declarative_iam(
+    State(state): State<Arc<AdminState>>,
+    headers: HeaderMap,
+    Json(body): Json<ConfigDocumentRequest>,
+) -> impl IntoResponse {
+    let Some(db_arc) = state.config_db.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            "config DB not initialised — IAM import unavailable".to_string(),
+        )
+            .into_response();
+    };
+    let snapshot = match parse_iam_yaml(&body.yaml) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+
+    let db = db_arc.lock().await;
+    let stats = match crate::iam::reconcile_declarative_iam(&db, &snapshot) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("IAM import failed (no state changed): {e}"),
+            )
+                .into_response();
+        }
+    };
+    // Rebuild the in-memory index from the now-committed DB. Use the
+    // `_declarative` variant (bumps IAM_VERSION for test barriers AND skips the
+    // legacy-admin auto-migration): a full-IAM YAML import is authoritative for
+    // the entire IAM set, so we must not silently auto-author a `legacy-admin`
+    // row the imported document didn't declare — same contract as the
+    // declarative config-apply path (config/mod.rs).
+    if let Err(e) = super::super::users::rebuild_iam_index_declarative(&db, &state.iam_state) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("rebuild_iam_index after IAM import: {e:?}"),
+        )
+            .into_response();
+    }
+    drop(db);
+
+    if !stats.is_noop() {
+        super::super::trigger_config_sync(&state);
+    }
+    for (action, names) in stats.audit_entries() {
+        for name in names {
+            audit_log(action, "iam-yaml-import", name, &headers);
+        }
+    }
+    tracing::info!("[iam-yaml-import] {}", stats.summary_line());
+
+    Json(summarise_stats(&stats)).into_response()
+}
+
+fn summarise_diff(diff: &crate::iam::IamDiff) -> IamImportSummary {
+    let s = IamImportSummary {
+        users_created: diff.users_to_create.len(),
+        users_updated: diff.users_to_update.len(),
+        users_deleted: diff.users_to_delete.len(),
+        groups_created: diff.groups_to_create.len(),
+        groups_updated: diff.groups_to_update.len(),
+        groups_deleted: diff.groups_to_delete.len(),
+        providers_created: diff.providers_to_create.len(),
+        providers_updated: diff.providers_to_update.len(),
+        providers_deleted: diff.providers_to_delete.len(),
+        mapping_rules_replaced: match &diff.mapping_rules {
+            crate::iam::MappingRulesAction::ReplaceWith(v) => v.len(),
+            crate::iam::MappingRulesAction::ClearAll => 0,
+            crate::iam::MappingRulesAction::Keep => 0,
+        },
+        no_changes: false,
+    };
+    let no_changes = s.users_created == 0
+        && s.users_updated == 0
+        && s.users_deleted == 0
+        && s.groups_created == 0
+        && s.groups_updated == 0
+        && s.groups_deleted == 0
+        && s.providers_created == 0
+        && s.providers_updated == 0
+        && s.providers_deleted == 0
+        && s.mapping_rules_replaced == 0;
+    IamImportSummary { no_changes, ..s }
+}
+
+fn summarise_stats(stats: &crate::iam::ReconcileStats) -> IamImportSummary {
+    IamImportSummary {
+        users_created: stats.users_created.len(),
+        users_updated: stats.users_updated.len(),
+        users_deleted: stats.users_deleted.len(),
+        groups_created: stats.groups_created.len(),
+        groups_updated: stats.groups_updated.len(),
+        groups_deleted: stats.groups_deleted.len(),
+        providers_created: stats.providers_created.len(),
+        providers_updated: stats.providers_updated.len(),
+        providers_deleted: stats.providers_deleted.len(),
+        mapping_rules_replaced: stats.mapping_rules_replaced,
+        no_changes: stats.is_noop(),
+    }
+}
+
+#[cfg(test)]
+mod iam_import_tests {
+    use super::*;
+    use crate::iam::{DeclarativeUser, IamDiff, MappingRulesAction, ReconcileStats};
+
+    // The import handlers do their I/O around two pure functions:
+    // `parse_iam_yaml` (YAML → snapshot) and the summary builders
+    // (diff/stats → count response). Both are unit-tested here without a
+    // TestServer — the request-pipeline seam is exercised by the existing
+    // declarative-reconcile integration coverage.
+
+    #[test]
+    fn parse_iam_yaml_reads_access_iam_slices() {
+        // Mirrors exactly what `export_declarative_iam` emits.
+        let yaml = "\
+access:
+  iam_mode: declarative
+  iam_users:
+    - name: alice
+      access_key_id: AKIAALICE
+      secret_access_key: s3cr3t
+  iam_groups: []
+  auth_providers: []
+  group_mapping_rules: []
+";
+        let snap = parse_iam_yaml(yaml).expect("valid IAM YAML parses");
+        assert_eq!(snap.users.len(), 1);
+        assert_eq!(snap.users[0].name, "alice");
+        assert_eq!(snap.users[0].access_key_id, "AKIAALICE");
+        // Secret survives the parse (lossless round-trip contract).
+        assert_eq!(snap.users[0].secret_access_key, "s3cr3t");
+        assert!(snap.groups.is_empty());
+        assert!(snap.auth_providers.is_empty());
+        assert!(snap.mapping_rules.is_empty());
+    }
+
+    #[test]
+    fn parse_iam_yaml_rejects_malformed() {
+        assert!(parse_iam_yaml("access: [this is not a mapping").is_err());
+    }
+
+    #[test]
+    fn parse_iam_yaml_empty_access_is_a_full_wipe_snapshot() {
+        // An `access: {}` document means "no users/groups/etc." — the
+        // reconcile downstream interprets that as delete-all. We only
+        // assert the snapshot is empty here; the wipe semantics live in
+        // the reconcile tests.
+        let snap = parse_iam_yaml("access: {}").expect("empty access parses");
+        assert!(snap.users.is_empty());
+        assert!(snap.groups.is_empty());
+    }
+
+    #[test]
+    fn summarise_diff_counts_each_category() {
+        let mut diff = IamDiff::default();
+        diff.users_to_create.push(DeclarativeUser {
+            name: "a".into(),
+            access_key_id: "AKIA".into(),
+            secret_access_key: String::new(),
+            enabled: true,
+            groups: vec![],
+            permissions: vec![],
+        });
+        diff.users_to_update.push((
+            1,
+            DeclarativeUser {
+                name: "b".into(),
+                access_key_id: "AKIB".into(),
+                secret_access_key: String::new(),
+                enabled: true,
+                groups: vec![],
+                permissions: vec![],
+            },
+        ));
+        diff.users_to_delete.push((2, "c".into()));
+        diff.mapping_rules = MappingRulesAction::ReplaceWith(vec![]);
+
+        let s = summarise_diff(&diff);
+        assert_eq!(s.users_created, 1);
+        assert_eq!(s.users_updated, 1);
+        assert_eq!(s.users_deleted, 1);
+        assert_eq!(s.groups_created, 0);
+        // ReplaceWith([]) is a real action (clears the table) but reports 0 rows.
+        assert_eq!(s.mapping_rules_replaced, 0);
+        // Users changed, so this is NOT a no-op.
+        assert!(!s.no_changes);
+    }
+
+    #[test]
+    fn summarise_diff_empty_is_no_changes() {
+        let s = summarise_diff(&IamDiff::default());
+        assert!(s.no_changes);
+        assert_eq!(s.users_created, 0);
+        assert_eq!(s.mapping_rules_replaced, 0);
+    }
+
+    #[test]
+    fn summarise_diff_keep_rules_reports_zero() {
+        let diff = IamDiff {
+            mapping_rules: MappingRulesAction::Keep,
+            ..IamDiff::default()
+        };
+        assert_eq!(summarise_diff(&diff).mapping_rules_replaced, 0);
+        assert!(summarise_diff(&diff).no_changes);
+    }
+
+    #[test]
+    fn summarise_stats_mirrors_reconcile_counts() {
+        let stats = ReconcileStats {
+            users_created: vec!["a".into(), "b".into()],
+            groups_deleted: vec!["g".into()],
+            mapping_rules_replaced: 3,
+            ..ReconcileStats::default()
+        };
+        let s = summarise_stats(&stats);
+        assert_eq!(s.users_created, 2);
+        assert_eq!(s.groups_deleted, 1);
+        assert_eq!(s.mapping_rules_replaced, 3);
+        assert!(!s.no_changes);
     }
 }
