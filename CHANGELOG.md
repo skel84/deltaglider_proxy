@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Added
+
+- **Full IAM export/import as YAML.** The admin GUI Account menu gains
+  "Export full IAM (YAML)" and "Import full IAM (YAML)", round-tripping the
+  entire IAM state (users, groups, OAuth/auth providers, group-mapping rules)
+  as declarative `access:`-shaped YAML — distinct from the runtime-config YAML,
+  which excludes the encrypted IAM DB. Export includes real secrets for a
+  lossless round-trip (with a prominent live-credentials warning); import is a
+  dry-run change preview → confirm → atomic single-transaction reconcile.
+  Backed by new admin endpoints `config/declarative-iam-{export,validate,apply}`
+  (mode-agnostic, admin-GUI-session gated).
+
+### Fixed — IAM permission editor (GUI)
+
+- **Bucket-root listing ("" prefix) is now expressible.** The `s3:prefix`
+  condition editor round-tripped through a comma-joined string that silently
+  dropped the empty-string entry, so "list from the bucket root" could not be
+  saved. The editor now uses a string-array contract end-to-end with a
+  dedicated "List bucket root (empty prefix)" toggle; the empty string is
+  preserved through save and reload.
+- **Prefix conditions no longer auto-append a trailing slash on blur.** For an
+  `s3:prefix StringLike` condition, `ror/libs` and `ror/libs/` are not
+  equivalent (the slash-less form also matches `ror/libs-internal/…`); the blur
+  normalizer now preserves the operator's trailing-slash choice.
+- **Resource rows keyed by stable ids** (were array-indexed), removing a
+  stale-key class of focus/row-confusion bugs when adding or deleting rows.
+- **Inline unknown-bucket warning.** A resource pattern targeting a bucket that
+  doesn't exist (e.g. `ror/lib/*` when the data is in `beshu/ror/libs/*`)
+  silently grants nothing; the rule editor now flags it inline with a
+  near-miss suggestion.
+
+### Changed — bucket browser & dashboard
+
+- **URL-routed bucket browser.** Browser navigation (bucket, folder prefix) is
+  reflected in the URL, so back/forward, deep-links, and reload now restore the
+  exact view instead of resetting to the root.
+- **Dashboard scan state survives navigation.** "Scan all buckets" results are
+  server-side state the dashboard re-attaches to on mount (including in-flight
+  scans), and cached results carry a derived staleness nudge after 6 hours
+  rather than silently disappearing when you navigate away and back.
+
 ## v1.0.1 — 2026-05-31 — Hardening, cleanup & reliability
 
 A large quality release: the admin UI was hardened against a class of
