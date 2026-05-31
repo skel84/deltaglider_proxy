@@ -32,6 +32,11 @@ RUN apt-get -o Acquire::Retries=3 update && apt-get install -y --no-install-reco
 WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
+# Cargo.toml declares `[[bench]] name = "codec"` → cargo needs benches/codec.rs
+# present to even PARSE the manifest (without it: "can't find `codec` bench …
+# failed to parse manifest"). This was the real cause of the release build
+# failure — the bench was added to Cargo.toml but never copied into the image.
+COPY benches/ benches/
 COPY --from=ui-build /app/demo/s3-browser/ui/dist demo/s3-browser/ui/dist
 RUN cargo build --release
 
