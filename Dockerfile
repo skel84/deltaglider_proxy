@@ -17,7 +17,12 @@ COPY Cargo.toml /app/Cargo.toml
 RUN npm run build
 
 # ── Build stage: cargo-chef plan (captures dependency graph) ──
-FROM rust:1-bookworm AS chef
+# Pin the Rust toolchain: the floating `rust:1-bookworm` tag drifted to a cargo
+# whose deprecated-`edition`-on-auto-targets handling makes cargo-chef 0.1.77
+# panic ("failed to parse manifest" at recipe.rs:224) during `cargo chef cook`.
+# 1.92 is verified to cook cleanly; pin it so release Docker builds are
+# reproducible and don't break on upstream toolchain churn.
+FROM rust:1.92-bookworm AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
