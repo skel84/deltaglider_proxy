@@ -16,33 +16,20 @@ COPY docs/ /app/docs/
 COPY Cargo.toml /app/Cargo.toml
 RUN npm run build
 
-# ── Build stage: cargo-chef plan (captures dependency graph) ──
-# Pin the Rust toolchain: the floating `rust:1-bookworm` tag drifted to a cargo
-# whose deprecated-`edition`-on-auto-targets handling makes cargo-chef 0.1.77
-# panic ("failed to parse manifest" at recipe.rs:224) during `cargo chef cook`.
-# 1.92 is verified to cook cleanly; pin it so release Docker builds are
-# reproducible and don't break on upstream toolchain churn.
-FROM rust:1.92-bookworm AS chef
-RUN cargo install cargo-chef --locked
-WORKDIR /app
-
-FROM chef AS planner
-COPY Cargo.toml Cargo.lock build.rs ./
-COPY src/ src/
-RUN cargo chef prepare --recipe-path recipe.json
-
-# ── Build stage: dependency cache (only reruns when recipe.json changes) ──
-FROM chef AS rust-deps
+# ── Build stage: Rust ──
+# Pin the Rust toolchain (the floating `rust:1-bookworm` tag drifts and has
+# caused reproducibility breaks). NOTE: we deliberately do NOT use cargo-chef
+# here — cargo-chef 0.1.77's prepare/cook round-trip writes a recipe whose
+# auto-discovered targets carry a target-level `edition`, which modern `cargo
+# build` rejects as a hard error ("failed to parse manifest"), breaking the
+# image build on every recent Rust. A plain single-stage build is correct and
+# robust; dependency compilation is cached by buildx's GHA layer cache across
+# release runs, so the lost cargo-chef dep-layer is not a meaningful regression.
+FROM rust:1.92-bookworm AS rust-build
 RUN apt-get -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
     pkg-config xdelta3 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=planner /app/recipe.json recipe.json
-# Cook dependencies — this layer is cached until Cargo.toml/lock changes.
-RUN mkdir -p demo/s3-browser/ui/dist \
-    && cargo chef cook --release --recipe-path recipe.json
-
-# ── Build stage: Rust ──
-FROM rust-deps AS rust-build
+WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
 COPY --from=ui-build /app/demo/s3-browser/ui/dist demo/s3-browser/ui/dist
