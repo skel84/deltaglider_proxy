@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+## v1.0.1 — 2026-05-31 — Hardening, cleanup & reliability
+
+A large quality release: the admin UI was hardened against a class of
+state-management bugs and then substantially refactored for less code and
+cleaner structure; the S3 bucket browser got the same treatment; and several
+correctness/reliability gaps were closed across the engine and S3 layer. No
+wire-format or breaking changes — drop-in over v1.0.0.
+
+### Fixed — data integrity & correctness
+
+- **Same-location move no longer deletes data.** The server bulk-move handler
+  did copy-then-delete-source for every item; a "move" whose destination
+  resolved to the same bucket+key as the source was a self-copy no-op, so the
+  unconditional source delete destroyed the only copy. A server-side guard
+  (`is_same_location_move`) now skips the source delete for any such item,
+  regardless of what the client sends.
+- **Range-GET out-of-bounds panic** on objects whose stored `file_size`
+  metadata exceeded the reconstructed byte length now returns `400 InvalidRange`
+  instead of crashing the worker.
+- **Doubled-quote ETag** on passthrough HEAD/GET (`""abc""`) fixed to a single
+  quoted form; strict S3 clients rejected the doubled form.
+- **Admin config editors**: eliminated a class of row-drop / stale-closure /
+  lost-edit / index-key bugs (prefix list, permissions, buckets, advanced,
+  credentials, auth-rules, setup wizard); a failed Apply no longer discards
+  in-flight edits.
+- **Bucket browser**: inspector async-race (download/share landing in the wrong
+  object), pagination desync on search, bulk-copy not clearing selection,
+  destination-prefix join bug, 0-byte upload handling, and a perpetual
+  "Loading compression stats…" spinner for passthrough objects.
+
+### Changed — performance & logging
+
+- **LIST `metadata=true` skips the per-object HEAD for passthrough, non-delta
+  files** (checksum sidecars, images, …): they're stored verbatim so the LIST
+  size is authoritative. Cuts the upstream HEAD burst on build-artifact
+  listings (which was also a throttle/500 trigger).
+- **Tamed the `PATHOLOGICAL` log flood**: missing DG metadata on a normal
+  passthrough file is benign and now logs at DEBUG; the loud WARN is reserved
+  for `.delta`/`reference.bin` files where it actually breaks reconstruction.
+- **Catch-all 500s now log the upstream cause** before mapping, so production
+  500s are debuggable.
+
+### Changed — admin & browser UI refactor (no behavior change)
+
+- Admin UI clean-code + architecture pass: migrated Buckets/Lifecycle/
+  Replication onto the shared `useSectionEditor`; extracted `MasterDetailPanel`,
+  `RuleListEditor`, and a shared overlay-dropdown primitive; split the four
+  largest panels into per-concern files; split `adminApi.ts` into a barrel over
+  domain modules; ~1k LOC of duplication removed.
+- Bucket-browser clean-code + correctness pass: shared `getFileName` /
+  `downloadBlobAsFile` / `pluralize` helpers, `StorageTypeTag` / `FolderSizeCell`
+  extraction, s3client pure helpers.
+
+### Added — testing
+
+- Codec encode→reconstruct **round-trip property test** (the core data-integrity
+  invariant), a **criterion benchmark harness** for the codec hot paths, and a
+  panic-surface audit of the request hot paths. Plus ~15 new Node regression
+  scripts covering the extracted pure UI helpers.
+
 ## v1.0.0 — 2026-05-22 — Project-shape milestone
 
 v1.0.0 marks the official **single canonical implementation**: one Rust
