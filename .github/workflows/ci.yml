@@ -550,7 +550,13 @@ jobs:
   docs:
     name: Docs bundling + link check + YAML examples
     runs-on: k3s
-    timeout-minutes: 10
+    # 15 min, not 10: this job does TWO full builds (the UI bundle + a release
+    # `cargo build --bin deltaglider_proxy` for the config-lint) AND a
+    # from-source `cargo install lychee` for the link check. On a loaded k3s
+    # runner that legitimately exceeds 10 min and was repeatedly tripping the
+    # timeout (cancelling otherwise-green release runs), not because of a real
+    # failure. Raise the ceiling to stop the flaky cancellations.
+    timeout-minutes: 15
     container:
       image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
       credentials:
