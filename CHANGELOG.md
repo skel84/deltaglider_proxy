@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.1.0 — 2026-05-31
+
 ### Added
 
 - **Full IAM export/import as YAML.** The admin GUI Account menu gains
