@@ -550,13 +550,14 @@ jobs:
   docs:
     name: Docs bundling + link check + YAML examples
     runs-on: k3s
-    # 15 min, not 10: this job does TWO full builds (the UI bundle + a release
-    # `cargo build --bin deltaglider_proxy` for the config-lint) AND a
-    # from-source `cargo install lychee` for the link check. On a loaded k3s
-    # runner that legitimately exceeds 10 min and was repeatedly tripping the
-    # timeout (cancelling otherwise-green release runs), not because of a real
-    # failure. Raise the ceiling to stop the flaky cancellations.
-    timeout-minutes: 15
+    # 25 min ceiling: this job does the UI bundle + a from-scratch release
+    # `cargo build --bin deltaglider_proxy` for the config-lint (≈13 min cold on
+    # a loaded k3s runner, even with sccache) plus the (now hard-capped, warn-
+    # only) lychee link check. The earlier 10/15-min limits kept killing
+    # otherwise-green runs and blocking the release. Generous headroom here +
+    # the per-step `timeout` on lychee guarantees the job completes instead of
+    # being cancelled.
+    timeout-minutes: 25
     container:
       image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
       credentials:
@@ -596,18 +597,25 @@ jobs:
       #    as warn-only so the registry + YAML guards above still
       #    gate the release.
       - name: Link check (lychee, warn-only)
+        # Hard-capped at 4 min. This step is WARN-ONLY (broken links never fail
+        # the build), but it both compiles lychee from source AND makes live
+        # network requests to external doc URLs — either can hang and was the
+        # cause of repeated job-level timeouts (cancelling green release runs).
+        # `timeout` bounds the whole thing; on expiry we just warn and move on.
+        timeout-minutes: 4
+        continue-on-error: true
         env:
           RUSTC_WRAPPER: ""
         run: |
           set +e
-          cargo install --locked --quiet lychee || {
-            echo "::warning::cargo install lychee failed; skipping link check"
+          timeout 210 cargo install --locked --quiet lychee || {
+            echo "::warning::cargo install lychee failed/timed out; skipping link check"
             exit 0
           }
-          lychee --no-progress --accept 200,204,301,302,429 \
+          timeout 60 lychee --no-progress --accept 200,204,301,302,429 \
             --timeout 20 --max-retries 2 --exclude-mail \
             'docs/product/**/*.md' || {
-            echo "::warning::lychee found broken links; review the log"
+            echo "::warning::lychee found broken links or timed out; review the log"
           }
           exit 0
 
