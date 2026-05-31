@@ -577,8 +577,10 @@ jobs:
       #    docs/product/**/*.md parses + validates under the real
       #    schema. Prevents example drift. Needs a built binary. ──
       - name: Build deltaglider_proxy (for config lint)
-        env:
-          RUSTC_WRAPPER: ""
+        # Use the workflow-default sccache wrapper (do NOT empty RUSTC_WRAPPER):
+        # this cold release build was the dominant cost making the job blow past
+        # its timeout. With sccache warm (same cache the clippy/unit jobs use)
+        # the build drops from ~10min to a few, well inside the limit.
         run: cd demo/s3-browser/ui && npm ci && npm run build && cd ../../.. && cargo build --locked --release --bin deltaglider_proxy
       - name: Validate docs YAML examples
         env:
