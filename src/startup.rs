@@ -513,7 +513,6 @@ pub fn build_s3_router(
     // method-AND-content-type-aware middleware that intercepts ONLY the
     // browser form-POST shape and lets every other POST flow through to
     // the s3s service.
-    let max_body = config.max_object_size as usize;
     let form_post_state = state.clone();
     async fn intercept_form_post_for_s3s(
         axum::extract::State(state): axum::extract::State<Arc<AppState>>,
@@ -553,19 +552,28 @@ pub fn build_s3_router(
             .get::<deltaglider_proxy::iam::SharedIamState>()
             .cloned();
 
-        // Consume the body. The body limit is enforced by the
-        // `DefaultBodyLimit` layer above us in the stack; we pass
-        // `usize::MAX` here so the collect itself does not impose a
-        // second limit (and so we don't accidentally truncate a body
-        // that the outer layer already approved). Type-annotate the
-        // limit explicitly so `to_bytes` resolves `Body` <→ axum body.
+        // Consume the body, bounded by `max_object_size`. This is the
+        // authoritative cap for this path: `DefaultBodyLimit` only does an
+        // eager `Content-Length` check and is enforced lazily on read for
+        // chunked bodies, so a chunked/streamed `multipart/form-data` POST
+        // could otherwise slip past it. We therefore enforce the limit HERE
+        // explicitly — `to_bytes` aborts as soon as the collected body
+        // exceeds the limit, so a single oversized (or chunked) request can
+        // never buffer the whole body into memory. Double-enforcement with
+        // `DefaultBodyLimit` is harmless: whichever limit fires first wins.
+        // Read the cap from the (hot-reloadable) engine so a runtime
+        // `max_object_size` change applies here too.
+        let max_body = state.engine.load().max_object_size() as usize;
         let (parts, body) = request.into_parts();
-        let limit: usize = usize::MAX;
-        let body_bytes = match axum::body::to_bytes(body, limit).await {
+        let body_bytes = match axum::body::to_bytes(body, max_body).await {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!("form-POST body collection failed: {e}");
-                return axum::http::StatusCode::BAD_REQUEST.into_response();
+                tracing::warn!("form-POST body collection failed or exceeded limit: {e}");
+                return (
+                    axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                    "form-POST body exceeded the configured max object size",
+                )
+                    .into_response();
             }
         };
 
@@ -584,11 +592,6 @@ pub fn build_s3_router(
             Err(s3_err) => s3_err.into_response(),
         }
     }
-    // `max_body` is captured for clarity even though `to_bytes` doesn't
-    // need it here (DefaultBodyLimit gates upstream); keep the binding
-    // documented to avoid future "unused variable" cleanups removing
-    // the intentional limit constant.
-    let _ = max_body;
 
     // `HEAD /` — connection-probe handler used by Cyberduck and other
     // S3 clients. Not part of the S3 spec, so the s3s service returns

@@ -325,6 +325,18 @@ impl S3Backend {
         if debug_str.contains("NoSuchBucket") {
             return StorageError::BucketNotFound(bucket.to_string());
         }
+        // NoSuchKey (object-level 404) → NotFound, not a 500. This generic
+        // classifier runs for ops without a typed error variant (e.g.
+        // CopyObject, where the *source* key may have been deleted by a
+        // concurrent request). Without this, such a benign race surfaced as
+        // `S3(...)` → HTTP 500 instead of 404. The typed GET path already
+        // does this via `classify_get_error`; this covers the rest. Guard on
+        // the op NOT being bucket-level so a 404 on a bucket op stays a
+        // BucketNotFound concern, not a key NotFound.
+        if !op.is_bucket_level() && (debug_str.contains("NoSuchKey") || matches!(status, Some(404)))
+        {
+            return StorageError::NotFound(format!("{} key not found", op));
+        }
         // Some S3-compatible providers (MinIO, Ceph) return 403 for non-existent
         // buckets to prevent bucket enumeration. Only treat 403 as BucketNotFound
         // if the operation is bucket-level. Object-level 403 errors are genuine
@@ -1905,6 +1917,36 @@ mod tests {
             StorageError::NotFound(key) => assert_eq!(key, "missing.bin"),
             other => panic!("expected NotFound, got {:?}", other),
         }
+    }
+
+    /// The GENERIC classifier (used by ops without a typed error variant,
+    /// e.g. CopyObject) must also map an object-level 404 / NoSuchKey to
+    /// `NotFound`, not the catch-all `S3(...)` → HTTP 500. This is the
+    /// concurrent-source-delete race: copy a reference that a parallel
+    /// request just deleted → must surface 404, not 500.
+    #[test]
+    fn classify_s3_error_maps_object_level_404_to_not_found() {
+        let err = no_such_key_error(404); // 404 + NoSuchKey body
+        let classified =
+            S3Backend::classify_s3_error("my-bucket", &err, S3Op::Other("copy_object"));
+        assert!(
+            matches!(classified, StorageError::NotFound(_)),
+            "object-level 404 must classify as NotFound, got {:?}",
+            classified
+        );
+    }
+
+    /// A 404 on a BUCKET-level op must NOT become a key-level NotFound — it
+    /// stays a bucket concern (or the catch-all), never silently a missing key.
+    #[test]
+    fn classify_s3_error_bucket_level_404_is_not_key_not_found() {
+        let err = no_such_key_error(404);
+        let classified = S3Backend::classify_s3_error("my-bucket", &err, S3Op::CreateBucket);
+        assert!(
+            !matches!(classified, StorageError::NotFound(_)),
+            "bucket-level 404 must not be a key NotFound, got {:?}",
+            classified
+        );
     }
 
     /// An object-level 403 must stay `S3(...)` — never get rewritten to
