@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Changed — IAM permission editor
+
+- **One-line grant editor.** Each permission rule is now a single row —
+  `WHERE` (bucket / prefix) + `CAN DO` (the five atomic actions as a horizontal
+  strip of on/off toggle-chips) + Conditions + Remove. The chips are an
+  independent multi-select with a checkbox indicator (solid when on, dashed when
+  off), so "write without delete" is expressible; the Admin chip auto-disables
+  on prefix-scoped grants (a bucket-level op is meaningless on a sub-prefix), and
+  a live plain-language caption summarises each grant. "Clear all" appears inline
+  beside the actions when more than one is selected.
+
+### Fixed — IAM permission editor correctness
+
+- **Resource rows no longer drop or re-key on blur.** The on-blur normalizer
+  re-split the whole comma-joined resource string, discarding in-progress empty
+  rows and reassigning React keys to surviving rows; it now normalizes only the
+  blurred row in place.
+- **Narrowing a grant's scope no longer silently loses the rule.** Reducing a
+  resource from a bucket to a sub-prefix strips the now-invalid `admin` action,
+  and any incomplete rule (missing actions or resource) is flagged inline ("…or
+  this rule is dropped on save") instead of vanishing on Apply.
+- **Invalid resource patterns are caught inline.** Patterns the server rejects
+  (a `*` that isn't trailing, embedded whitespace) now show an inline error
+  before Apply, instead of an opaque HTTP 400.
+
 ## v1.1.0 — 2026-05-31
 
 ### Added
