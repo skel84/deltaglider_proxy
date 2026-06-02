@@ -18,106 +18,164 @@ async function loadModule(relPath, fileName) {
 }
 
 const url = await loadModule('../src/components/webhookDeliveryPayload.ts', 'webhookDeliveryPayload.ts');
-const {
-  WEBHOOK_REDACTED_SENTINEL,
-  DEFAULT_EVENT_DELIVERY,
-  normalizeEventDelivery,
-  buildEventDeliveryPayload,
-} = await import(url);
+const { formFromWire, buildPayloadFromForm } = await import(url);
 
-const SENTINEL = WEBHOOK_REDACTED_SENTINEL;
+// Must equal REDACTED_SENTINEL in src/config.rs and the constant in
+// webhookDeliveryPayload.ts — the cross-language secret-mask sentinel.
+const SENTINEL = '__redacted__';
 
-// ── normalizeEventDelivery: legacy webhook_url folds into the list ──
-{
-  const norm = normalizeEventDelivery({ webhook_url: 'https://a.example/in', webhook_urls: ['https://b.example/in'] });
-  assert.deepEqual(norm.webhook_urls, ['https://a.example/in', 'https://b.example/in'], 'legacy url first, deduped');
-}
-{
-  const norm = normalizeEventDelivery(undefined);
-  assert.deepEqual(norm, DEFAULT_EVENT_DELIVERY, 'undefined → defaults');
-}
-{
-  // dedupe: legacy url equal to a list entry must not double.
-  const norm = normalizeEventDelivery({ webhook_url: 'https://x.example/h', webhook_urls: ['https://x.example/h'] });
-  assert.deepEqual(norm.webhook_urls, ['https://x.example/h']);
+// Deterministic id generator (the panel injects a per-instance counter).
+function mkIdGen() {
+  let n = 0;
+  return () => `r${n++}`;
 }
 
-// ── header DELETE must emit explicit null (RFC 7396) ──
-{
-  const baseline = normalizeEventDelivery({ webhook_headers: { Authorization: SENTINEL, 'X-Env': SENTINEL } });
-  // operator removed X-Env, left Authorization untouched (sentinel).
-  const local = { ...baseline, webhook_headers: { Authorization: SENTINEL } };
-  const res = buildEventDeliveryPayload(local, baseline);
-  assert.ok(res.ok, `expected ok, got ${JSON.stringify(res.errors)}`);
-  const h = res.body.event_delivery.webhook_headers;
-  assert.equal(h['X-Env'], null, 'removed header must be null (delete)');
-  assert.equal(h['Authorization'], SENTINEL, 'untouched header stays sentinel (server preserves)');
-  // JSON round-trip must keep the null key.
-  const rt = JSON.parse(JSON.stringify(res.body));
-  assert.ok('X-Env' in rt.event_delivery.webhook_headers, 'null delete-key must survive JSON.stringify');
+// Load a form from a server wire body, optionally mutate it, then build the
+// payload — exactly the panel's pick → edit → toPayload pipeline.
+function buildFromWire(wire, mutate) {
+  const form = formFromWire(wire, mkIdGen());
+  if (mutate) mutate(form);
+  return buildPayloadFromForm(form);
+}
+function headers(res) {
+  return res.body.event_delivery.webhook_headers;
 }
 
-// ── retyped secret passes through; new secret added ──
+// ── legacy webhook_url folds into the endpoint list (deduped, legacy first) ──
 {
-  const baseline = normalizeEventDelivery({ webhook_headers: { Authorization: SENTINEL } });
-  const local = { ...baseline, webhook_headers: { Authorization: 'Bearer NEW', 'X-Trace': 'on' } };
-  const res = buildEventDeliveryPayload(local, baseline);
+  const form = formFromWire(
+    { webhook_url: 'https://a.example/in', webhook_urls: ['https://b.example/in'] },
+    mkIdGen()
+  );
+  assert.deepEqual(
+    form.urlRows.map((r) => r.url),
+    ['https://a.example/in', 'https://b.example/in'],
+    'legacy url first, deduped'
+  );
+}
+{
+  const form = formFromWire(
+    { webhook_url: 'https://x.example/h', webhook_urls: ['https://x.example/h'] },
+    mkIdGen()
+  );
+  assert.deepEqual(form.urlRows.map((r) => r.url), ['https://x.example/h'], 'dedupe legacy vs list');
+}
+
+// ── legacy webhook_url is always cleared on save; list preserved ──
+{
+  const res = buildFromWire({ webhook_url: 'https://legacy.example/h' });
   assert.ok(res.ok);
-  assert.equal(res.body.event_delivery.webhook_headers['Authorization'], 'Bearer NEW');
-  assert.equal(res.body.event_delivery.webhook_headers['X-Trace'], 'on');
-}
-
-// ── legacy webhook_url is always cleared on save ──
-{
-  const baseline = normalizeEventDelivery({ webhook_url: 'https://legacy.example/h' });
-  const local = { ...baseline };
-  const res = buildEventDeliveryPayload(local, baseline);
-  assert.ok(res.ok);
-  assert.equal(res.body.event_delivery.webhook_url, null, 'legacy webhook_url must be cleared');
+  assert.equal(res.body.event_delivery.webhook_url, null, 'legacy webhook_url cleared');
   assert.deepEqual(res.body.event_delivery.webhook_urls, ['https://legacy.example/h']);
+}
+
+// ── header DELETE emits explicit null (RFC 7396) for a REMOVED row ──
+{
+  const res = buildFromWire(
+    { webhook_headers: { Authorization: SENTINEL, 'X-Env': SENTINEL } },
+    (f) => {
+      f.headerRows = f.headerRows.filter((r) => r.name !== 'X-Env'); // operator removed it
+    }
+  );
+  assert.ok(res.ok, JSON.stringify(res.errors));
+  assert.equal(headers(res)['X-Env'], null, 'removed header → null delete');
+  assert.equal(headers(res)['Authorization'], SENTINEL, 'untouched header stays sentinel');
+  const rt = JSON.parse(JSON.stringify(res.body));
+  assert.ok('X-Env' in rt.event_delivery.webhook_headers, 'null delete-key survives JSON.stringify');
+}
+
+// ── untouched masked secret passes through as sentinel (server restores) ──
+{
+  const res = buildFromWire({ webhook_headers: { Authorization: SENTINEL } });
+  assert.ok(res.ok);
+  assert.equal(headers(res)['Authorization'], SENTINEL);
+}
+
+// ── retyped secret + new header pass through with real values ──
+{
+  const res = buildFromWire({ webhook_headers: { Authorization: SENTINEL } }, (f) => {
+    f.headerRows[0].value = 'Bearer NEW';
+    f.headerRows[0].masked = false; // typing unmasks
+    f.headerRows.push({ id: 'x', name: 'X-Trace', value: 'on', origName: '', masked: false });
+  });
+  assert.ok(res.ok);
+  assert.equal(headers(res)['Authorization'], 'Bearer NEW');
+  assert.equal(headers(res)['X-Trace'], 'on');
+}
+
+// ── RENAME a still-masked header is BLOCKED (adversarial #2) ──
+{
+  const res = buildFromWire({ webhook_headers: { Authorizaton: SENTINEL } }, (f) => {
+    f.headerRows[0].name = 'Authorization'; // fix typo without re-entering value
+  });
+  assert.ok(!res.ok, 'rename-while-masked must be blocked');
+  assert.ok(
+    res.errors.some((e) => /re-enter/i.test(e) || /re-type/i.test(e)),
+    'error must tell operator to re-type the value'
+  );
+}
+
+// ── rename WITH a re-typed value is allowed; old name deleted ──
+{
+  const res = buildFromWire({ webhook_headers: { Authorizaton: SENTINEL } }, (f) => {
+    f.headerRows[0].name = 'Authorization';
+    f.headerRows[0].value = 'Bearer real';
+    f.headerRows[0].masked = false;
+  });
+  assert.ok(res.ok, JSON.stringify(res.errors));
+  assert.equal(headers(res)['Authorization'], 'Bearer real');
+  assert.equal(headers(res)['Authorizaton'], null, 'old name deleted');
+}
+
+// ── in-progress empty rows are ignored, not errors ──
+{
+  const res = buildFromWire({}, (f) => {
+    f.urlRows = [{ id: 'a', url: '' }];
+    f.headerRows = [{ id: 'b', name: '', value: '', origName: '', masked: false }];
+  });
+  assert.ok(res.ok, `empty in-progress rows must not error, got ${JSON.stringify(res.errors)}`);
+  assert.deepEqual(res.body.event_delivery.webhook_urls, []);
 }
 
 // ── enabling with zero endpoints is rejected (usability trap) ──
 {
-  const baseline = normalizeEventDelivery({});
-  const local = { ...baseline, enabled: true, webhook_urls: [] };
-  const res = buildEventDeliveryPayload(local, baseline);
-  assert.ok(!res.ok, 'enabled + no endpoint must fail');
-  assert.ok(res.errors.some((e) => /no endpoint/i.test(e)), 'error should mention no endpoint');
+  const res = buildFromWire({}, (f) => {
+    f.enabled = true;
+    f.urlRows = [];
+  });
+  assert.ok(!res.ok && res.errors.some((e) => /no endpoint/i.test(e)), 'enabled + no endpoint must fail');
 }
 
-// ── duration validation ──
+// ── duration validation: simple + compound humantime (1h30m) + word forms ──
 {
-  const baseline = normalizeEventDelivery({});
-  const ok = buildEventDeliveryPayload({ ...baseline, tick_interval: '30s', retry_max: '5m', delivered_retention: '0s' }, baseline);
-  assert.ok(ok.ok, `valid durations should pass, got ${JSON.stringify(ok.errors)}`);
-  const bad = buildEventDeliveryPayload({ ...baseline, tick_interval: '30' }, baseline);
-  assert.ok(!bad.ok && bad.errors.some((e) => /tick_interval/.test(e)), 'bare number duration rejected');
-  const bad2 = buildEventDeliveryPayload({ ...baseline, request_timeout: '5 minutes' }, baseline);
-  assert.ok(!bad2.ok, 'prose duration rejected');
+  assert.ok(buildFromWire({}, (f) => (f.tick_interval = '30s')).ok, '30s ok');
+  assert.ok(buildFromWire({}, (f) => (f.delivered_retention = '0s')).ok, '0s ok (disable prune)');
+  assert.ok(buildFromWire({}, (f) => (f.retry_max = '1h30m')).ok, 'compound 1h30m ok (adversarial #4)');
+  assert.ok(buildFromWire({}, (f) => (f.tick_interval = '1500ms')).ok, '1500ms ok');
+  assert.ok(buildFromWire({}, (f) => (f.delivered_retention = '7days')).ok, '7days word-form ok');
+  const bad = buildFromWire({}, (f) => (f.tick_interval = '30'));
+  assert.ok(!bad.ok && bad.errors.some((e) => /tick_interval/.test(e)), 'bare number rejected');
+  assert.ok(!buildFromWire({}, (f) => (f.request_timeout = '5 minutes')).ok, 'prose duration rejected');
 }
 
 // ── numeric range validation ──
 {
-  const baseline = normalizeEventDelivery({});
-  const bad = buildEventDeliveryPayload({ ...baseline, batch_size: 0 }, baseline);
+  const bad = buildFromWire({}, (f) => (f.batch_size = 0));
   assert.ok(!bad.ok && bad.errors.some((e) => /batch_size/.test(e)), 'batch_size 0 rejected (min 1)');
-  const bad2 = buildEventDeliveryPayload({ ...baseline, max_attempts: -1 }, baseline);
-  assert.ok(!bad2.ok, 'negative max_attempts rejected');
+  assert.ok(!buildFromWire({}, (f) => (f.max_attempts = -1)).ok, 'negative max_attempts rejected');
 }
 
-// ── invalid endpoint URL rejected ──
+// ── invalid endpoint URL + invalid header name rejected ──
 {
-  const baseline = normalizeEventDelivery({});
-  const res = buildEventDeliveryPayload({ ...baseline, enabled: true, webhook_urls: ['not-a-url'] }, baseline);
-  assert.ok(!res.ok && res.errors.some((e) => /not a valid/i.test(e)), 'junk URL rejected');
-}
-
-// ── invalid header name rejected ──
-{
-  const baseline = normalizeEventDelivery({});
-  const res = buildEventDeliveryPayload({ ...baseline, webhook_headers: { 'Bad Header': 'v' } }, baseline);
-  assert.ok(!res.ok && res.errors.some((e) => /invalid characters/i.test(e)), 'header name with space rejected');
+  const u = buildFromWire({}, (f) => {
+    f.enabled = true;
+    f.urlRows = [{ id: 'a', url: 'not-a-url' }];
+  });
+  assert.ok(!u.ok && u.errors.some((e) => /not a valid/i.test(e)), 'junk URL rejected');
+  const h = buildFromWire({}, (f) => {
+    f.headerRows = [{ id: 'b', name: 'Bad Header', value: 'v', origName: '', masked: false }];
+  });
+  assert.ok(!h.ok && h.errors.some((e) => /invalid characters/i.test(e)), 'header name with space rejected');
 }
 
 console.log('webhook-delivery-payload-regression-test: all assertions passed');

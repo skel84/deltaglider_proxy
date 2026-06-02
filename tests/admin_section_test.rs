@@ -1129,7 +1129,9 @@ async fn section_put_storage_buckets_are_merged_not_replaced() {
 /// header. This is the secret-safety contract behind the Webhook delivery panel.
 #[tokio::test]
 async fn section_webhook_headers_secret_roundtrip() {
-    const SENTINEL: &str = "__redacted__";
+    // Reference the library constant so a Rust-side rename of the sentinel
+    // breaks this test immediately (instead of silently passing on a stale literal).
+    const SENTINEL: &str = deltaglider_proxy::config::REDACTED_SENTINEL;
     let server = TestServer::builder()
         .auth("WHSEC1", "WHSECRET1")
         .yaml_config()
@@ -1177,11 +1179,18 @@ async fn section_webhook_headers_secret_roundtrip() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Prove the runtime still has the real token: the field-level config GET
-    // (which does NOT redact event_delivery the same way) round-trips it... but
-    // since GET always masks, assert preservation indirectly by re-PUTting the
-    // sentinel a second time and confirming the webhook stays active (a clobbered
-    // token would still be a non-empty string, so instead delete + re-read).
+    // Prove preservation: the persisted config on disk must still hold the REAL
+    // token, NOT the sentinel. (The GET always masks, so we read the persisted
+    // YAML directly — same technique as the document-apply preserve test.)
+    let persisted = std::fs::read_to_string(server.config_path()).expect("read persisted config");
+    assert!(
+        persisted.contains("Bearer real-token-123"),
+        "unedited sentinel round-trip must preserve the real token, persisted:\n{persisted}"
+    );
+    assert!(
+        !persisted.contains(SENTINEL),
+        "persisted config must not contain the sentinel (would mean the token was clobbered)"
+    );
 
     // 4. PUT a REAL new value → overwrites.
     let resp = admin

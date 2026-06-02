@@ -25,9 +25,9 @@
  *    and clear `webhook_url` (→ explicit `null`) so the two never drift.
  */
 
-export const WEBHOOK_REDACTED_SENTINEL = '__redacted__';
+const WEBHOOK_REDACTED_SENTINEL = '__redacted__';
 
-export interface EventDeliveryConfig {
+interface EventDeliveryConfig {
   enabled: boolean;
   webhook_urls: string[];
   webhook_headers: Record<string, string>;
@@ -44,7 +44,7 @@ export interface EventDeliveryConfig {
 }
 
 /** Defaults mirror `EventDeliveryConfig::default` in src/config_sections.rs. */
-export const DEFAULT_EVENT_DELIVERY: EventDeliveryConfig = {
+const DEFAULT_EVENT_DELIVERY: EventDeliveryConfig = {
   enabled: false,
   webhook_urls: [],
   webhook_headers: {},
@@ -87,7 +87,7 @@ export interface AdvancedSectionWebhookBody {
  * fill defaults for absent fields and FOLD a legacy single `webhook_url`
  * into the `webhook_urls` list (deduped, legacy first).
  */
-export function normalizeEventDelivery(
+function normalizeEventDelivery(
   raw: EventDeliveryWire | undefined
 ): EventDeliveryConfig {
   const d = DEFAULT_EVENT_DELIVERY;
@@ -117,7 +117,12 @@ export function normalizeEventDelivery(
   };
 }
 
-const DURATION_RE = /^\s*\d+\s*(ns|us|µs|ms|s|m|h|d)\s*$/;
+// Compound humantime: one-or-more `<number><unit>` chunks, matching what the
+// Rust backend's `humantime::parse_duration` accepts (e.g. `30s`, `5m`, `24h`,
+// `1h30m`, `1500ms`). Units cover ns…weeks + common word forms. Kept in sync
+// with `humantime` on the Rust side (`src/config_sections.rs::validate_event_delivery`).
+const DURATION_RE =
+  /^\s*(\d+\s*(ns|us|µs|ms|sec|secs|s|min|mins|m|hr|hrs|h|day|days|d|week|weeks|w)\s*)+$/i;
 // http(s) URL with a host. Keep it permissive but reject obvious junk.
 const URL_RE = /^https?:\/\/[^\s/$.?#].[^\s]*$/i;
 // RFC 7230 token chars for header names.
@@ -137,7 +142,7 @@ interface ValidationResult {
  * `baseline` is needed to compute header DELETES (keys present at load but
  * removed now → emit `null`).
  */
-export function buildEventDeliveryPayload(
+function buildEventDeliveryPayload(
   local: EventDeliveryConfig,
   baseline: EventDeliveryConfig
 ): ValidationResult {
@@ -223,4 +228,142 @@ export function buildEventDeliveryPayload(
   };
 
   return { ok: true, errors: [], body };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Form state — the SINGLE source of truth for the panel.
+//
+// The panel edits this shape directly as its `useSectionEditor` value (no
+// parallel mirror), so discard/refresh stay correct for free. Rows carry a
+// stable `id` (for React keys) and, for headers, the `origName` + `masked`
+// flags needed to render and validate the secret-mask UX. `formFromWire` is
+// the editor `pick`; `buildPayloadFromForm` is the validated `toPayload`.
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface WebhookUrlRow {
+  id: string;
+  url: string;
+}
+
+export interface WebhookHeaderRow {
+  id: string;
+  name: string;
+  /** Current value. Equals the sentinel while an untouched secret is masked. */
+  value: string;
+  /** The header name as loaded from the server (empty for a freshly-added
+   *  row). Used to detect a rename-while-masked, which would lose the secret. */
+  origName: string;
+  /** True while `value` is still the server sentinel (untouched secret). */
+  masked: boolean;
+}
+
+export interface WebhookFormState {
+  enabled: boolean;
+  urlRows: WebhookUrlRow[];
+  headerRows: WebhookHeaderRow[];
+  /** Header names present when the form was loaded. Lets `buildPayloadFromForm`
+   *  emit RFC 7396 `null` deletes for headers the operator REMOVED (a removed
+   *  row is gone from `headerRows`, so its key must be remembered here). Not an
+   *  editable field — set once by `formFromWire`, carried through edits. */
+  loadedHeaderNames: string[];
+  tick_interval: string;
+  batch_size: number;
+  request_timeout: string;
+  max_attempts: number;
+  retry_base: string;
+  retry_max: string;
+  stale_claim_after: string;
+  delivered_retention: string;
+  delivered_max_rows: number;
+  prune_batch: number;
+}
+
+// Deterministic id generator INJECTED by the caller so this module stays pure
+// (no Math.random / crypto here — the panel passes a per-instance counter).
+type IdGen = () => string;
+
+/** Build the editor form state from a server wire body. */
+export function formFromWire(
+  raw: EventDeliveryWire | undefined,
+  nextId: IdGen
+): WebhookFormState {
+  const cfg = normalizeEventDelivery(raw);
+  return {
+    enabled: cfg.enabled,
+    urlRows: cfg.webhook_urls.map((url) => ({ id: nextId(), url })),
+    headerRows: Object.entries(cfg.webhook_headers).map(([name, value]) => ({
+      id: nextId(),
+      name,
+      value,
+      origName: name,
+      masked: value === WEBHOOK_REDACTED_SENTINEL,
+    })),
+    loadedHeaderNames: Object.keys(cfg.webhook_headers),
+    tick_interval: cfg.tick_interval,
+    batch_size: cfg.batch_size,
+    request_timeout: cfg.request_timeout,
+    max_attempts: cfg.max_attempts,
+    retry_base: cfg.retry_base,
+    retry_max: cfg.retry_max,
+    stale_claim_after: cfg.stale_claim_after,
+    delivered_retention: cfg.delivered_retention,
+    delivered_max_rows: cfg.delivered_max_rows,
+    prune_batch: cfg.prune_batch,
+  };
+}
+
+/** Flatten form rows back into the validated `EventDeliveryConfig` shape that
+ *  `buildEventDeliveryPayload` consumes. Empty (in-progress) rows are dropped;
+ *  the baseline is reconstructed from each header's `origName` so removals
+ *  produce the right RFC 7396 `null` deletes. */
+export function buildPayloadFromForm(form: WebhookFormState): ValidationResult {
+  const errors: string[] = [];
+
+  // Rename-while-masked guard (adversarial #2): a masked secret has no value to
+  // carry under a NEW key, so the server would drop it. Force re-entry.
+  for (const h of form.headerRows) {
+    const name = h.name.trim();
+    if (h.masked && name && h.origName && name !== h.origName) {
+      errors.push(
+        `Header "${h.origName}" was renamed to "${name}" without re-entering its value. Re-type the value (it's masked for security) or remove and re-add the header.`
+      );
+    }
+  }
+
+  const local: EventDeliveryConfig = {
+    enabled: form.enabled,
+    webhook_urls: form.urlRows.map((r) => r.url),
+    webhook_headers: {},
+    tick_interval: form.tick_interval,
+    batch_size: form.batch_size,
+    request_timeout: form.request_timeout,
+    max_attempts: form.max_attempts,
+    retry_base: form.retry_base,
+    retry_max: form.retry_max,
+    stale_claim_after: form.stale_claim_after,
+    delivered_retention: form.delivered_retention,
+    delivered_max_rows: form.delivered_max_rows,
+    prune_batch: form.prune_batch,
+  };
+  for (const h of form.headerRows) {
+    const name = h.name.trim();
+    if (name) local.webhook_headers[name] = h.value;
+  }
+
+  // Baseline = the header names present at LOAD time, so headers the operator
+  // removed (gone from `headerRows`) still produce an RFC 7396 `null` delete.
+  // We only need the KEYS, so any value works.
+  const baseline: EventDeliveryConfig = {
+    ...local,
+    webhook_headers: {},
+  };
+  for (const name of form.loadedHeaderNames) {
+    baseline.webhook_headers[name] = WEBHOOK_REDACTED_SENTINEL;
+  }
+
+  const res = buildEventDeliveryPayload(local, baseline);
+  if (errors.length > 0) {
+    return { ok: false, errors: [...errors, ...res.errors] };
+  }
+  return res;
 }

@@ -3,21 +3,24 @@
  * Wave 1 section API (`/api/admin/config/section/advanced`), mirroring the
  * other Advanced sub-panels.
  *
- * Secret handling: header VALUES are masked to WEBHOOK_REDACTED_SENTINEL on
- * GET. The value field shows a masked placeholder for an untouched secret;
- * typing replaces it. On save, untouched (sentinel) values pass through and
- * the server restores the real token; removed headers emit explicit `null`
- * (RFC 7396 delete) — both handled in `buildEventDeliveryPayload`.
+ * Single source of truth: the editor `value` IS the form state (rows + scalars)
+ * via `useSectionEditor`'s `pick`/`toPayload`. No parallel mirror — so discard,
+ * post-apply refresh, and re-mask all stay correct for free.
  *
- * Usability invariants enforced here (usability bugs ARE bugs):
- *  - enabling delivery with no endpoint is blocked with a clear message;
- *  - duration fields hint the accepted format; numeric ranges validated;
- *  - rows use stable ids so remove/re-add with the same key works;
- *  - the masked sentinel is never shown as a real value and never editable
- *    in place without an explicit "replace" gesture;
- *  - dirty-dot + ⌘S + discard all work via useSectionEditor.
+ * Secret handling: header VALUES are masked to WEBHOOK_REDACTED_SENTINEL on
+ * GET. A masked value shows a placeholder; typing replaces it. On save,
+ * untouched (sentinel) values pass through and the server restores the real
+ * token; removed headers emit explicit `null` (RFC 7396 delete). Renaming a
+ * still-masked header is BLOCKED (the secret can't follow the rename) — the
+ * operator must re-type the value or remove/re-add.
+ *
+ * Usability invariants (usability bugs ARE bugs): enabling with no endpoint is
+ * blocked; duration fields hint the format; numeric ranges validated; rows use
+ * stable ids; the masked sentinel is never shown or saved as a real value;
+ * dirty-dot + ⌘S + discard all work via useSectionEditor.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert,
   Button,
@@ -28,28 +31,22 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import {
-  ApiOutlined,
-  DeleteOutlined,
-  PlusOutlined,
-  SendOutlined,
-} from '@ant-design/icons';
+import { DeleteOutlined, PlusOutlined, SendOutlined } from '@ant-design/icons';
 import type { SectionApplyResponse } from '../adminApi';
 import { fetchEventOutbox } from '../adminApi';
 import { useCardStyles } from './shared-styles';
 import { useSectionEditor } from '../useSectionEditor';
-import { useApplyHandler } from '../useDirtySection';
 import { useNavigation } from '../NavigationContext';
 import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import ApplyDialog from './ApplyDialog';
 import { AdvancedDisclosure } from './ruleEditorFields';
 import {
-  WEBHOOK_REDACTED_SENTINEL,
-  DEFAULT_EVENT_DELIVERY,
-  normalizeEventDelivery,
-  buildEventDeliveryPayload,
-  type EventDeliveryConfig,
+  formFromWire,
+  buildPayloadFromForm,
+  type WebhookFormState,
+  type WebhookHeaderRow,
+  type WebhookUrlRow,
   type AdvancedSectionWebhookBody,
 } from './webhookDeliveryPayload';
 
@@ -59,23 +56,22 @@ interface Props {
   onSessionExpired?: () => void;
 }
 
-// Stable-id rows for the endpoint + header editors (avoids the array-index
-// key bug class — see ConditionPrefixInput / admin_editor_bug_class).
-interface UrlRow {
-  id: string;
-  url: string;
-}
-interface HeaderRow {
-  id: string;
-  name: string;
-  value: string;
-  // True while the value is still the server-masked sentinel (untouched
-  // secret). Cleared the moment the operator edits the value.
-  masked: boolean;
-}
-
-let _rowSeq = 0;
-const nextId = () => `r${_rowSeq++}`;
+const EMPTY_FORM: WebhookFormState = {
+  enabled: false,
+  urlRows: [],
+  headerRows: [],
+  loadedHeaderNames: [],
+  tick_interval: '10s',
+  batch_size: 50,
+  request_timeout: '5s',
+  max_attempts: 8,
+  retry_base: '5s',
+  retry_max: '5m',
+  stale_claim_after: '60s',
+  delivered_retention: '24h',
+  delivered_max_rows: 10000,
+  prune_batch: 100,
+};
 
 function PanelShell({ children }: { children: React.ReactNode }) {
   return (
@@ -98,9 +94,14 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
   const { cardStyle, inputRadius } = useCardStyles();
   const nav = useNavigation();
 
+  // Per-instance row-id counter (no module global) — only used for React keys
+  // within this panel instance.
+  const seqRef = useRef(0);
+  const nextId = useMemo(() => () => `r${seqRef.current++}`, []);
+
   const {
-    value,
-    setValue,
+    value: form,
+    setValue: setForm,
     isDirty,
     discard,
     loading,
@@ -111,56 +112,23 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
     runApply: editorRunApply,
     cancelApply,
     confirmApply,
-  } = useSectionEditor<AdvancedSectionWebhookBody, EventDeliveryConfig>({
+  } = useSectionEditor<AdvancedSectionWebhookBody, WebhookFormState>({
     section: 'advanced',
     dirtyKey: 'configuration/advanced/event-delivery',
-    initial: DEFAULT_EVENT_DELIVERY,
+    initial: EMPTY_FORM,
     onSessionExpired,
     noun: 'webhook delivery',
-    pick: (body) => normalizeEventDelivery(body.event_delivery),
-    // Guarded runApply below blocks on validation failure, so this only
-    // runs for a valid config. Baseline diff for header deletes is computed
-    // against the loaded value snapshot (`baselineRef`).
+    pick: (body) => formFromWire(body.event_delivery, nextId),
+    // Guarded runApply below blocks on validation failure, so this only runs
+    // for a valid form; `{}` is the unreachable type-non-null fallback.
     toPayload: (v) => {
-      const res = buildEventDeliveryPayload(v, baselineRef.current);
+      const res = buildPayloadFromForm(v);
       return res.ok ? (res.body as AdvancedSectionWebhookBody) : {};
     },
   });
 
-  // Snapshot of the server-loaded value, used to diff header DELETES.
-  const baselineRef = useRef<EventDeliveryConfig>(DEFAULT_EVENT_DELIVERY);
-  // Local row state derived from `value` on load; we keep rows in component
-  // state (with stable ids) and sync back to `value` on every edit.
-  const [urlRows, setUrlRows] = useState<UrlRow[]>([]);
-  const [headerRows, setHeaderRows] = useState<HeaderRow[]>([]);
-  const [validationErrors, setValidationErrors] = useState<string[]>([]);
-  const initializedRef = useRef(false);
-
-  // Initialize rows once when the server value first loads.
-  useEffect(() => {
-    if (loading || initializedRef.current) return;
-    initializedRef.current = true;
-    baselineRef.current = value;
-    setUrlRows(value.webhook_urls.map((url) => ({ id: nextId(), url })));
-    setHeaderRows(
-      Object.entries(value.webhook_headers).map(([name, v]) => ({
-        id: nextId(),
-        name,
-        value: v,
-        masked: v === WEBHOOK_REDACTED_SENTINEL,
-      }))
-    );
-  }, [loading, value]);
-
-  // After a successful apply, re-baseline so the next edit diffs correctly.
-  useEffect(() => {
-    if (!isDirty && initializedRef.current) {
-      baselineRef.current = value;
-    }
-  }, [isDirty, value]);
-
-  // Live delivery status strip.
-  const [outboxCounts, setOutboxCounts] = useState<{
+  // Live delivery status strip (best-effort, read-only).
+  const [outbox, setOutbox] = useState<{
     pending: number;
     failed: number;
     enabled: boolean;
@@ -171,99 +139,64 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
     fetchEventOutbox(1)
       .then((r) => {
         if (!alive) return;
-        setOutboxCounts({
+        setOutbox({
           pending: r.counts.pending,
           failed: r.counts.failed,
           enabled: r.delivery_enabled,
           active: r.delivery_active,
         });
       })
-      .catch(() => {
-        /* status strip is best-effort */
-      });
+      .catch(() => {});
     return () => {
       alive = false;
     };
   }, []);
 
-  // Push row state back into the editor value (so dirty + payload track it).
-  const syncToValue = (
-    nextUrls: UrlRow[],
-    nextHeaders: HeaderRow[],
-    patch?: Partial<EventDeliveryConfig>
-  ) => {
-    const webhook_urls = nextUrls.map((r) => r.url.trim()).filter((u) => u.length > 0);
-    const webhook_headers: Record<string, string> = {};
-    for (const h of nextHeaders) {
-      const name = h.name.trim();
-      if (name) webhook_headers[name] = h.value;
-    }
-    setValue({ ...value, ...patch, webhook_urls, webhook_headers });
-  };
+  // ── Row + field mutators (edit the editor value directly) ──
+  const setField = (patch: Partial<WebhookFormState>) => setForm({ ...form, ...patch });
 
-  const updateUrl = (id: string, url: string) => {
-    const next = urlRows.map((r) => (r.id === id ? { ...r, url } : r));
-    setUrlRows(next);
-    syncToValue(next, headerRows);
-  };
-  const addUrl = () => {
-    const next = [...urlRows, { id: nextId(), url: '' }];
-    setUrlRows(next);
-    syncToValue(next, headerRows);
-  };
-  const removeUrl = (id: string) => {
-    const next = urlRows.filter((r) => r.id !== id);
-    setUrlRows(next);
-    syncToValue(next, headerRows);
-  };
+  const updateUrl = (id: string, url: string) =>
+    setField({ urlRows: form.urlRows.map((r) => (r.id === id ? { ...r, url } : r)) });
+  const addUrl = () =>
+    setField({ urlRows: [...form.urlRows, { id: nextId(), url: '' } as WebhookUrlRow] });
+  const removeUrl = (id: string) =>
+    setField({ urlRows: form.urlRows.filter((r) => r.id !== id) });
 
-  const updateHeader = (id: string, patch: Partial<HeaderRow>) => {
-    const next = headerRows.map((r) =>
-      r.id === id
-        ? {
-            ...r,
-            ...patch,
-            // Any value edit unmasks (it's now a real, operator-typed value).
-            masked: patch.value !== undefined ? false : r.masked,
-          }
-        : r
-    );
-    setHeaderRows(next);
-    syncToValue(urlRows, next);
-  };
-  const addHeader = () => {
-    const next = [...headerRows, { id: nextId(), name: '', value: '', masked: false }];
-    setHeaderRows(next);
-    syncToValue(urlRows, next);
-  };
-  const removeHeader = (id: string) => {
-    const next = headerRows.filter((r) => r.id !== id);
-    setHeaderRows(next);
-    syncToValue(urlRows, next);
-  };
+  const updateHeader = (id: string, patch: Partial<WebhookHeaderRow>) =>
+    setField({
+      headerRows: form.headerRows.map((r) =>
+        r.id === id
+          ? {
+              ...r,
+              ...patch,
+              // Editing the VALUE unmasks it (now a real, operator-typed value).
+              masked: patch.value !== undefined ? false : r.masked,
+            }
+          : r
+      ),
+    });
+  const addHeader = () =>
+    setField({
+      headerRows: [
+        ...form.headerRows,
+        { id: nextId(), name: '', value: '', origName: '', masked: false } as WebhookHeaderRow,
+      ],
+    });
+  const removeHeader = (id: string) =>
+    setField({ headerRows: form.headerRows.filter((r) => r.id !== id) });
 
-  const setField = (patch: Partial<EventDeliveryConfig>) =>
-    setValue({ ...value, ...patch });
-
-  // Guarded apply: validate client-side first; surface inline errors and
-  // block the ApplyDialog when invalid.
-  const runApply = () => {
-    const res = buildEventDeliveryPayload(value, baselineRef.current);
-    if (!res.ok) {
-      setValidationErrors(res.errors);
-      return;
-    }
-    setValidationErrors([]);
-    editorRunApply();
-  };
-  useApplyHandler('configuration/advanced/event-delivery', runApply, isDirty);
-
-  // Live validation preview (non-blocking) so the operator sees issues early.
+  // Live, non-blocking validation preview.
   const liveErrors = useMemo(() => {
     if (!isDirty) return [];
-    const res = buildEventDeliveryPayload(value, baselineRef.current);
+    const res = buildPayloadFromForm(form);
     return res.ok ? [] : res.errors;
-  }, [value, isDirty]);
+  }, [form, isDirty]);
+
+  const runApply = () => {
+    const res = buildPayloadFromForm(form);
+    if (!res.ok) return; // errors already shown via liveErrors
+    editorRunApply();
+  };
 
   if (error) return <Alert type="error" showIcon message="Failed to load" description={error} />;
   if (loading)
@@ -272,8 +205,6 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
         <Text type="secondary">Loading…</Text>
       </PanelShell>
     );
-
-  const shownErrors = validationErrors.length ? validationErrors : liveErrors;
 
   return (
     <PanelShell>
@@ -292,7 +223,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
                 type="primary"
                 size="small"
                 onClick={runApply}
-                disabled={applying}
+                disabled={applying || liveErrors.length > 0}
                 loading={applying}
               >
                 Apply
@@ -302,14 +233,14 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
         />
       )}
 
-      {shownErrors.length > 0 && (
+      {liveErrors.length > 0 && (
         <Alert
           type="error"
           showIcon
           message="Fix these before applying"
           description={
             <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {shownErrors.map((e, i) => (
+              {liveErrors.map((e, i) => (
                 <li key={i}>{e}</li>
               ))}
             </ul>
@@ -317,21 +248,20 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
         />
       )}
 
-      {/* Live delivery status strip */}
-      {outboxCounts && (
+      {outbox && (
         <Alert
-          type={outboxCounts.active ? 'success' : 'info'}
+          type={outbox.active ? 'success' : 'info'}
           showIcon
           message={
             <Space size="middle" wrap>
               <span>
                 Delivery:{' '}
-                <Tag color={outboxCounts.active ? 'green' : outboxCounts.enabled ? 'orange' : 'default'}>
-                  {outboxCounts.active ? 'Active' : outboxCounts.enabled ? 'Enabled (no endpoint)' : 'Disabled'}
+                <Tag color={outbox.active ? 'green' : outbox.enabled ? 'orange' : 'default'}>
+                  {outbox.active ? 'Active' : outbox.enabled ? 'Enabled (no endpoint)' : 'Disabled'}
                 </Tag>
               </span>
-              <span>{outboxCounts.pending} pending</span>
-              <span>{outboxCounts.failed} failed</span>
+              <span>{outbox.pending} pending</span>
+              <span>{outbox.failed} failed</span>
               <Button
                 type="link"
                 size="small"
@@ -354,7 +284,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
         />
         <div style={{ marginTop: 16 }}>
           <FormField label="Enable delivery" yamlPath="advanced.event_delivery.enabled">
-            <Switch checked={value.enabled} onChange={(v) => setField({ enabled: v })} />
+            <Switch checked={form.enabled} onChange={(v) => setField({ enabled: v })} />
           </FormField>
 
           <FormField
@@ -363,12 +293,12 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             helpText="HTTP(S) URLs that receive a deltaglider.event.v1 JSON payload. An event is marked delivered only after every endpoint returns 2xx."
           >
             <Space direction="vertical" style={{ width: '100%' }}>
-              {urlRows.length === 0 && (
+              {form.urlRows.length === 0 && (
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   No endpoints. Add one to start delivering.
                 </Text>
               )}
-              {urlRows.map((row) => (
+              {form.urlRows.map((row) => (
                 <Space.Compact key={row.id} style={{ width: '100%' }}>
                   <Input
                     value={row.url}
@@ -395,12 +325,12 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             helpText="Static headers sent with every request — e.g. an Authorization bearer token. Values are stored encrypted and shown masked; leave a masked value untouched to keep it."
           >
             <Space direction="vertical" style={{ width: '100%' }}>
-              {headerRows.length === 0 && (
+              {form.headerRows.length === 0 && (
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   No headers.
                 </Text>
               )}
-              {headerRows.map((row) => (
+              {form.headerRows.map((row) => (
                 <Space.Compact key={row.id} style={{ width: '100%' }}>
                   <Input
                     value={row.name}
@@ -436,7 +366,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             label="Tick interval"
             yamlPath="advanced.event_delivery.tick_interval"
             help="How often the dispatcher wakes to deliver due events."
-            value={value.tick_interval}
+            value={form.tick_interval}
             placeholder="10s"
             onChange={(v) => setField({ tick_interval: v })}
             inputRadius={inputRadius}
@@ -445,7 +375,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             label="Batch size"
             yamlPath="advanced.event_delivery.batch_size"
             help="Max events claimed per tick (clamped 1–500)."
-            value={value.batch_size}
+            value={form.batch_size}
             min={1}
             max={500}
             onChange={(v) => setField({ batch_size: v })}
@@ -454,7 +384,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             label="Request timeout"
             yamlPath="advanced.event_delivery.request_timeout"
             help="Per-endpoint HTTP timeout."
-            value={value.request_timeout}
+            value={form.request_timeout}
             placeholder="5s"
             onChange={(v) => setField({ request_timeout: v })}
             inputRadius={inputRadius}
@@ -463,7 +393,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             label="Max attempts"
             yamlPath="advanced.event_delivery.max_attempts"
             help="Attempts before an event becomes permanently failed."
-            value={value.max_attempts}
+            value={form.max_attempts}
             min={1}
             onChange={(v) => setField({ max_attempts: v })}
           />
@@ -471,7 +401,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             label="Retry base"
             yamlPath="advanced.event_delivery.retry_base"
             help="Initial retry delay; exponential backoff doubles it per attempt."
-            value={value.retry_base}
+            value={form.retry_base}
             placeholder="5s"
             onChange={(v) => setField({ retry_base: v })}
             inputRadius={inputRadius}
@@ -480,7 +410,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             label="Retry max"
             yamlPath="advanced.event_delivery.retry_max"
             help="Ceiling for the backoff delay."
-            value={value.retry_max}
+            value={form.retry_max}
             placeholder="5m"
             onChange={(v) => setField({ retry_max: v })}
             inputRadius={inputRadius}
@@ -489,7 +419,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             label="Stale claim after"
             yamlPath="advanced.event_delivery.stale_claim_after"
             help="In-progress claims older than this are reclaimable (crash recovery)."
-            value={value.stale_claim_after}
+            value={form.stale_claim_after}
             placeholder="60s"
             onChange={(v) => setField({ stale_claim_after: v })}
             inputRadius={inputRadius}
@@ -498,7 +428,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             label="Delivered retention"
             yamlPath="advanced.event_delivery.delivered_retention"
             help="Delivered rows older than this are pruned. 0s keeps them until manually pruned."
-            value={value.delivered_retention}
+            value={form.delivered_retention}
             placeholder="24h"
             onChange={(v) => setField({ delivered_retention: v })}
             inputRadius={inputRadius}
@@ -507,7 +437,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             label="Delivered max rows"
             yamlPath="advanced.event_delivery.delivered_max_rows"
             help="Cap on retained delivered rows (pending/failed never pruned by this)."
-            value={value.delivered_max_rows}
+            value={form.delivered_max_rows}
             min={0}
             onChange={(v) => setField({ delivered_max_rows: v })}
           />
@@ -515,7 +445,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
             label="Prune batch"
             yamlPath="advanced.event_delivery.prune_batch"
             help="Max delivered rows pruned per tick."
-            value={value.prune_batch}
+            value={form.prune_batch}
             min={0}
             onChange={(v) => setField({ prune_batch: v })}
           />
@@ -545,13 +475,9 @@ function DurationField(props: {
 }) {
   return (
     <FormField
-      label={
-        <>
-          {props.label} <ApiOutlined style={{ opacity: 0 }} />
-        </>
-      }
+      label={props.label}
       yamlPath={props.yamlPath}
-      helpText={`${props.help} Format: 30s, 5m, 24h.`}
+      helpText={`${props.help} Format: 30s, 5m, 24h (compound like 1h30m ok).`}
     >
       <Input
         value={props.value}
