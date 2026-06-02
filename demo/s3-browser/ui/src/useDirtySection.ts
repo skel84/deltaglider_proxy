@@ -31,29 +31,39 @@
  * refcount map.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SectionName } from './adminApi';
+
+/**
+ * The key a panel registers its dirty/apply state under. This is DECOUPLED
+ * from the server `SectionName` on purpose: multiple panels live under one
+ * server section (e.g. all of Storage's sub-panels PUT the `storage` section),
+ * but each must light its OWN sidebar dot — not all siblings. So the dirty key
+ * is the panel's nav path (`storage/lifecycle`, `storage/buckets`, …) while the
+ * server PUT still targets the coarse `SectionName`. Defaults to the
+ * `SectionName` when a panel doesn't override it (single-panel sections).
+ */
+type DirtyKey = string;
 
 // Module singletons. Section panels mount concurrently in the new
 // nav; we need the dirty state to live outside any one component.
-const dirtyCounts = new Map<SectionName, number>();
+const dirtyCounts = new Map<DirtyKey, number>();
 const dirtyListeners = new Set<() => void>();
 
 function notifyDirtyListeners() {
   for (const l of dirtyListeners) l();
 }
 
-/** Increment the dirty refcount for a section. */
-function addDirty(section: SectionName): void {
-  dirtyCounts.set(section, (dirtyCounts.get(section) ?? 0) + 1);
+/** Increment the dirty refcount for a key. */
+function addDirty(key: DirtyKey): void {
+  dirtyCounts.set(key, (dirtyCounts.get(key) ?? 0) + 1);
 }
 
 /** Decrement the dirty refcount; remove the key when it reaches 0. */
-function removeDirty(section: SectionName): void {
-  const n = dirtyCounts.get(section) ?? 0;
+function removeDirty(key: DirtyKey): void {
+  const n = dirtyCounts.get(key) ?? 0;
   if (n <= 1) {
-    dirtyCounts.delete(section);
+    dirtyCounts.delete(key);
   } else {
-    dirtyCounts.set(section, n - 1);
+    dirtyCounts.set(key, n - 1);
   }
 }
 
@@ -66,10 +76,11 @@ export function subscribeToDirtyState(listener: () => void): () => void {
   };
 }
 
-/** Snapshot the current dirty sections — derived from the refcount
- *  Map, filtering out entries at zero. Used by components outside
- *  a section panel to render indicators (sidebar dot, tab title). */
-export function getDirtySections(): Set<SectionName> {
+/** Snapshot the current dirty keys — derived from the refcount Map,
+ *  filtering out entries at zero. Used by components outside a section
+ *  panel to render indicators (sidebar dot, tab title). Keys are the
+ *  per-panel dirty keys (nav paths), not coarse SectionNames. */
+export function getDirtySections(): Set<DirtyKey> {
   return new Set(dirtyCounts.keys());
 }
 
@@ -85,7 +96,7 @@ export function getDirtySections(): Set<SectionName> {
 // (Wave 5's master-detail pattern means only one sibling is
 // visible at a time).
 type ApplyHandler = () => void;
-const applyHandlers = new Map<SectionName, ApplyHandler[]>();
+const applyHandlers = new Map<DirtyKey, ApplyHandler[]>();
 
 /**
  * Register an apply handler for a section. Returns a cleanup fn
@@ -97,18 +108,18 @@ const applyHandlers = new Map<SectionName, ApplyHandler[]>();
  * "active."
  */
 function registerApplyHandler(
-  section: SectionName,
+  key: DirtyKey,
   handler: ApplyHandler
 ): () => void {
-  const stack = applyHandlers.get(section) ?? [];
+  const stack = applyHandlers.get(key) ?? [];
   stack.push(handler);
-  applyHandlers.set(section, stack);
+  applyHandlers.set(key, stack);
   return () => {
-    const s = applyHandlers.get(section);
+    const s = applyHandlers.get(key);
     if (!s) return;
     const idx = s.indexOf(handler);
     if (idx >= 0) s.splice(idx, 1);
-    if (s.length === 0) applyHandlers.delete(section);
+    if (s.length === 0) applyHandlers.delete(key);
   };
 }
 
@@ -119,9 +130,9 @@ function registerApplyHandler(
  * registered (e.g. on Diagnostics pages) so the browser default
  * can proceed.
  */
-export function requestApplyCurrent(section: SectionName | null): boolean {
-  if (!section) return false;
-  const stack = applyHandlers.get(section);
+export function requestApplyCurrent(key: DirtyKey | null): boolean {
+  if (!key) return false;
+  const stack = applyHandlers.get(key);
   if (!stack || stack.length === 0) return false;
   const fn = stack[stack.length - 1];
   fn();
@@ -136,7 +147,7 @@ export function requestApplyCurrent(section: SectionName | null): boolean {
  * by ⌘S either.
  */
 export function useApplyHandler(
-  section: SectionName,
+  key: DirtyKey,
   handler: ApplyHandler,
   enabled: boolean
 ): void {
@@ -144,8 +155,8 @@ export function useApplyHandler(
   handlerRef.current = handler;
   useEffect(() => {
     if (!enabled) return;
-    return registerApplyHandler(section, () => handlerRef.current());
-  }, [section, enabled]);
+    return registerApplyHandler(key, () => handlerRef.current());
+  }, [key, enabled]);
 }
 
 interface UseDirtySectionResult<T> {
@@ -208,7 +219,7 @@ function stableStringify(value: unknown): string {
 }
 
 export function useDirtySection<T>(
-  section: SectionName,
+  key: DirtyKey,
   initial: T
 ): UseDirtySectionResult<T> {
   const [value, setValueState] = useState<T>(initial);
@@ -237,13 +248,13 @@ export function useDirtySection<T>(
       // cleanup (if it was dirty) already removed the refcount.
       return;
     }
-    addDirty(section);
+    addDirty(key);
     notifyDirtyListeners();
     return () => {
-      removeDirty(section);
+      removeDirty(key);
       notifyDirtyListeners();
     };
-  }, [section, isDirty]);
+  }, [key, isDirty]);
 
   // All callbacks are `useCallback`'d with stable deps so panels
   // that put them in `useCallback` / `useEffect` dependency arrays

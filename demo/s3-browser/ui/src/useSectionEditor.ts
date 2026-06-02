@@ -41,6 +41,15 @@ import { useApplyHandler, useDirtySection } from './useDirtySection';
 
 interface UseSectionEditorOptions<Wire, Local = Wire> {
   section: SectionName;
+  /**
+   * The key this panel's dirty-state + ⌘S apply register under. DECOUPLED
+   * from `section`: many panels share one server `SectionName` (e.g. all the
+   * Storage sub-panels PUT `storage`), but each must own its OWN sidebar dirty
+   * dot rather than lighting every sibling. Pass the panel's nav path
+   * (`storage/lifecycle`, `advanced/caches`, …). Defaults to `section` for
+   * single-panel sections. The server GET/PUT/validate still target `section`.
+   */
+  dirtyKey?: string;
   initial: Local;
   onSessionExpired?: () => void;
   /**
@@ -108,6 +117,7 @@ export function useSectionEditor<Wire, Local = Wire>(
 ): UseSectionEditorResult<Local, Wire> {
   const {
     section,
+    dirtyKey = section,
     initial,
     onSessionExpired,
     pick,
@@ -118,7 +128,7 @@ export function useSectionEditor<Wire, Local = Wire>(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { value, isDirty, setValue, discard, markApplied, resetWith } =
-    useDirtySection<Local>(section, initial);
+    useDirtySection<Local>(dirtyKey, initial);
 
   // Apply-dialog state. `pendingBody` captures the exact body that
   // went to /validate so confirmApply PUTs what the user saw (§F5).
@@ -214,7 +224,9 @@ export function useSectionEditor<Wire, Local = Wire>(
   }, [section, pendingBody, markApplied, refresh]);
 
   // ⌘S wiring: when dirty, ⌘S opens the validate → ApplyDialog sequence.
-  useApplyHandler(section, runApply, isDirty);
+  // Registered under dirtyKey so ⌘S reaches the active panel, not all
+  // siblings sharing the section.
+  useApplyHandler(dirtyKey, runApply, isDirty);
 
   return {
     value,

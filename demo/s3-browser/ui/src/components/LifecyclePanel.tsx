@@ -81,6 +81,7 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
     confirmApply,
   } = useSectionEditor<StorageSectionBody, LifecycleConfig>({
     section: 'storage',
+    dirtyKey: 'configuration/storage/lifecycle',
     initial: DEFAULT_LIFECYCLE,
     onSessionExpired,
     noun: 'lifecycle',
@@ -314,7 +315,7 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
     });
   };
 
-  useApplyHandler('storage', runApply, isDirty);
+  useApplyHandler('configuration/storage/lifecycle', runApply, isDirty);
 
   const canPreview = Boolean(selectedRule && selectedRuntime) && !isDirty;
   const canRun =

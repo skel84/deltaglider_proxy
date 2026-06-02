@@ -19,7 +19,7 @@ async function loadModule(relPath, fileName) {
 }
 
 const treeUrl = await loadModule('../src/adminNavTree.ts', 'adminNavTree.ts');
-const { findEntry, leavesUnder } = await import(treeUrl);
+const { findEntry, leavesUnder, dirtyDotForEntry } = await import(treeUrl);
 
 // A plain-data stand-in for ADMIN_IA: same shape (groups -> entries ->
 // children), no JSX. The exact strings mirror the real IA so the test
@@ -95,5 +95,59 @@ assert.deepEqual(leavesUnder(IA, 'configuration/admission'), []);
 assert.deepEqual(leavesUnder(IA, 'diagnostics/dashboard'), []);
 // Unknown parent -> empty list.
 assert.deepEqual(leavesUnder(IA, 'configuration/nope'), []);
+
+// ── dirtyDotForEntry: the sibling-bleed fix ──────────────────────────────────
+// A Storage tree with per-leaf dirtyKeys (mirrors the real ADMIN_IA).
+const storage = {
+  path: 'configuration/storage',
+  // parent has NO dirtyKey — it only rolls up.
+  children: [
+    { path: 'configuration/storage/backends' }, // immediate-save: NO dirtyKey, never lights
+    { path: 'configuration/storage/buckets', dirtyKey: 'configuration/storage/buckets' },
+    { path: 'configuration/storage/replication', dirtyKey: 'configuration/storage/replication' },
+    { path: 'configuration/storage/lifecycle', dirtyKey: 'configuration/storage/lifecycle' },
+  ],
+};
+const access = {
+  path: 'configuration/access',
+  children: [{ path: 'configuration/access/credentials', dirtyKey: 'configuration/access/credentials' }],
+};
+
+// THE bug: editing ONLY lifecycle must light lifecycle + the Storage parent
+// roll-up — and NOTHING else (not the sibling leaves, not the Access tree).
+{
+  const dirty = new Set(['configuration/storage/lifecycle']);
+  assert.equal(dirtyDotForEntry(storage.children[3], dirty), true, 'lifecycle leaf lights');
+  assert.equal(dirtyDotForEntry(storage, dirty), true, 'Storage parent rolls up');
+  // Siblings stay OFF — this is the regression.
+  assert.equal(dirtyDotForEntry(storage.children[0], dirty), false, 'backends stays off');
+  assert.equal(dirtyDotForEntry(storage.children[1], dirty), false, 'buckets stays off');
+  assert.equal(dirtyDotForEntry(storage.children[2], dirty), false, 'replication stays off');
+  // Other groups stay off.
+  assert.equal(dirtyDotForEntry(access, dirty), false, 'Access tree stays off');
+  assert.equal(dirtyDotForEntry(access.children[0], dirty), false, 'credentials stays off');
+}
+
+// A leaf with no dirtyKey never lights, even if some unrelated key is dirty.
+assert.equal(
+  dirtyDotForEntry({ path: 'configuration/storage/backends' }, new Set(['configuration/storage/lifecycle'])),
+  false
+);
+
+// Empty dirty set → nothing lights anywhere.
+{
+  const none = new Set();
+  assert.equal(dirtyDotForEntry(storage, none), false);
+  assert.equal(dirtyDotForEntry(storage.children[3], none), false);
+}
+
+// Two dirty leaves → both leaves + parent light; the clean sibling does not.
+{
+  const dirty = new Set(['configuration/storage/buckets', 'configuration/storage/lifecycle']);
+  assert.equal(dirtyDotForEntry(storage.children[1], dirty), true);
+  assert.equal(dirtyDotForEntry(storage.children[3], dirty), true);
+  assert.equal(dirtyDotForEntry(storage.children[2], dirty), false, 'replication still clean');
+  assert.equal(dirtyDotForEntry(storage, dirty), true);
+}
 
 console.log('admin nav tree regression checks passed');

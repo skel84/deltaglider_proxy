@@ -73,6 +73,7 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
     error,
   } = useSectionEditor<BucketWire, BucketPolicyRow[]>({
     section: 'storage',
+    dirtyKey: 'configuration/storage/buckets',
     initial: [],
     onSessionExpired,
     noun: 'bucket policies',
@@ -150,7 +151,7 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
 
   // ⌘S routes through the guard (registered after the hook's own
   // handler, so this most-recently-mounted one wins the dispatch).
-  useApplyHandler('storage', runApply, dirty);
+  useApplyHandler('configuration/storage/buckets', runApply, dirty);
 
   const updateRow = (id: string, patch: Partial<BucketPolicyRow>) => {
     setRows((cur) => cur.map((r) => (r._id === id ? { ...r, ...patch } : r)));

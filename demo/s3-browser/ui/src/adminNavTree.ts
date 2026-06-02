@@ -12,7 +12,36 @@
 
 interface NavNode<T extends NavNode<T>> {
   path: string;
+  /** The dirty-state key this entry owns (a leaf's nav path). Parents
+   *  usually have none and roll up their descendants. */
+  dirtyKey?: string;
   children?: T[];
+}
+
+/**
+ * Should this nav entry show the amber "unsaved" dot, given the set of
+ * currently-dirty keys?
+ *
+ * A LEAF lights iff its own `dirtyKey` is dirty. A PARENT lights iff ANY
+ * descendant leaf is dirty (roll-up) — never just because a SIBLING shares a
+ * coarse server section. This is the fix for the bug where one unsaved Storage
+ * sub-section lit every Storage sibling: dirty keys are per-leaf (nav paths),
+ * not the shared `storage` SectionName.
+ *
+ * Pure + JSX-free so it's unit-tested against a bare data tree.
+ */
+export function dirtyDotForEntry<T extends NavNode<T>>(
+  entry: T,
+  dirtyKeys: Set<string>
+): boolean {
+  if (entry.dirtyKey && dirtyKeys.has(entry.dirtyKey)) return true;
+  // Roll up: any descendant leaf dirty → parent shows the dot.
+  if (entry.children) {
+    for (const child of entry.children) {
+      if (dirtyDotForEntry(child, dirtyKeys)) return true;
+    }
+  }
+  return false;
 }
 
 /** Depth-first lookup of the entry whose `path` matches exactly. */

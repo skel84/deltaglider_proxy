@@ -76,6 +76,7 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
     confirmApply,
   } = useSectionEditor<StorageSectionBody, ReplicationConfig>({
     section: 'storage',
+    dirtyKey: 'configuration/storage/replication',
     initial: DEFAULT_REPLICATION,
     onSessionExpired,
     noun: 'replication',
@@ -214,7 +215,7 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
     }
   };
 
-  useApplyHandler('storage', runApply, isDirty);
+  useApplyHandler('configuration/storage/replication', runApply, isDirty);
 
   const canRun =
     Boolean(selectedRule && selectedRuntime) &&

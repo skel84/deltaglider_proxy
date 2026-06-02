@@ -36,11 +36,20 @@ export interface SidebarEntry {
    */
   description?: string;
   /**
-   * Which configuration section this entry's content maps to — used
-   * to drive the dirty-state amber dot. Diagnostics entries have no
-   * section.
+   * Which configuration section this entry's content maps to — the coarse
+   * server PUT target (`storage`, `advanced`, …). Diagnostics entries have none.
+   * NOTE: this is NOT the dirty-dot key — many leaves share one `section` but
+   * must light independently. See {@link dirtyKey}.
    */
   section?: SectionName;
+  /**
+   * The per-leaf dirty-state key (the panel's nav path), set ONLY on
+   * dirty-capable leaves. The amber dot lights iff this key is dirty; a parent
+   * rolls up its descendants. Leaves WITHOUT a `dirtyKey` (immediate-save CRUD
+   * like Backends/Users) never light. This decoupling fixes the bug where one
+   * dirty Storage sub-section lit every sibling. See `dirtyDotForEntry`.
+   */
+  dirtyKey?: string;
   /** Child entries rendered below as a sub-nav. */
   children?: SidebarEntry[];
 }
@@ -105,6 +114,9 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
         label: 'Admission',
         icon: <SecurityScanOutlined />,
         section: 'admission',
+        // Single-panel section: dirtyKey defaults to the section name in
+        // useSectionEditor, so the nav key matches it ('admission').
+        dirtyKey: 'admission',
         description:
           'Pre-auth request gating. Blocks are evaluated top to bottom; first match wins. Synthesized blocks from bucket public_prefixes fire after operator-authored ones.',
       },
@@ -119,6 +131,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
             label: 'Credentials & mode',
             icon: <LockOutlined />,
             section: 'access',
+            dirtyKey: 'configuration/access/credentials',
             description:
               'IAM mode (GUI vs. declarative), authentication mode, legacy SigV4 bootstrap credentials, admin password.',
           },
@@ -167,6 +180,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
             label: 'Buckets',
             icon: <CloudOutlined />,
             section: 'storage',
+            dirtyKey: 'configuration/storage/buckets',
             description:
               'Per-bucket policies: compression overrides, delta ratio, public prefixes, quotas, aliases.',
           },
@@ -175,6 +189,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
             label: 'Object replication',
             icon: <SyncOutlined />,
             section: 'storage',
+            dirtyKey: 'configuration/storage/replication',
             description:
               'Object data replication between buckets and prefixes. Rules are storage config; runtime state lives in the encrypted config DB.',
           },
@@ -183,6 +198,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
             label: 'Object lifecycle',
             icon: <ClockCircleOutlined />,
             section: 'storage',
+            dirtyKey: 'configuration/storage/lifecycle',
             description:
               'Delete-only object expiration rules with read-only preview, guarded run-now, and scheduler history.',
           },
@@ -209,6 +225,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
             label: 'Listener & TLS',
             icon: <CloudServerOutlined />,
             section: 'advanced',
+            dirtyKey: 'configuration/advanced/listener',
             description: 'HTTP listen address, TLS cert and key paths.',
           },
           {
@@ -216,6 +233,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
             label: 'Caches',
             icon: <DatabaseOutlined />,
             section: 'advanced',
+            dirtyKey: 'configuration/advanced/caches',
             description:
               'Reference cache, metadata cache, codec concurrency, blocking-thread pool size.',
           },
@@ -224,6 +242,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
             label: 'Limits',
             icon: <CloudOutlined />,
             section: 'advanced',
+            dirtyKey: 'configuration/advanced/limits',
             description:
               'Request timeouts, concurrency caps, multipart-upload limits. Most are env-var driven.',
           },
@@ -232,6 +251,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
             label: 'Logging',
             icon: <DatabaseOutlined />,
             section: 'advanced',
+            dirtyKey: 'configuration/advanced/logging',
             description:
               'tracing-subscriber EnvFilter string. Changes take effect immediately without restart.',
           },
@@ -240,6 +260,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
             label: 'Config DB sync',
             icon: <SyncOutlined />,
             section: 'advanced',
+            dirtyKey: 'configuration/advanced/sync',
             description:
               'S3 bucket for encrypted IAM/config database HA across proxy instances. This is not object replication.',
           },

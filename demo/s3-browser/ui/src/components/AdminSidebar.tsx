@@ -47,8 +47,8 @@ import {
   subscribeToDirtyState,
   getDirtySections,
 } from '../useDirtySection';
-import type { SectionName } from '../adminApi';
 import { ADMIN_IA, type SidebarEntry } from './adminNavigation';
+import { dirtyDotForEntry } from '../adminNavTree';
 
 interface Props {
   /** Current sub-path under `/_/admin/`. */
@@ -72,14 +72,14 @@ export default function AdminSidebar({ activePath, onNavigate }: Props) {
   // We compare the sorted-section-list by value and only call
   // setDirty when it actually differs. A Set-of-≤4 elements
   // serialises cheaply.
-  const [dirty, setDirty] = useState<Set<SectionName>>(getDirtySections);
+  const [dirty, setDirty] = useState<Set<string>>(getDirtySections);
   // Seed `last` from the SAME value `useState` captured (via `dirty`)
   // rather than a fresh post-mount read of `getDirtySections()`. If
   // the dirty set mutates between mount-time `useState` and post-
   // commit `useEffect`, those two snapshots diverge and we'd either
   // emit a spurious re-render or silently miss the first legitimate
   // update. (X-ray LOW #3.)
-  const serialise = (s: Set<SectionName>) => Array.from(s).sort().join('|');
+  const serialise = (s: Set<string>) => Array.from(s).sort().join('|');
   const lastKeyRef = useRef<string>(serialise(dirty));
   useEffect(() => {
     const unsub = subscribeToDirtyState(() => {
@@ -98,7 +98,9 @@ export default function AdminSidebar({ activePath, onNavigate }: Props) {
     const isActive =
       activePath === entry.path ||
       (entry.children && activePath.startsWith(entry.path + '/'));
-    const isDirty = entry.section ? dirty.has(entry.section) : false;
+    // Per-leaf dot via its own dirtyKey; parents roll up any dirty descendant.
+    // (Was `dirty.has(entry.section)` — that lit every sibling sharing a section.)
+    const isDirty = dirtyDotForEntry(entry, dirty);
     return (
       <div key={entry.path}>
         <button

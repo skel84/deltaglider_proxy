@@ -151,11 +151,13 @@ function RestartChip({ reason }: { reason: string }) {
  */
 function useAdvancedSubset<T extends Partial<AdvancedSectionBody>>(
   initial: T,
-  onSessionExpired?: () => void
+  onSessionExpired?: () => void,
+  dirtyKey?: string
 ): UseSectionEditorResult<T, AdvancedSectionBody> {
   const keys = Object.keys(initial) as Array<keyof T>;
   return useSectionEditor<AdvancedSectionBody, T>({
     section: 'advanced',
+    dirtyKey,
     initial,
     onSessionExpired,
     pick: (body) => {
@@ -253,7 +255,7 @@ function PanelShell(props: { children: React.ReactNode }) {
 
 export function ListenerTlsPanel({ onSessionExpired }: PanelProps) {
   const { cardStyle, inputRadius } = useCardStyles();
-  const subset = useAdvancedSubset(LISTENER_INITIAL, onSessionExpired);
+  const subset = useAdvancedSubset(LISTENER_INITIAL, onSessionExpired, 'configuration/advanced/listener');
   const { value, setValue, isDirty, discard, loading, error } = subset;
 
   if (error) return <Alert type="error" showIcon message="Failed to load" description={error} />;
@@ -372,7 +374,7 @@ export function ListenerTlsPanel({ onSessionExpired }: PanelProps) {
 
 export function CachesPanel({ onSessionExpired }: PanelProps) {
   const { cardStyle, inputRadius } = useCardStyles();
-  const subset = useAdvancedSubset(CACHES_INITIAL, onSessionExpired);
+  const subset = useAdvancedSubset(CACHES_INITIAL, onSessionExpired, 'configuration/advanced/caches');
   const { value, setValue, isDirty, discard, loading, error } = subset;
   if (error) return <Alert type="error" showIcon message="Failed to load" description={error} />;
   if (loading) return <PanelShell><Text type="secondary">Loading...</Text></PanelShell>;
@@ -640,7 +642,7 @@ function findMatchingPreset(logLevel: string): string | null {
 
 export function LoggingPanel({ onSessionExpired }: PanelProps) {
   const { cardStyle, inputRadius } = useCardStyles();
-  const subset = useAdvancedSubset(LOG_INITIAL, onSessionExpired);
+  const subset = useAdvancedSubset(LOG_INITIAL, onSessionExpired, 'configuration/advanced/logging');
   const { value, setValue, isDirty, discard, loading, error } = subset;
   const [custom, setCustom] = useState(false);
 
@@ -730,7 +732,7 @@ export function LoggingPanel({ onSessionExpired }: PanelProps) {
 
 export function ConfigDbSyncPanel({ onSessionExpired }: PanelProps) {
   const { cardStyle, inputRadius } = useCardStyles();
-  const subset = useAdvancedSubset(SYNC_INITIAL, onSessionExpired);
+  const subset = useAdvancedSubset(SYNC_INITIAL, onSessionExpired, 'configuration/advanced/sync');
   const { value, setValue, isDirty, discard, loading, error } = subset;
   if (error) return <Alert type="error" showIcon message="Failed to load" description={error} />;
   if (loading) return <PanelShell><Text type="secondary">Loading...</Text></PanelShell>;

@@ -13,7 +13,8 @@ import BackendsPanel from './BackendsPanel';
 import MetricsPage from './MetricsPage';
 import OAuthProviderList from './OAuthProviderList';
 import AdminSidebar from './AdminSidebar';
-import { headerForPath } from './adminNavigation';
+import { headerForPath, ADMIN_IA } from './adminNavigation';
+import { findEntry } from '../adminNavTree';
 import AdmissionPanel from './AdmissionPanel';
 import CredentialsModePanel from './CredentialsModePanel';
 import BucketsPanel from './BucketsPanel';
@@ -165,6 +166,10 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
   const rawSubPath = (subPath || '').replace(/^\/+/, '').replace(/\/+$/, '');
   const adminPath = resolveAdminPath(subPath || '');
   const activeSection = sectionForPath(adminPath);
+  // The per-leaf dirty/apply key for ⌘S dispatch (panels register under this,
+  // not the coarse section). `activeSection` is still used for the avatar
+  // menu's section-YAML target (which IS section-scoped).
+  const activeDirtyKey = dirtyKeyForPath(adminPath);
   const navigateAdmin = useCallback(
     (path: string) => {
       navigate(buildViewUrl('admin', path));
@@ -244,7 +249,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         // Configuration pages), let the browser's default fire — we
         // don't want to silently eat ⌘S when there's no contextual
         // meaning.
-        if (activeSection && requestApplyCurrent(activeSection)) {
+        if (activeDirtyKey && requestApplyCurrent(activeDirtyKey)) {
           e.preventDefault();
         }
         return;
@@ -256,7 +261,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [authed, activeSection]);
+  }, [authed, activeDirtyKey]);
 
   // Memoised palette extra-actions. The underlying handlers
   // (`setYamlModalMode`, `setHelpOpen`, `navigateAdmin`, `onBack`)
@@ -1025,4 +1030,16 @@ function sectionForPath(path: string): SectionName | undefined {
   if (path.startsWith('configuration/storage')) return 'storage';
   if (path.startsWith('configuration/advanced')) return 'advanced';
   return undefined;
+}
+
+/**
+ * The dirty/apply key for the currently-active admin path — the leaf entry's
+ * `dirtyKey` (its nav path for dirty-capable sub-panels, or the section name
+ * for single-panel sections like Admission). ⌘S dispatches through this so it
+ * reaches the visible panel's Apply handler, which registers under the SAME
+ * per-leaf key (not the coarse `SectionName`). Returns undefined when the path
+ * isn't a dirty-capable config leaf (Diagnostics, immediate-save CRUD, etc.).
+ */
+function dirtyKeyForPath(path: string): string | undefined {
+  return findEntry(ADMIN_IA, path)?.dirtyKey;
 }
