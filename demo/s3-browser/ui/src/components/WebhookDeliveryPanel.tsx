@@ -85,6 +85,7 @@ const EMPTY_FORM: WebhookFormState = {
   slackIncludeRows: [],
   slackExcludeRows: [],
   slackNotifyKinds: ['ObjectCreated'],
+  slackRoutes: [],
 };
 
 function PanelShell({ children }: { children: React.ReactNode }) {

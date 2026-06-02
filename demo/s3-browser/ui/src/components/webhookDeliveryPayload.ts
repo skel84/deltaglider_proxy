@@ -48,6 +48,23 @@ export const SLACK_NOTIFY_KINDS = [
 
 type EventDeliveryFormat = 'raw' | 'slack';
 
+/** One bucket/prefix → channel routing rule, wire shape. Mirrors `SlackRoute`
+ *  in src/config_sections.rs. `channel` is required; `bucket` absent/empty =
+ *  any bucket; `prefix_globs` empty = any key. */
+interface SlackRouteWire {
+  name?: string | null;
+  bucket?: string | null;
+  prefix_globs?: string[];
+  channel?: string | null;
+}
+
+interface SlackRouteNorm {
+  name: string;
+  bucket: string;
+  prefixGlobs: string[];
+  channel: string;
+}
+
 interface EventDeliveryConfig {
   enabled: boolean;
   webhook_urls: string[];
@@ -72,6 +89,7 @@ interface EventDeliveryConfig {
   slack_include_globs: string[];
   slack_exclude_globs: string[];
   slack_notify_kinds: string[];
+  slack_routes: SlackRouteNorm[];
 }
 
 /** Defaults mirror `EventDeliveryConfig::default` in src/config_sections.rs. */
@@ -97,6 +115,7 @@ const DEFAULT_EVENT_DELIVERY: EventDeliveryConfig = {
   slack_include_globs: [],
   slack_exclude_globs: [],
   slack_notify_kinds: ['ObjectCreated'],
+  slack_routes: [],
 };
 
 /** The wire shape of `event_delivery` as the server GET returns it. */
@@ -123,6 +142,7 @@ export interface EventDeliveryWire {
   slack_include_globs?: string[];
   slack_exclude_globs?: string[];
   slack_notify_kinds?: string[];
+  slack_routes?: SlackRouteWire[];
 }
 
 export interface AdvancedSectionWebhookBody {
@@ -173,6 +193,12 @@ function normalizeEventDelivery(
       ed.slack_notify_kinds && ed.slack_notify_kinds.length > 0
         ? [...ed.slack_notify_kinds]
         : [...d.slack_notify_kinds],
+    slack_routes: (ed.slack_routes ?? []).map((r) => ({
+      name: r.name ?? '',
+      bucket: r.bucket ?? '',
+      prefixGlobs: [...(r.prefix_globs ?? [])],
+      channel: r.channel ?? '',
+    })),
   };
 }
 
@@ -192,6 +218,18 @@ interface ValidationResult {
   errors: string[];
   /** Wire body for the section PUT, only present when ok. */
   body?: AdvancedSectionWebhookBody;
+}
+
+/** A route is "in progress" (safely droppable) only when EVERY field is blank.
+ *  Any non-empty field makes it meaningful — so a half-filled route still gets
+ *  validated (e.g. a bucket set but no channel → "Route N needs a channel"). */
+function routeHasContent(r: SlackRouteNorm): boolean {
+  return (
+    r.name.trim().length > 0 ||
+    r.bucket.trim().length > 0 ||
+    r.channel.trim().length > 0 ||
+    r.prefixGlobs.some((g) => g.trim().length > 0)
+  );
 }
 
 /**
@@ -224,9 +262,13 @@ function buildEventDeliveryPayload(
       errors.push('Delivery is enabled but no endpoint is set — add at least one webhook URL or turn delivery off.');
     }
   } else {
+    // Channel-routing rows that actually carry content (blank rows are dropped).
+    const meaningfulRoutes = local.slack_routes.filter((r) => routeHasContent(r));
     if (slackBotMode) {
-      // Bot-token mode posts via the Web API to a specific channel.
-      if (local.slack_channel.trim().length === 0) {
+      // Bot-token mode posts via the Web API. A destination is needed: either
+      // the single fallback channel OR at least one route. (Mirrors the backend:
+      // it warns only when slack_routes is empty AND slack_channel is unset.)
+      if (local.slack_channel.trim().length === 0 && meaningfulRoutes.length === 0) {
         errors.push('Slack bot-token mode needs a channel.');
       }
     } else if (local.enabled && urls.length === 0) {
@@ -242,6 +284,19 @@ function buildEventDeliveryPayload(
     if (local.slack_notify_kinds.length === 0) {
       errors.push('Pick at least one event kind to post to Slack.');
     }
+    // Channel routing (bot-token mode only). Blank rows are dropped; what's left
+    // must each carry a channel. Routes outside bot-token mode are a no-op on the
+    // backend (Incoming Webhook URLs are 1:1 with a channel) — surface that.
+    if (meaningfulRoutes.length > 0 && !slackBotMode) {
+      errors.push(
+        'Channel routing needs a bot token — Incoming Webhook URLs are each bound to one channel by Slack. Switch to bot-token mode or remove the routes.'
+      );
+    }
+    meaningfulRoutes.forEach((r, i) => {
+      if (r.channel.trim().length === 0) {
+        errors.push(`Route ${i + 1} needs a channel.`);
+      }
+    });
   }
 
   // Header validation + secret-sentinel guard.
@@ -334,6 +389,20 @@ function buildEventDeliveryPayload(
       slack_include_globs: local.slack_include_globs.map((g) => g.trim()).filter((g) => g.length > 0),
       slack_exclude_globs: local.slack_exclude_globs.map((g) => g.trim()).filter((g) => g.length > 0),
       slack_notify_kinds: [...local.slack_notify_kinds],
+      // Only routes with a real channel reach the wire; blank/in-progress rows
+      // are dropped. name/bucket are omitted when empty (= any bucket; no label).
+      slack_routes: local.slack_routes
+        .filter((r) => r.channel.trim().length > 0)
+        .map((r) => {
+          const route: SlackRouteWire = { channel: r.channel.trim() };
+          const name = r.name.trim();
+          if (name) route.name = name;
+          const bucket = r.bucket.trim();
+          if (bucket) route.bucket = bucket;
+          const globs = r.prefixGlobs.map((g) => g.trim()).filter((g) => g.length > 0);
+          if (globs.length > 0) route.prefix_globs = globs;
+          return route;
+        }),
     },
   };
 
@@ -361,6 +430,17 @@ export interface WebhookUrlRow {
 export interface SlackGlobRow {
   id: string;
   glob: string;
+}
+
+/** A stable-id channel-routing row: bucket/prefix → channel. Mirrors the wire
+ *  `SlackRoute`. Carries a stable `id` (React key — NEVER array index) and a
+ *  nested list of stable-id glob rows for the prefix matcher. */
+export interface SlackRouteRow {
+  id: string;
+  name: string;
+  bucket: string;
+  prefixGlobs: SlackGlobRow[];
+  channel: string;
 }
 
 export interface WebhookHeaderRow {
@@ -415,6 +495,9 @@ export interface WebhookFormState {
   slackIncludeRows: SlackGlobRow[];
   slackExcludeRows: SlackGlobRow[];
   slackNotifyKinds: string[];
+  /** Per-bucket / per-prefix → channel routes (bot-token mode only). Empty =
+   *  the single-channel behavior (`slackChannel` is the only destination). */
+  slackRoutes: SlackRouteRow[];
 }
 
 // Deterministic id generator INJECTED by the caller so this module stays pure
@@ -459,6 +542,13 @@ export function formFromWire(
     slackIncludeRows: cfg.slack_include_globs.map((glob) => ({ id: nextId(), glob })),
     slackExcludeRows: cfg.slack_exclude_globs.map((glob) => ({ id: nextId(), glob })),
     slackNotifyKinds: [...cfg.slack_notify_kinds],
+    slackRoutes: cfg.slack_routes.map((r) => ({
+      id: nextId(),
+      name: r.name,
+      bucket: r.bucket,
+      prefixGlobs: r.prefixGlobs.map((glob) => ({ id: nextId(), glob })),
+      channel: r.channel,
+    })),
   };
 }
 
@@ -508,6 +598,12 @@ export function buildPayloadFromForm(form: WebhookFormState): ValidationResult {
     slack_include_globs: form.slackIncludeRows.map((r) => r.glob),
     slack_exclude_globs: form.slackExcludeRows.map((r) => r.glob),
     slack_notify_kinds: [...form.slackNotifyKinds],
+    slack_routes: form.slackRoutes.map((r) => ({
+      name: r.name,
+      bucket: r.bucket,
+      prefixGlobs: r.prefixGlobs.map((g) => g.glob),
+      channel: r.channel,
+    })),
   };
   for (const h of form.headerRows) {
     const name = h.name.trim();
@@ -530,4 +626,107 @@ export function buildPayloadFromForm(form: WebhookFormState): ValidationResult {
     return { ok: false, errors: [...errors, ...res.errors] };
   }
   return res;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Preview-only channel resolution (mirrors src/slack_format.rs::resolve_channels).
+//
+// Best-effort, client-side: a glob match close to `globset` semantics (`**`
+// crosses `/`, `*` stays within a path segment). NOT an exact globset port —
+// it's a live-preview aid, so bucket-match + simple prefix are what must be
+// right. Kept pure so the regression test can exercise it without a server.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Compile one glob to a RegExp. `**` → `.*` (crosses `/`); `*` → `[^/]*`
+ *  (within a segment); `?` → `[^/]`. All other regex metachars are escaped. */
+function globToRegExp(glob: string): RegExp {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i];
+    if (ch === '*') {
+      if (glob[i + 1] === '*') {
+        re += '.*';
+        i++; // consume the second star
+      } else {
+        re += '[^/]*';
+      }
+    } else if (ch === '?') {
+      re += '[^/]';
+    } else if ('.+^${}()|[]\\'.includes(ch)) {
+      re += '\\' + ch;
+    } else {
+      re += ch;
+    }
+  }
+  return new RegExp(`^${re}$`);
+}
+
+function globMatchesAny(globs: string[], key: string): boolean {
+  for (const g of globs) {
+    const trimmed = g.trim();
+    if (!trimmed) continue;
+    try {
+      if (globToRegExp(trimmed).test(key)) return true;
+    } catch {
+      // An un-compilable glob never matches (the backend warns on it too).
+    }
+  }
+  return false;
+}
+
+/** A resolved-channel preview row: which route matched, and its channel. */
+interface ResolvedRoute {
+  /** Route label (name) if set, else a synthesized description. */
+  label: string;
+  channel: string;
+}
+
+interface ResolveResult {
+  /** Channels the sample event would post to, in route order, deduped. */
+  matches: ResolvedRoute[];
+  /** True when no route matched and we fell back to the single channel. */
+  fellBackToChannel: boolean;
+  /** The fallback channel used (only meaningful when `fellBackToChannel`). */
+  fallbackChannel: string;
+}
+
+/**
+ * Resolve which channel(s) a SAMPLE `bucket`/`key` event posts to, mirroring
+ * the Rust `resolve_channels`: when `routes` is non-empty, fan out to EVERY
+ * matching route (bucket absent/empty = any; prefix_globs empty = any key),
+ * deduped by channel; otherwise fall back to the single `slackChannel`.
+ */
+export function resolveSlackChannelsPreview(
+  routes: SlackRouteRow[],
+  fallbackChannel: string,
+  sampleBucket: string,
+  sampleKey: string
+): ResolveResult {
+  const meaningful = routes.filter((r) => r.channel.trim().length > 0);
+  if (meaningful.length === 0) {
+    const fb = fallbackChannel.trim();
+    return { matches: [], fellBackToChannel: fb.length > 0, fallbackChannel: fb };
+  }
+
+  const out: ResolvedRoute[] = [];
+  const seen = new Set<string>();
+  for (const route of meaningful) {
+    const bucket = route.bucket.trim();
+    if (bucket && bucket !== sampleBucket.trim()) continue;
+    const globs = route.prefixGlobs.map((g) => g.glob).filter((g) => g.trim().length > 0);
+    if (globs.length > 0 && !globMatchesAny(globs, sampleKey)) continue;
+    const channel = route.channel.trim();
+    if (!channel || seen.has(channel)) continue;
+    seen.add(channel);
+    out.push({
+      label: route.name.trim() || (bucket ? `bucket ${bucket}` : 'any bucket'),
+      channel,
+    });
+  }
+
+  if (out.length === 0) {
+    const fb = fallbackChannel.trim();
+    return { matches: [], fellBackToChannel: fb.length > 0, fallbackChannel: fb };
+  }
+  return { matches: out, fellBackToChannel: false, fallbackChannel: '' };
 }

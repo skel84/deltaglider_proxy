@@ -22,7 +22,7 @@
  * No tooltips/popovers (globally disabled in this layout) — native `title=`. No
  * AntD Select popups (broken here) — checkboxes / Radio.Button only.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Button, Checkbox, Input, Radio, Space, Typography } from 'antd';
 import {
   CloseCircleFilled,
@@ -37,9 +37,11 @@ import FormField from './FormField';
 import { AdvancedDisclosure } from './ruleEditorFields';
 import {
   SLACK_NOTIFY_KINDS,
+  resolveSlackChannelsPreview,
   type WebhookFormState,
   type WebhookUrlRow,
   type SlackGlobRow,
+  type SlackRouteRow,
 } from './webhookDeliveryPayload';
 
 const { Text } = Typography;
@@ -74,6 +76,11 @@ export default function SlackConnectorCard({
 }: Props) {
   const colors = useColors();
 
+  // Sample event for the routing preview. UI-only ephemeral state (not config):
+  // lets the operator see which channel(s) a given bucket/key would resolve to.
+  const [sampleBucket, setSampleBucket] = useState('releases');
+  const [sampleKey, setSampleKey] = useState('builds/app.zip');
+
   // Display mode = the operator's UI choice (sticky even with an empty token
   // field). The BACKEND mode is derived from token presence at payload-build
   // time — leaving webhook mode clears the token so the two stay consistent.
@@ -107,6 +114,47 @@ export default function SlackConnectorCard({
     setField({
       [key]: form[key].filter((r) => r.id !== id),
     } as Partial<WebhookFormState>);
+
+  // ── Channel-routing row mutators (stable-id keyed, never array index) ──
+  const updateRoute = (id: string, patch: Partial<SlackRouteRow>) =>
+    setField({
+      slackRoutes: form.slackRoutes.map((r) => (r.id === id ? { ...r, ...patch } : r)),
+    });
+  const addRoute = () =>
+    setField({
+      slackRoutes: [
+        ...form.slackRoutes,
+        { id: nextId(), name: '', bucket: '', prefixGlobs: [], channel: '' } as SlackRouteRow,
+      ],
+    });
+  const removeRoute = (id: string) =>
+    setField({ slackRoutes: form.slackRoutes.filter((r) => r.id !== id) });
+
+  // Nested glob-row mutators scoped to ONE route (stable-id keyed throughout).
+  const updateRouteGlob = (routeId: string, globId: string, glob: string) =>
+    setField({
+      slackRoutes: form.slackRoutes.map((r) =>
+        r.id === routeId
+          ? { ...r, prefixGlobs: r.prefixGlobs.map((g) => (g.id === globId ? { ...g, glob } : g)) }
+          : r,
+      ),
+    });
+  const addRouteGlob = (routeId: string) =>
+    setField({
+      slackRoutes: form.slackRoutes.map((r) =>
+        r.id === routeId
+          ? { ...r, prefixGlobs: [...r.prefixGlobs, { id: nextId(), glob: '' } as SlackGlobRow] }
+          : r,
+      ),
+    });
+  const removeRouteGlob = (routeId: string, globId: string) =>
+    setField({
+      slackRoutes: form.slackRoutes.map((r) =>
+        r.id === routeId
+          ? { ...r, prefixGlobs: r.prefixGlobs.filter((g) => g.id !== globId) }
+          : r,
+      ),
+    });
 
   const toggleKind = (kind: string, on: boolean) => {
     const set = new Set(form.slackNotifyKinds);
@@ -194,6 +242,25 @@ export default function SlackConnectorCard({
         <BotModeFields form={form} setField={setField} inputRadius={inputRadius} colors={colors} />
       )}
 
+      {/* Channel routing — bot-token mode only (Incoming Webhook URLs are each
+          bound to one channel by Slack, so per-bucket/prefix routing needs the
+          Web API). Collapsed by default; the channel above is the fallback. */}
+      {mode === 'bot' && (
+        <AdvancedDisclosure title="Channel routing (per bucket / prefix)">
+          <ChannelRoutingEditor
+            form={form}
+            inputRadius={inputRadius}
+            colors={colors}
+            updateRoute={updateRoute}
+            addRoute={addRoute}
+            removeRoute={removeRoute}
+            updateRouteGlob={updateRouteGlob}
+            addRouteGlob={addRouteGlob}
+            removeRouteGlob={removeRouteGlob}
+          />
+        </AdvancedDisclosure>
+      )}
+
       {/* What gets posted */}
       <AdvancedDisclosure title="What gets posted (event kinds + prefix filters)">
         <FormField
@@ -253,6 +320,17 @@ export default function SlackConnectorCard({
         >
           Live preview — what lands in the channel
         </Text>
+        {mode === 'bot' && form.slackRoutes.length > 0 && (
+          <RoutingPreview
+            form={form}
+            colors={colors}
+            inputRadius={inputRadius}
+            sampleBucket={sampleBucket}
+            sampleKey={sampleKey}
+            onBucket={setSampleBucket}
+            onKey={setSampleKey}
+          />
+        )}
         <SlackPreview form={form} mode={mode} colors={colors} />
       </div>
 
@@ -470,7 +548,7 @@ function GlobRowsField({
   placeholder,
 }: {
   label: string;
-  yamlPath: string;
+  yamlPath?: string;
   helpText: string;
   rows: SlackGlobRow[];
   onUpdate: (id: string, glob: string) => void;
@@ -504,6 +582,231 @@ function GlobRowsField({
       </Space>
     </FormField>
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Channel routing editor (bot-token mode only) — per bucket / prefix → channel.
+// Stable-id row keys throughout (routes AND their nested glob rows), edited
+// directly through the shared useSectionEditor value (no parallel state).
+// ─────────────────────────────────────────────────────────────────────────
+
+function ChannelRoutingEditor({
+  form,
+  inputRadius,
+  colors,
+  updateRoute,
+  addRoute,
+  removeRoute,
+  updateRouteGlob,
+  addRouteGlob,
+  removeRouteGlob,
+}: {
+  form: WebhookFormState;
+  inputRadius: React.CSSProperties;
+  colors: ReturnType<typeof useColors>;
+  updateRoute: (id: string, patch: Partial<SlackRouteRow>) => void;
+  addRoute: () => void;
+  removeRoute: (id: string) => void;
+  updateRouteGlob: (routeId: string, globId: string, glob: string) => void;
+  addRouteGlob: (routeId: string) => void;
+  removeRouteGlob: (routeId: string, globId: string) => void;
+}) {
+  return (
+    <div>
+      <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12, lineHeight: 1.5 }}>
+        Send different buckets or prefixes to different channels. An event posts
+        to every route it matches; the channel above is the fallback for
+        unmatched events.
+      </Text>
+
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        {form.slackRoutes.length === 0 && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            No routes — every event posts to the single channel above.
+          </Text>
+        )}
+        {form.slackRoutes.map((route, i) => (
+          <div
+            key={route.id}
+            style={{
+              border: `1px solid ${colors.BORDER}`,
+              borderRadius: 8,
+              padding: 12,
+              background: colors.BG_CARD,
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: 10,
+              }}
+            >
+              <Text style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: colors.TEXT_MUTED }}>
+                Route {i + 1}
+              </Text>
+              <Button
+                icon={<DeleteOutlined />}
+                size="small"
+                onClick={() => removeRoute(route.id)}
+                title="Remove route"
+              />
+            </div>
+
+            <FormField label="Name (optional)">
+              <Input
+                value={route.name}
+                onChange={(e) => updateRoute(route.id, { name: e.target.value })}
+                placeholder="e.g. Releases → #ci"
+                style={{ ...inputRadius, fontSize: 13, maxWidth: 320 }}
+              />
+            </FormField>
+
+            <FormField label="Bucket">
+              <Input
+                value={route.bucket}
+                onChange={(e) => updateRoute(route.id, { bucket: e.target.value })}
+                placeholder="any bucket"
+                style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 280 }}
+              />
+            </FormField>
+
+            <FormField
+              label={
+                <span>
+                  Channel{' '}
+                  <span style={{ color: colors.ACCENT_RED, fontWeight: 700 }} title="Required">
+                    *
+                  </span>
+                </span>
+              }
+              helpText="Required. Channel id (C0123…) or #name."
+            >
+              <Input
+                value={route.channel}
+                onChange={(e) => updateRoute(route.id, { channel: e.target.value })}
+                placeholder="C0123 or #name"
+                status={route.channel.trim().length === 0 ? 'error' : undefined}
+                style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 280 }}
+              />
+            </FormField>
+
+            <GlobRowsField
+              label="Prefix globs"
+              helpText="Keys matching at least one glob route here. Empty = any key."
+              rows={route.prefixGlobs}
+              onUpdate={(globId, g) => updateRouteGlob(route.id, globId, g)}
+              onAdd={() => addRouteGlob(route.id)}
+              onRemove={(globId) => removeRouteGlob(route.id, globId)}
+              inputRadius={inputRadius}
+              placeholder="builds/** (empty = any key)"
+            />
+          </div>
+        ))}
+        <Button icon={<PlusOutlined />} onClick={addRoute} size="small">
+          Add route
+        </Button>
+      </Space>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Routing preview — resolve a SAMPLE bucket/key against the routes, mirroring
+// the Rust resolve_channels (fan-out to all matches; fallback to the single
+// channel; or nowhere). Best-effort client-side glob match.
+// ─────────────────────────────────────────────────────────────────────────
+
+function RoutingPreview({
+  form,
+  colors,
+  inputRadius,
+  sampleBucket,
+  sampleKey,
+  onBucket,
+  onKey,
+}: {
+  form: WebhookFormState;
+  colors: ReturnType<typeof useColors>;
+  inputRadius: React.CSSProperties;
+  sampleBucket: string;
+  sampleKey: string;
+  onBucket: (v: string) => void;
+  onKey: (v: string) => void;
+}) {
+  const resolved = useMemo(
+    () => resolveSlackChannelsPreview(form.slackRoutes, form.slackChannel, sampleBucket, sampleKey),
+    [form.slackRoutes, form.slackChannel, sampleBucket, sampleKey],
+  );
+
+  const chipBase: React.CSSProperties = {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 12,
+    borderRadius: 4,
+    padding: '1px 7px',
+    border: `1px solid ${colors.BORDER}`,
+  };
+
+  return (
+    <div
+      style={{
+        marginBottom: 12,
+        padding: 12,
+        border: `1px dashed ${colors.BORDER}`,
+        borderRadius: 8,
+      }}
+    >
+      <Text style={{ fontSize: 12, color: colors.TEXT_MUTED, display: 'block', marginBottom: 8 }}>
+        Resolve a sample event:
+      </Text>
+      <Space.Compact style={{ width: '100%', maxWidth: 420, marginBottom: 10 }}>
+        <Input
+          value={sampleBucket}
+          onChange={(e) => onBucket(e.target.value)}
+          placeholder="bucket"
+          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 150 }}
+          title="Sample bucket"
+        />
+        <Input
+          value={sampleKey}
+          onChange={(e) => onKey(e.target.value)}
+          placeholder="path/to/key.zip"
+          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+          title="Sample object key"
+        />
+      </Space.Compact>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 13 }}>
+        <span style={{ color: colors.TEXT_MUTED }}>→</span>
+        {resolved.matches.length > 0 ? (
+          resolved.matches.map((m) => (
+            <span
+              key={m.channel}
+              style={{ ...chipBase, color: colors.ACCENT_BLUE }}
+              title={`Matched route: ${m.label}`}
+            >
+              {fmtChannel(m.channel)}
+            </span>
+          ))
+        ) : resolved.fellBackToChannel ? (
+          <span style={{ ...chipBase, color: colors.TEXT_SECONDARY }} title="No route matched — fallback channel">
+            (fallback) {fmtChannel(resolved.fallbackChannel)}
+          </span>
+        ) : (
+          <span style={{ ...chipBase, color: colors.TEXT_MUTED }} title="No route matched and no fallback channel set">
+            (no channel)
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Display a channel as `#name` / `C0123…` (prefix-aware), like Slack shows it. */
+function fmtChannel(c: string): string {
+  const t = c.trim();
+  if (!t) return '';
+  return t.startsWith('#') || t.startsWith('C') ? t : `#${t}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
