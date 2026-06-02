@@ -21,6 +21,14 @@ interface Props {
   errorCount?: number;
   onDiscard: () => void;
   onApply: () => void;
+  /**
+   * When true, pin to the viewport bottom with `position: fixed` instead of
+   * `sticky`. Use this when the bar can't be rendered LAST in the scroll flow
+   * (e.g. a shared apply-rail rendered at the top of a panel). Sticky (default)
+   * is preferred when the bar IS the last child — it scopes to the scroll
+   * container and needs no layout assumptions.
+   */
+  floating?: boolean;
 }
 
 export default function StickyDirtyBar({
@@ -29,18 +37,33 @@ export default function StickyDirtyBar({
   errorCount = 0,
   onDiscard,
   onApply,
+  floating = false,
 }: Props) {
   const c = useColors();
   const hasErrors = errorCount > 0;
 
-  return (
-    <div
-      // Sticky so it pins to the bottom of the scroll viewport without taking a
-      // slot in the flow. pointer-events none on the wrapper lets clicks through
-      // the empty margins; the inner bar re-enables them.
-      style={{
+  const positionStyle: React.CSSProperties = floating
+    ? {
+        // Fixed to the viewport bottom-center. Anchored right of the sidebar
+        // isn't worth the complexity — centering reads fine over the content.
+        position: 'fixed',
+        left: 0,
+        right: 0,
+        bottom: 16,
+      }
+    : {
         position: 'sticky',
         bottom: 12,
+        height: visible ? 'auto' : 0,
+        marginTop: visible ? 8 : 0,
+      };
+
+  return (
+    <div
+      // pointer-events none on the wrapper lets clicks through the empty
+      // margins; the inner bar re-enables them.
+      style={{
+        ...positionStyle,
         zIndex: 20,
         display: 'flex',
         justifyContent: 'center',
@@ -49,9 +72,6 @@ export default function StickyDirtyBar({
         opacity: visible ? 1 : 0,
         transform: visible ? 'translateY(0)' : 'translateY(8px)',
         transition: 'opacity 160ms ease, transform 160ms ease',
-        // When hidden, collapse the sticky box so it never intercepts layout.
-        height: visible ? 'auto' : 0,
-        marginTop: visible ? 8 : 0,
       }}
       aria-hidden={!visible}
     >

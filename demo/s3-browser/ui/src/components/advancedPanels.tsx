@@ -23,16 +23,7 @@
  * ApplyDialog renders it as a blue banner.
  */
 import { useEffect, useState } from 'react';
-import {
-  Alert,
-  Button,
-  Input,
-  InputNumber,
-  Radio,
-  Space,
-  Switch,
-  Typography,
-} from 'antd';
+import { Alert, Input, InputNumber, Radio, Switch, Typography } from 'antd';
 import {
   CloudServerOutlined,
   DatabaseOutlined,
@@ -50,6 +41,7 @@ import { undefinedToNullSubset } from './advancedPayload';
 import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import ApplyDialog from './ApplyDialog';
+import StickyDirtyBar from './StickyDirtyBar';
 
 const { Text } = Typography;
 
@@ -184,6 +176,10 @@ function useAdvancedSubset<T extends Partial<AdvancedSectionBody>>(
 
 /** Render the dirty-state banner + ApplyDialog pair. Every Advanced
  *  sub-panel uses this same tail. */
+// Shared dirty UX for the Advanced sub-panels. Rendered at the TOP of each
+// PanelShell, so it owns the ApplyDialog (a modal — placement-independent) and
+// the floating StickyDirtyBar. The bar uses fixed-to-viewport positioning so it
+// pins to the bottom regardless of where in the flow this rail sits.
 function AdvancedApplyRail(props: {
   isDirty: boolean;
   applying: boolean;
@@ -196,30 +192,13 @@ function AdvancedApplyRail(props: {
 }) {
   return (
     <>
-      {props.isDirty && (
-        <Alert
-          type="warning"
-          showIcon
-          message="Unsaved changes to this section"
-          description="Review the diff in the Apply dialog before persisting."
-          action={
-            <Space>
-              <Button size="small" onClick={props.onDiscard} disabled={props.applying}>
-                Discard
-              </Button>
-              <Button
-                type="primary"
-                size="small"
-                onClick={props.onApply}
-                disabled={props.applying}
-                loading={props.applying}
-              >
-                Apply
-              </Button>
-            </Space>
-          }
-        />
-      )}
+      <StickyDirtyBar
+        visible={props.isDirty}
+        applying={props.applying}
+        onDiscard={props.onDiscard}
+        onApply={props.onApply}
+        floating
+      />
       <ApplyDialog
         open={props.applyOpen}
         section="advanced"
