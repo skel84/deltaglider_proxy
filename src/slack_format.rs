@@ -62,6 +62,51 @@ pub fn compile_slack_globs(cfg: &EventDeliveryConfig) -> Result<(GlobSet, GlobSe
     ))
 }
 
+/// Resolve which Slack channel(s) an eligible event posts to (bot-token mode).
+///
+/// - If `slack_routes` is non-empty, return the channel of EVERY route the event
+///   matches (bucket match — `None` = any; AND prefix globs — empty = any),
+///   deduped, order-preserving. An event can hit several channels, or none.
+/// - If `slack_routes` is empty, fall back to the single `slack_channel`
+///   (the default single-destination behavior) when set.
+///
+/// Returns an empty Vec when nothing matches (caller treats it as "delivered,
+/// posted nowhere" — not an error).
+pub fn resolve_channels(event: &EventOutboxRecord, cfg: &EventDeliveryConfig) -> Vec<String> {
+    if cfg.slack_routes.is_empty() {
+        return cfg
+            .slack_channel
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(|c| vec![c.to_string()])
+            .unwrap_or_default();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for route in &cfg.slack_routes {
+        // Bucket constraint.
+        if let Some(b) = route.bucket.as_deref() {
+            if !b.trim().is_empty() && b != event.bucket {
+                continue;
+            }
+        }
+        // Prefix-glob constraint (empty = any key).
+        if !route.prefix_globs.is_empty() {
+            let Ok(set) = build_globset(&route.prefix_globs) else {
+                continue; // an invalid route glob never matches (also surfaced as a config warning)
+            };
+            if !set.is_match(&event.key) {
+                continue;
+            }
+        }
+        let ch = route.channel.trim();
+        if !ch.is_empty() && !out.iter().any(|c| c == ch) {
+            out.push(ch.to_string());
+        }
+    }
+    out
+}
+
 /// Emoji + human title for an event kind.
 fn kind_presentation(kind: &str) -> (&'static str, &'static str) {
     match kind {
@@ -337,5 +382,123 @@ mod tests {
             &inc,
             &exc
         ));
+    }
+
+    // ── resolve_channels (per-bucket / per-prefix routing) ──
+    use crate::config_sections::SlackRoute;
+
+    fn route(name: &str, bucket: Option<&str>, globs: &[&str], channel: &str) -> SlackRoute {
+        SlackRoute {
+            name: Some(name.to_string()),
+            bucket: bucket.map(String::from),
+            prefix_globs: globs.iter().map(|s| s.to_string()).collect(),
+            channel: channel.to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_channels_falls_back_to_single_channel_when_no_routes() {
+        let cfg = EventDeliveryConfig {
+            slack_channel: Some("C_DEFAULT".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_channels(&rec("ObjectCreated", "b", "k.zip", json!({})), &cfg),
+            vec!["C_DEFAULT".to_string()]
+        );
+        // No channel + no routes → nowhere.
+        let empty = EventDeliveryConfig::default();
+        assert!(
+            resolve_channels(&rec("ObjectCreated", "b", "k.zip", json!({})), &empty).is_empty()
+        );
+    }
+
+    #[test]
+    fn resolve_channels_routes_by_bucket() {
+        let cfg = EventDeliveryConfig {
+            slack_channel: Some("C_IGNORED".to_string()), // ignored once routes exist
+            slack_routes: vec![
+                route("rel", Some("releases"), &[], "C_RELEASES"),
+                route("aud", Some("audit"), &[], "C_SECURITY"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_channels(&rec("ObjectCreated", "releases", "x.zip", json!({})), &cfg),
+            vec!["C_RELEASES".to_string()]
+        );
+        assert_eq!(
+            resolve_channels(&rec("ObjectCreated", "audit", "log.json", json!({})), &cfg),
+            vec!["C_SECURITY".to_string()]
+        );
+        // A bucket no route covers → nowhere (routed config, no fallback).
+        assert!(
+            resolve_channels(&rec("ObjectCreated", "scratch", "x", json!({})), &cfg).is_empty()
+        );
+    }
+
+    #[test]
+    fn resolve_channels_fans_out_to_multiple_matches() {
+        let cfg = EventDeliveryConfig {
+            slack_routes: vec![
+                route("all-releases", Some("releases"), &[], "C_TEAM"),
+                route("builds-only", Some("releases"), &["builds/**"], "C_CI"),
+            ],
+            ..Default::default()
+        };
+        // A builds key matches BOTH routes → fans out to both channels.
+        assert_eq!(
+            resolve_channels(
+                &rec("ObjectCreated", "releases", "builds/app.zip", json!({})),
+                &cfg
+            ),
+            vec!["C_TEAM".to_string(), "C_CI".to_string()]
+        );
+        // A non-builds key matches only the first.
+        assert_eq!(
+            resolve_channels(
+                &rec("ObjectCreated", "releases", "docs/readme.md", json!({})),
+                &cfg
+            ),
+            vec!["C_TEAM".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_channels_prefix_glob_and_any_bucket() {
+        let cfg = EventDeliveryConfig {
+            slack_routes: vec![
+                // any bucket, only *.zip → one channel
+                route("zips", None, &["**/*.zip"], "C_ARTIFACTS"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_channels(
+                &rec("ObjectCreated", "anybucket", "deep/x.zip", json!({})),
+                &cfg
+            ),
+            vec!["C_ARTIFACTS".to_string()]
+        );
+        assert!(resolve_channels(
+            &rec("ObjectCreated", "anybucket", "deep/x.txt", json!({})),
+            &cfg
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn resolve_channels_dedupes_same_channel() {
+        let cfg = EventDeliveryConfig {
+            slack_routes: vec![
+                route("a", Some("b"), &[], "C_SAME"),
+                route("b", Some("b"), &["**"], "C_SAME"), // both match → dedupe
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_channels(&rec("ObjectCreated", "b", "x", json!({})), &cfg),
+            vec!["C_SAME".to_string()]
+        );
     }
 }

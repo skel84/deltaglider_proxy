@@ -154,6 +154,26 @@ Directory markers and DeltaGlider internals (`reference.bin`, `*.delta`,
 section + context line with size / storage strategy / timestamp) plus a plain
 `text` fallback for notifications and screen readers.
 
+**Per-bucket / per-prefix channel routing** (bot-token mode only — Incoming
+Webhook URLs are each bound to one channel by Slack). Set `slack_routes` to send
+different buckets or prefixes to different channels; an eligible event posts to
+**every** route it matches (so one object can hit several channels). `slack_channel`
+becomes the fallback for events that match no route.
+
+```yaml
+  slack_routes:
+    - name: "Releases → #ci"
+      bucket: "releases"
+      prefix_globs: ["builds/**"]   # empty = any key in the bucket
+      channel: "C_CI"
+    - name: "Audit → #security"
+      bucket: "audit"               # no prefix_globs = the whole bucket
+      channel: "C_SECURITY"
+```
+
+The top-level `slack_notify_kinds` + `slack_include/exclude_globs` are a global
+pre-filter (what's eligible at all); routes then decide which channels.
+
 All of this is editable from the admin GUI at **Configuration → Advanced →
 Webhook delivery** (toggle the format to *Slack*) — including a live preview of
 the message that will land in the channel.

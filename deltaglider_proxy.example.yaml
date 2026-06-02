@@ -173,3 +173,16 @@ storage:
 #   #   slack_notify_kinds: ["ObjectCreated"]   # add ObjectDeleted, etc.
 #   #   slack_include_globs: ["builds/**"]      # empty = all user objects
 #   #   slack_exclude_globs: ["**/*.tmp"]
+#   #
+#   #   # Route different buckets/prefixes to different channels (bot-token mode
+#   #   # only — Incoming Webhook URLs are bound to one channel). An event posts
+#   #   # to EVERY route it matches. When slack_routes is set, slack_channel is
+#   #   # the fallback only for events that match no route.
+#   #   slack_routes:
+#   #     - name: "Releases → #ci"
+#   #       bucket: "releases"
+#   #       prefix_globs: ["builds/**"]   # empty = any key in the bucket
+#   #       channel: "C_CI"
+#   #     - name: "Audit → #security"
+#   #       bucket: "audit"
+#   #       channel: "C_SECURITY"

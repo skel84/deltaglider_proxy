@@ -167,35 +167,45 @@ impl HttpWebhookDeliveryClient {
                 .unwrap_or_default()
                 .trim()
                 .to_string();
-            let channel = config
-                .slack_channel
-                .as_deref()
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-                .ok_or_else(|| "slack bot-token mode requires slack_channel".to_string())?;
-            if let Value::Object(ref mut map) = body {
-                map.insert("channel".to_string(), Value::String(channel.to_string()));
+            // Resolve target channel(s): per-route fan-out, or the single
+            // slack_channel fallback. An event may hit several channels.
+            let channels = crate::slack_format::resolve_channels(event, config);
+            if channels.is_empty() {
+                // No route matched and no fallback channel — for a routed config
+                // this is a legitimate "post nowhere". For a misconfigured single
+                // destination, surface the missing channel.
+                if config.slack_routes.is_empty() {
+                    return Err("slack bot-token mode requires slack_channel".to_string());
+                }
+                return Ok(()); // routed, but this event matched no route
             }
-            let response = self
-                .client
-                .post("https://slack.com/api/chat.postMessage")
-                .timeout(timeout)
-                .bearer_auth(token)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("slack chat.postMessage: {e}"))?;
-            if !response.status().is_success() {
-                return Err(format!(
-                    "slack chat.postMessage returned HTTP {}",
-                    response.status()
-                ));
+            for channel in channels {
+                let mut msg = body.clone();
+                if let Value::Object(ref mut map) = msg {
+                    map.insert("channel".to_string(), Value::String(channel.clone()));
+                }
+                let response = self
+                    .client
+                    .post("https://slack.com/api/chat.postMessage")
+                    .timeout(timeout)
+                    .bearer_auth(&token)
+                    .json(&msg)
+                    .send()
+                    .await
+                    .map_err(|e| format!("slack chat.postMessage ({channel}): {e}"))?;
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "slack chat.postMessage ({channel}) returned HTTP {}",
+                        response.status()
+                    ));
+                }
+                let parsed: Value = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("slack response parse ({channel}): {e}"))?;
+                slack_api_result(&parsed).map_err(|e| format!("{e} (channel {channel})"))?;
             }
-            let parsed: Value = response
-                .json()
-                .await
-                .map_err(|e| format!("slack response parse: {e}"))?;
-            return slack_api_result(&parsed);
+            return Ok(());
         }
 
         // Incoming Webhook mode: POST {text, blocks, username?, icon_emoji?} to

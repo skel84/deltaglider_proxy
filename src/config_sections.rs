@@ -709,6 +709,39 @@ pub struct EventDeliveryConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub slack_notify_kinds: Vec<String>,
+
+    /// Per-bucket / per-prefix channel routing (bot-token mode only). When
+    /// NON-EMPTY, an eligible event is posted to EVERY route it matches — so
+    /// different buckets/prefixes can fan out to different channels (and one
+    /// object can hit several). When EMPTY, delivery falls back to the single
+    /// `slack_channel` (the default single-destination behavior).
+    ///
+    /// The top-level `slack_notify_kinds` + `slack_include/exclude_globs` are a
+    /// global pre-filter (what's eligible at all); routes then pick channels.
+    /// Incoming Webhook URLs are each bound to one channel by Slack, so routing
+    /// requires a bot token (`chat.postMessage`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slack_routes: Vec<SlackRoute>,
+}
+
+/// One bucket/prefix → channel routing rule. See [`EventDeliveryConfig::slack_routes`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SlackRoute {
+    /// Optional human label for the route (shown in the GUI; ignored by routing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Match only this bucket. `None`/absent = any bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+
+    /// Match only keys matching at least one of these globs. Empty = any key
+    /// (within the bucket constraint).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefix_globs: Vec<String>,
+
+    /// Slack channel to post to (id like `C0123` or `#name`). Required.
+    pub channel: String,
 }
 
 /// Event-delivery payload format. See [`EventDeliveryConfig::format`].
@@ -778,6 +811,7 @@ impl Default for EventDeliveryConfig {
             slack_include_globs: Vec::new(),
             slack_exclude_globs: Vec::new(),
             slack_notify_kinds: default_slack_notify_kinds(),
+            slack_routes: Vec::new(),
         }
     }
 }
@@ -1731,17 +1765,38 @@ pub fn validate_event_delivery(cfg: &EventDeliveryConfig) -> Vec<String> {
 
     // Slack-format validation.
     if cfg.format == EventDeliveryFormat::Slack {
-        if cfg.uses_slack_bot_token()
-            && cfg
-                .slack_channel
-                .as_deref()
-                .map(|c| c.trim().is_empty())
-                .unwrap_or(true)
-        {
+        // A bot-token config needs SOME destination: either per-route channels
+        // OR the single slack_channel fallback.
+        let has_single_channel = cfg
+            .slack_channel
+            .as_deref()
+            .map(|c| !c.trim().is_empty())
+            .unwrap_or(false);
+        if cfg.uses_slack_bot_token() && cfg.slack_routes.is_empty() && !has_single_channel {
             warnings.push(
-                "event_delivery: Slack bot-token mode requires slack_channel; messages will fail until set"
+                "event_delivery: Slack bot-token mode needs either slack_channel or slack_routes; messages will fail until one is set"
                     .to_string(),
             );
+        }
+        if !cfg.slack_routes.is_empty() && !cfg.uses_slack_bot_token() {
+            warnings.push(
+                "event_delivery.slack_routes only applies in bot-token mode (Incoming Webhook URLs are bound to one channel); routes will be ignored"
+                    .to_string(),
+            );
+        }
+        for (i, route) in cfg.slack_routes.iter().enumerate() {
+            if route.channel.trim().is_empty() {
+                warnings.push(format!(
+                    "event_delivery.slack_routes[{i}] has an empty channel"
+                ));
+            }
+            for p in &route.prefix_globs {
+                if globset::Glob::new(p).is_err() {
+                    warnings.push(format!(
+                        "event_delivery.slack_routes[{i}].prefix_globs has invalid glob {p:?}"
+                    ));
+                }
+            }
         }
         for (label, patterns) in [
             ("slack_include_globs", &cfg.slack_include_globs),
