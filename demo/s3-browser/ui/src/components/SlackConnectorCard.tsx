@@ -23,10 +23,15 @@
  * AntD Select popups (broken here) — checkboxes / Radio.Button only.
  */
 import { useMemo } from 'react';
-import { Alert, Button, Checkbox, Input, Radio, Space, Typography } from 'antd';
-import { DeleteOutlined, PlusOutlined, SlackOutlined } from '@ant-design/icons';
+import { Button, Checkbox, Input, Radio, Space, Typography } from 'antd';
+import {
+  CloseCircleFilled,
+  DeleteOutlined,
+  InfoCircleOutlined,
+  PlusOutlined,
+  SlackOutlined,
+} from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
-import { useCardStyles } from './shared-styles';
 import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import { AdvancedDisclosure } from './ruleEditorFields';
@@ -67,7 +72,6 @@ export default function SlackConnectorCard({
   addUrl,
   removeUrl,
 }: Props) {
-  const { cardStyle } = useCardStyles();
   const colors = useColors();
 
   // Display mode = the operator's UI choice (sticky even with an empty token
@@ -113,36 +117,46 @@ export default function SlackConnectorCard({
   };
 
   return (
-    <div style={cardStyle}>
+    // No outer card here — the parent panel wraps this in the accent-bordered
+    // "destination" card so the raw and Slack connectors share one frame.
+    <>
       <SectionHeader
         icon={<SlackOutlined />}
         title="Slack connector"
         description="Post object events to a Slack channel as a formatted message. No restart — applies live."
       />
 
-      {/* No-OAuth callout */}
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginTop: 16 }}
-        message="No OAuth needed — paste a credential."
-        description="Works on private / internal instances (outbound HTTPS only). Slack never needs to reach back to this proxy."
-      />
+      {/* No-OAuth note — discreet one-liner, not a banner. */}
+      <div
+        style={{
+          marginTop: 12,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 7,
+          fontSize: 12,
+          color: colors.TEXT_MUTED,
+        }}
+      >
+        <InfoCircleOutlined style={{ color: colors.ACCENT_BLUE, fontSize: 13 }} />
+        <span title="Delivery is outbound HTTPS only — Slack never needs to reach back to this proxy, so it works on private/internal instances.">
+          No OAuth — just paste a credential. Works on private / internal instances.
+        </span>
+      </div>
 
       {errors.length > 0 && (
-        <Alert
-          type="error"
-          showIcon
-          style={{ marginTop: 12 }}
-          message="Fix these before applying"
-          description={
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {errors.map((e, i) => (
-                <li key={i}>{e}</li>
-              ))}
-            </ul>
-          }
-        />
+        <div
+          style={{
+            marginTop: 10,
+            fontSize: 12,
+            color: colors.ACCENT_RED,
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 7,
+          }}
+        >
+          <CloseCircleFilled style={{ marginTop: 2, fontSize: 13 }} />
+          <span>{errors.join(' · ')}</span>
+        </div>
       )}
 
       {/* Mode sub-toggle */}
@@ -248,7 +262,7 @@ export default function SlackConnectorCard({
           Create a Slack app →
         </a>
       </Text>
-    </div>
+    </>
   );
 }
 
