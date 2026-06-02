@@ -260,9 +260,16 @@ export default function InspectorPanel({
 
   // Fetch bucket policy (compression + public prefixes) once per bucket — skip when the user
   // has not signed in through Settings (would 403).
+  //
+  // `getBucket()` is a non-reactive module getter, so we read it during render
+  // into `currentBucket` and make THAT an explicit effect dependency. Previously
+  // the effect depended only on `[objectKey, hasAdminSession]`, which lied about
+  // its real trigger (the bucket) and only worked because object selection
+  // happens to change with the bucket — a latent stale-policy bug.
+  const currentBucket = getBucket();
   const lastBucketRef = useRef<string>('');
   useEffect(() => {
-    const bucket = getBucket();
+    const bucket = currentBucket;
     if (!bucket) {
       setBucketPolicy(null);
       setBucketPolicyLoading(false);
@@ -300,7 +307,7 @@ export default function InspectorPanel({
     return () => {
       cancelled = true;
     };
-  }, [objectKey, hasAdminSession]);
+  }, [currentBucket, hasAdminSession]);
 
   useEffect(() => {
     if (!objectKey) { setHeadData(null); setHeadReadable(false); return; }
