@@ -178,4 +178,143 @@ function headers(res) {
   assert.ok(!h.ok && h.errors.some((e) => /invalid characters/i.test(e)), 'header name with space rejected');
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Slack format
+// ─────────────────────────────────────────────────────────────────────────
+function ed(res) {
+  return res.body.event_delivery;
+}
+
+// ── format: raw still round-trips unchanged (no slack fields leak as set) ──
+{
+  const res = buildFromWire({ webhook_urls: ['https://hooks.example/in'] });
+  assert.ok(res.ok, JSON.stringify(res.errors));
+  assert.equal(ed(res).format, 'raw', 'format defaults to raw');
+  assert.equal(ed(res).slack_bot_token, null, 'no token in raw mode → null');
+  assert.deepEqual(ed(res).webhook_urls, ['https://hooks.example/in']);
+}
+
+// ── slack bot token: untouched (masked) → passes through as the sentinel ──
+{
+  const res = buildFromWire({
+    format: 'slack',
+    slack_bot_token: SENTINEL,
+    slack_channel: '#deploys',
+  });
+  assert.ok(res.ok, JSON.stringify(res.errors));
+  assert.equal(ed(res).format, 'slack');
+  assert.equal(ed(res).slack_bot_token, SENTINEL, 'untouched token → sentinel (server restores)');
+  assert.equal(ed(res).slack_channel, '#deploys');
+}
+
+// ── slack bot token: retyped → real value flows through ──
+{
+  const res = buildFromWire(
+    { format: 'slack', slack_bot_token: SENTINEL, slack_channel: '#deploys' },
+    (f) => {
+      f.slackBotToken = 'xoxb-NEW-TOKEN';
+      f.slackBotTokenMasked = false; // typing unmasks
+    }
+  );
+  assert.ok(res.ok, JSON.stringify(res.errors));
+  assert.equal(ed(res).slack_bot_token, 'xoxb-NEW-TOKEN', 'retyped token → real value');
+}
+
+// ── slack bot-token mode needs a channel ──
+{
+  const res = buildFromWire({
+    format: 'slack',
+    slack_bot_token: 'xoxb-real',
+    // no channel
+  });
+  assert.ok(!res.ok, 'bot token without channel must fail');
+  assert.ok(
+    res.errors.some((e) => /needs a channel/i.test(e)),
+    'error must mention the missing channel'
+  );
+}
+
+// ── a masked (untouched) token also counts as bot mode → still needs channel ──
+{
+  const res = buildFromWire({ format: 'slack', slack_bot_token: SENTINEL });
+  assert.ok(!res.ok && res.errors.some((e) => /needs a channel/i.test(e)), 'masked token = bot mode needs channel');
+}
+
+// ── slack webhook mode (no token), enabled, no URL → must fail ──
+{
+  const res = buildFromWire({ format: 'slack' }, (f) => {
+    f.enabled = true;
+    f.urlRows = [];
+  });
+  assert.ok(!res.ok, 'enabled webhook-mode Slack with no URL must fail');
+  assert.ok(
+    res.errors.some((e) => /webhook url/i.test(e) || /no slack incoming webhook/i.test(e)),
+    'error must mention the missing Slack webhook URL'
+  );
+}
+
+// ── slack webhook mode with a hooks.slack.com URL → ok ──
+{
+  const res = buildFromWire(
+    { format: 'slack', webhook_urls: ['https://hooks.slack.com/services/T/B/x'] },
+    (f) => {
+      f.enabled = true;
+    }
+  );
+  assert.ok(res.ok, JSON.stringify(res.errors));
+  assert.equal(ed(res).format, 'slack');
+  assert.equal(ed(res).slack_bot_token, null, 'webhook mode → no bot token');
+  assert.deepEqual(ed(res).webhook_urls, ['https://hooks.slack.com/services/T/B/x']);
+}
+
+// ── slack notify kinds: at least one must be selected ──
+{
+  const res = buildFromWire(
+    { format: 'slack', webhook_urls: ['https://hooks.slack.com/services/T/B/x'] },
+    (f) => {
+      f.slackNotifyKinds = [];
+    }
+  );
+  assert.ok(!res.ok && res.errors.some((e) => /at least one event kind/i.test(e)), 'no notify kinds must fail');
+}
+
+// ── slack notify kinds + globs round-trip; empty glob row rejected ──
+{
+  const ok = buildFromWire({
+    format: 'slack',
+    webhook_urls: ['https://hooks.slack.com/services/T/B/x'],
+    slack_notify_kinds: ['ObjectCreated', 'ObjectDeleted'],
+    slack_include_globs: ['releases/**'],
+    slack_exclude_globs: ['tmp/**'],
+  });
+  assert.ok(ok.ok, JSON.stringify(ok.errors));
+  assert.deepEqual(ed(ok).slack_notify_kinds, ['ObjectCreated', 'ObjectDeleted']);
+  assert.deepEqual(ed(ok).slack_include_globs, ['releases/**']);
+  assert.deepEqual(ed(ok).slack_exclude_globs, ['tmp/**']);
+
+  const bad = buildFromWire(
+    { format: 'slack', webhook_urls: ['https://hooks.slack.com/services/T/B/x'] },
+    (f) => {
+      f.slackIncludeRows = [{ id: 'g1', glob: '  ' }]; // blank → error
+    }
+  );
+  assert.ok(!bad.ok && bad.errors.some((e) => /prefix filter is empty/i.test(e)), 'blank glob row rejected');
+}
+
+// ── slack cosmetic fields (webhook mode) flow through; empty → null ──
+{
+  const res = buildFromWire(
+    { format: 'slack', webhook_urls: ['https://hooks.slack.com/services/T/B/x'] },
+    (f) => {
+      f.slackUsername = 'DeltaGlider';
+      f.slackIconEmoji = ':package:';
+    }
+  );
+  assert.ok(res.ok, JSON.stringify(res.errors));
+  assert.equal(ed(res).slack_username, 'DeltaGlider');
+  assert.equal(ed(res).slack_icon_emoji, ':package:');
+  const empty = buildFromWire({ format: 'slack', webhook_urls: ['https://hooks.slack.com/services/T/B/x'] });
+  assert.equal(ed(empty).slack_username, null, 'empty username → null (merge-patch clears)');
+}
+
 console.log('webhook-delivery-payload-regression-test: all assertions passed');

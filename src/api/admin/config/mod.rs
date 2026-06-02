@@ -601,6 +601,11 @@ pub(super) fn preserve_event_delivery_secrets(
     for key in drop_keys {
         new.webhook_headers.remove(&key);
     }
+    // Slack bot token: an untouched (sentinel) value preserves the old token; a
+    // sentinel with no old token to restore is meaningless → clear it.
+    if new.slack_bot_token.as_deref() == Some(sentinel) {
+        new.slack_bot_token = old.slack_bot_token.clone();
+    }
 }
 
 /// Preserve credentials on the PRIMARY backend across a config swap.
@@ -1024,6 +1029,53 @@ mod preserve_tests {
         assert_eq!(
             new.webhook_headers.get("X-Env").map(String::as_str),
             Some("prod")
+        );
+    }
+
+    #[test]
+    fn preserve_slack_bot_token() {
+        // untouched sentinel → restore old token
+        let old = EventDeliveryConfig {
+            slack_bot_token: Some("xoxb-real-token".to_string()),
+            ..Default::default()
+        };
+        let mut new = EventDeliveryConfig {
+            slack_bot_token: Some(REDACTED_SENTINEL.to_string()),
+            ..Default::default()
+        };
+        preserve_event_delivery_secrets(&mut new, &old);
+        assert_eq!(new.slack_bot_token.as_deref(), Some("xoxb-real-token"));
+
+        // retyped token → keep it
+        let mut new2 = EventDeliveryConfig {
+            slack_bot_token: Some("xoxb-NEW".to_string()),
+            ..Default::default()
+        };
+        preserve_event_delivery_secrets(&mut new2, &old);
+        assert_eq!(new2.slack_bot_token.as_deref(), Some("xoxb-NEW"));
+
+        // sentinel with no old token → cleared
+        let mut new3 = EventDeliveryConfig {
+            slack_bot_token: Some(REDACTED_SENTINEL.to_string()),
+            ..Default::default()
+        };
+        preserve_event_delivery_secrets(&mut new3, &EventDeliveryConfig::default());
+        assert_eq!(new3.slack_bot_token, None);
+    }
+
+    #[test]
+    fn redact_masks_slack_bot_token() {
+        let cfg = crate::config::Config {
+            event_delivery: EventDeliveryConfig {
+                slack_bot_token: Some("xoxb-secret".to_string()),
+                ..Default::default()
+            },
+            ..crate::config::Config::default()
+        };
+        let redacted = cfg.redact_all_secrets();
+        assert_eq!(
+            redacted.event_delivery.slack_bot_token.as_deref(),
+            Some(REDACTED_SENTINEL)
         );
     }
 

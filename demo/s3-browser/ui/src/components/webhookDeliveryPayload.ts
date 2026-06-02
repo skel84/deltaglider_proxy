@@ -23,9 +23,30 @@
  *    list bound to `webhook_urls`; on load we fold any legacy single
  *    `webhook_url` into the list, and on save we always write `webhook_urls`
  *    and clear `webhook_url` (→ explicit `null`) so the two never drift.
+ *
+ * 4. **Slack format + bot-token secret.** `format` selects the payload shape:
+ *    `raw` (existing JSON envelope) or `slack` (Block Kit message). In `slack`
+ *    mode the message lands either via an Incoming Webhook URL (no token) or the
+ *    Slack Web API (`slack_bot_token` set, requires `slack_channel`). The bot
+ *    token is a SECRET with the SAME mask round-trip as header values: masked to
+ *    the sentinel on GET, passed through untouched (= "unchanged", server
+ *    restores), overwritten when retyped, cleared to `null` when emptied.
  */
 
 const WEBHOOK_REDACTED_SENTINEL = '__redacted__';
+
+/** Event kinds the backend recognises for `slack_notify_kinds`. Mirrors
+ *  `default_slack_notify_kinds` + the valid set in src/config_sections.rs. */
+export const SLACK_NOTIFY_KINDS = [
+  'ObjectCreated',
+  'ObjectDeleted',
+  'ObjectCopied',
+  'ReplicationObjectCopied',
+  'LifecycleTransitioned',
+  'LifecycleExpired',
+] as const;
+
+type EventDeliveryFormat = 'raw' | 'slack';
 
 interface EventDeliveryConfig {
   enabled: boolean;
@@ -41,6 +62,16 @@ interface EventDeliveryConfig {
   delivered_retention: string;
   delivered_max_rows: number;
   prune_batch: number;
+  // Slack
+  format: EventDeliveryFormat;
+  /** Equals the sentinel while an untouched bot token is masked; '' = unset. */
+  slack_bot_token: string;
+  slack_channel: string;
+  slack_username: string;
+  slack_icon_emoji: string;
+  slack_include_globs: string[];
+  slack_exclude_globs: string[];
+  slack_notify_kinds: string[];
 }
 
 /** Defaults mirror `EventDeliveryConfig::default` in src/config_sections.rs. */
@@ -58,6 +89,14 @@ const DEFAULT_EVENT_DELIVERY: EventDeliveryConfig = {
   delivered_retention: '24h',
   delivered_max_rows: 10000,
   prune_batch: 100,
+  format: 'raw',
+  slack_bot_token: '',
+  slack_channel: '',
+  slack_username: '',
+  slack_icon_emoji: '',
+  slack_include_globs: [],
+  slack_exclude_globs: [],
+  slack_notify_kinds: ['ObjectCreated'],
 };
 
 /** The wire shape of `event_delivery` as the server GET returns it. */
@@ -76,6 +115,14 @@ export interface EventDeliveryWire {
   delivered_retention?: string;
   delivered_max_rows?: number;
   prune_batch?: number;
+  format?: EventDeliveryFormat;
+  slack_bot_token?: string | null;
+  slack_channel?: string | null;
+  slack_username?: string | null;
+  slack_icon_emoji?: string | null;
+  slack_include_globs?: string[];
+  slack_exclude_globs?: string[];
+  slack_notify_kinds?: string[];
 }
 
 export interface AdvancedSectionWebhookBody {
@@ -114,6 +161,18 @@ function normalizeEventDelivery(
     delivered_retention: ed.delivered_retention ?? d.delivered_retention,
     delivered_max_rows: ed.delivered_max_rows ?? d.delivered_max_rows,
     prune_batch: ed.prune_batch ?? d.prune_batch,
+    format: ed.format === 'slack' ? 'slack' : 'raw',
+    // A null/absent token → unset (''); the sentinel survives as "masked".
+    slack_bot_token: ed.slack_bot_token ?? '',
+    slack_channel: ed.slack_channel ?? '',
+    slack_username: ed.slack_username ?? '',
+    slack_icon_emoji: ed.slack_icon_emoji ?? '',
+    slack_include_globs: [...(ed.slack_include_globs ?? [])],
+    slack_exclude_globs: [...(ed.slack_exclude_globs ?? [])],
+    slack_notify_kinds:
+      ed.slack_notify_kinds && ed.slack_notify_kinds.length > 0
+        ? [...ed.slack_notify_kinds]
+        : [...d.slack_notify_kinds],
   };
 }
 
@@ -152,9 +211,37 @@ function buildEventDeliveryPayload(
   for (const u of urls) {
     if (!URL_RE.test(u)) errors.push(`Endpoint "${u}" is not a valid http(s) URL.`);
   }
-  // Usability invariant: enabling delivery with no endpoint is a no-op trap.
-  if (local.enabled && urls.length === 0) {
-    errors.push('Delivery is enabled but no endpoint is set — add at least one webhook URL or turn delivery off.');
+
+  const isSlack = local.format === 'slack';
+  const slackToken = local.slack_bot_token.trim();
+  // Bot-token mode = a real token typed OR an untouched (masked) token carried
+  // over from load. Either way the backend will use the Web API → needs channel.
+  const slackBotMode = isSlack && slackToken.length > 0;
+
+  if (!isSlack) {
+    // Usability invariant: enabling delivery with no endpoint is a no-op trap.
+    if (local.enabled && urls.length === 0) {
+      errors.push('Delivery is enabled but no endpoint is set — add at least one webhook URL or turn delivery off.');
+    }
+  } else {
+    if (slackBotMode) {
+      // Bot-token mode posts via the Web API to a specific channel.
+      if (local.slack_channel.trim().length === 0) {
+        errors.push('Slack bot-token mode needs a channel.');
+      }
+    } else if (local.enabled && urls.length === 0) {
+      // Webhook mode: the hooks.slack.com URL is the only delivery path.
+      errors.push('Delivery is enabled but no Slack Incoming Webhook URL is set — add the hooks.slack.com URL or turn delivery off.');
+    }
+    // Basic glob sanity (backend warns on the rest — don't over-validate).
+    for (const g of [...local.slack_include_globs, ...local.slack_exclude_globs]) {
+      if (g.trim().length === 0) {
+        errors.push('A Slack prefix filter is empty — remove the blank row or fill it in.');
+      }
+    }
+    if (local.slack_notify_kinds.length === 0) {
+      errors.push('Pick at least one event kind to post to Slack.');
+    }
   }
 
   // Header validation + secret-sentinel guard.
@@ -207,6 +294,20 @@ function buildEventDeliveryPayload(
     }
   }
 
+  // Bot token: sentinel = "unchanged" (pass through, server restores the real
+  // token); a real typed value overwrites; empty/whitespace clears to null.
+  const tokenTrim = local.slack_bot_token.trim();
+  const slackBotToken: string | null =
+    local.slack_bot_token === WEBHOOK_REDACTED_SENTINEL
+      ? WEBHOOK_REDACTED_SENTINEL
+      : tokenTrim.length > 0
+        ? tokenTrim
+        : null;
+  const strOrNull = (v: string): string | null => {
+    const t = v.trim();
+    return t.length > 0 ? t : null;
+  };
+
   const body: AdvancedSectionWebhookBody = {
     event_delivery: {
       enabled: local.enabled,
@@ -224,6 +325,15 @@ function buildEventDeliveryPayload(
       delivered_retention: local.delivered_retention.trim(),
       delivered_max_rows: local.delivered_max_rows,
       prune_batch: local.prune_batch,
+      // Slack — always emitted so the merge-patch reflects the editor's intent.
+      format: local.format,
+      slack_bot_token: slackBotToken,
+      slack_channel: strOrNull(local.slack_channel),
+      slack_username: strOrNull(local.slack_username),
+      slack_icon_emoji: strOrNull(local.slack_icon_emoji),
+      slack_include_globs: local.slack_include_globs.map((g) => g.trim()).filter((g) => g.length > 0),
+      slack_exclude_globs: local.slack_exclude_globs.map((g) => g.trim()).filter((g) => g.length > 0),
+      slack_notify_kinds: [...local.slack_notify_kinds],
     },
   };
 
@@ -243,6 +353,14 @@ function buildEventDeliveryPayload(
 export interface WebhookUrlRow {
   id: string;
   url: string;
+}
+
+/** A stable-id glob row for the Slack include/exclude prefix filters. Same
+ *  id-keyed pattern as {@link WebhookUrlRow} so React keys stay stable across
+ *  edits (never array index — see the admin-editor bug class). */
+export interface SlackGlobRow {
+  id: string;
+  glob: string;
 }
 
 export interface WebhookHeaderRow {
@@ -276,6 +394,27 @@ export interface WebhookFormState {
   delivered_retention: string;
   delivered_max_rows: number;
   prune_batch: number;
+  // ── Slack ──
+  /** `raw` (existing JSON envelope) or `slack` (Block Kit message). */
+  format: EventDeliveryFormat;
+  /**
+   * UI-only: which Slack sub-mode the operator is editing (Incoming Webhook vs
+   * Bot token). The BACKEND mode is derived from whether a token is present, so
+   * this is never sent on the wire (`buildPayloadFromForm` ignores it). It lives
+   * on the editor value — the single source of truth — so the toggle stays sticky
+   * even while the bot-token field is momentarily empty. Initialised from token
+   * presence in `formFromWire`. */
+  slackPreferBotMode: boolean;
+  /** Bot token. Equals the sentinel while an untouched secret is masked. */
+  slackBotToken: string;
+  /** True while `slackBotToken` is still the server sentinel (untouched). */
+  slackBotTokenMasked: boolean;
+  slackChannel: string;
+  slackUsername: string;
+  slackIconEmoji: string;
+  slackIncludeRows: SlackGlobRow[];
+  slackExcludeRows: SlackGlobRow[];
+  slackNotifyKinds: string[];
 }
 
 // Deterministic id generator INJECTED by the caller so this module stays pure
@@ -309,6 +448,17 @@ export function formFromWire(
     delivered_retention: cfg.delivered_retention,
     delivered_max_rows: cfg.delivered_max_rows,
     prune_batch: cfg.prune_batch,
+    format: cfg.format,
+    // Bot mode iff a token (real or masked) is present at load.
+    slackPreferBotMode: cfg.slack_bot_token.trim().length > 0,
+    slackBotToken: cfg.slack_bot_token,
+    slackBotTokenMasked: cfg.slack_bot_token === WEBHOOK_REDACTED_SENTINEL,
+    slackChannel: cfg.slack_channel,
+    slackUsername: cfg.slack_username,
+    slackIconEmoji: cfg.slack_icon_emoji,
+    slackIncludeRows: cfg.slack_include_globs.map((glob) => ({ id: nextId(), glob })),
+    slackExcludeRows: cfg.slack_exclude_globs.map((glob) => ({ id: nextId(), glob })),
+    slackNotifyKinds: [...cfg.slack_notify_kinds],
   };
 }
 
@@ -330,6 +480,12 @@ export function buildPayloadFromForm(form: WebhookFormState): ValidationResult {
     }
   }
 
+  // Bot token: a still-masked field carries the sentinel through so the server
+  // restores the real token; a retyped (unmasked) field carries the literal.
+  const slackBotToken = form.slackBotTokenMasked
+    ? WEBHOOK_REDACTED_SENTINEL
+    : form.slackBotToken;
+
   const local: EventDeliveryConfig = {
     enabled: form.enabled,
     webhook_urls: form.urlRows.map((r) => r.url),
@@ -344,6 +500,14 @@ export function buildPayloadFromForm(form: WebhookFormState): ValidationResult {
     delivered_retention: form.delivered_retention,
     delivered_max_rows: form.delivered_max_rows,
     prune_batch: form.prune_batch,
+    format: form.format,
+    slack_bot_token: slackBotToken,
+    slack_channel: form.slackChannel,
+    slack_username: form.slackUsername,
+    slack_icon_emoji: form.slackIconEmoji,
+    slack_include_globs: form.slackIncludeRows.map((r) => r.glob),
+    slack_exclude_globs: form.slackExcludeRows.map((r) => r.glob),
+    slack_notify_kinds: [...form.slackNotifyKinds],
   };
   for (const h of form.headerRows) {
     const name = h.name.trim();

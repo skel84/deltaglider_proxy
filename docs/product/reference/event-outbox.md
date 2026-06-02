@@ -101,6 +101,63 @@ Each POST body is JSON:
 }
 ```
 
+## Slack notifications
+
+Set `event_delivery.format: slack` to deliver Slack messages instead of the raw
+`{schema,event}` envelope. **No OAuth is required** — you paste a credential, so
+this works even when the proxy runs at a private/internal address (delivery is
+outbound HTTPS only). This mirrors how Grafana, self-hosted Sentry, and GitLab CE
+do Slack notifications.
+
+Two modes — pick one:
+
+**Incoming Webhook (simplest, single channel).** In Slack: create an app → enable
+*Incoming Webhooks* → pick a channel → copy the `https://hooks.slack.com/services/…`
+URL into `webhook_url`.
+
+```yaml
+event_delivery:
+  enabled: true
+  format: slack
+  webhook_url: "https://hooks.slack.com/services/T000/B000/XXXX"
+  slack_username: "DeltaGlider"      # optional cosmetic override
+  slack_icon_emoji: ":package:"      # optional
+```
+
+**Bot token (multi-channel + @mentions).** In Slack: create an app → add the
+`chat:write` and `chat:write.public` scopes → install to the workspace → copy the
+`xoxb-…` Bot User OAuth Token. Set it with a target channel (no webhook URL):
+
+```yaml
+event_delivery:
+  enabled: true
+  format: slack
+  slack_bot_token: "xoxb-…"          # secret: masked on export, preserved untouched
+  slack_channel: "C0123456"          # channel id or #name (required in this mode)
+```
+
+The bot token is treated like any other secret: it is masked to `__redacted__` on
+export and in the admin GUI, and an unchanged round-trip preserves the real token.
+The Slack Web API returns HTTP 200 even on failure, so delivery checks the JSON
+`ok` field and retries on `{"ok": false}` (e.g. `channel_not_found`).
+
+**What gets posted.** By default only `ObjectCreated` notifies. Widen or scope it:
+
+```yaml
+  slack_notify_kinds: ["ObjectCreated", "ObjectDeleted"]
+  slack_include_globs: ["builds/**"]   # empty = all user objects
+  slack_exclude_globs: ["**/*.tmp"]    # exclude wins over include
+```
+
+Directory markers and DeltaGlider internals (`reference.bin`, `*.delta`,
+`.deltaglider/*`) are never posted. Each message is Block Kit (header + object
+section + context line with size / storage strategy / timestamp) plus a plain
+`text` fallback for notifications and screen readers.
+
+All of this is editable from the admin GUI at **Configuration → Advanced →
+Webhook delivery** (toggle the format to *Slack*) — including a live preview of
+the message that will land in the channel.
+
 ## Admin API
 
 All routes are session-gated.

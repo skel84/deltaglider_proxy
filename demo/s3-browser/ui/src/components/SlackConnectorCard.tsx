@@ -1,0 +1,606 @@
+/**
+ * SlackConnectorCard — the `format: slack` editor for `advanced.event_delivery`.
+ *
+ * Renders INSIDE WebhookDeliveryPanel and edits the SAME `useSectionEditor`
+ * value: the panel passes the live `form` down plus a `setField` patcher and the
+ * per-instance `nextId` row-id counter. There is NO parallel state mirror here
+ * (that's the documented admin-editor bug class) — every control reads from
+ * `form` and writes through `setField`, so discard / dirty-dot / ⌘S stay correct.
+ *
+ * ## Two delivery modes (mode is DERIVED, but the operator picks which to set up)
+ *
+ * - **Incoming Webhook** (no bot token): a `hooks.slack.com/services/…` URL bound
+ *   to one channel. Simplest; reuses the existing `webhook_urls` row editor.
+ * - **Bot token** (`xoxb-…` set): posts via the Slack Web API to `slack_channel`;
+ *   supports multiple channels + `@mentions`. Requires a channel.
+ *
+ * The mode toggle just clears/keeps the token so the derived backend mode follows
+ * what the operator is editing. The masked bot-token field mirrors the header
+ * secret UX: a server-masked token shows a "unchanged — type to replace"
+ * placeholder; typing unmasks it (`slackBotTokenMasked → false`).
+ *
+ * No tooltips/popovers (globally disabled in this layout) — native `title=`. No
+ * AntD Select popups (broken here) — checkboxes / Radio.Button only.
+ */
+import { useMemo } from 'react';
+import { Alert, Button, Checkbox, Input, Radio, Space, Typography } from 'antd';
+import { DeleteOutlined, PlusOutlined, SlackOutlined } from '@ant-design/icons';
+import { useColors } from '../ThemeContext';
+import { useCardStyles } from './shared-styles';
+import SectionHeader from './SectionHeader';
+import FormField from './FormField';
+import { AdvancedDisclosure } from './ruleEditorFields';
+import {
+  SLACK_NOTIFY_KINDS,
+  type WebhookFormState,
+  type WebhookUrlRow,
+  type SlackGlobRow,
+} from './webhookDeliveryPayload';
+
+const { Text } = Typography;
+
+/** Which mode the operator is currently editing — derived from token presence. */
+type SlackMode = 'webhook' | 'bot';
+
+interface Props {
+  form: WebhookFormState;
+  setField: (patch: Partial<WebhookFormState>) => void;
+  nextId: () => string;
+  /** Live validation errors that belong to the Slack card (shown inline). */
+  errors: string[];
+  inputRadius: React.CSSProperties;
+  /** Mutators for the shared webhook_urls rows (reused for the hooks.slack URL). */
+  updateUrl: (id: string, url: string) => void;
+  addUrl: () => void;
+  removeUrl: (id: string) => void;
+}
+
+const APP_LINK = 'https://api.slack.com/apps?new_app=1';
+
+export default function SlackConnectorCard({
+  form,
+  setField,
+  nextId,
+  errors,
+  inputRadius,
+  updateUrl,
+  addUrl,
+  removeUrl,
+}: Props) {
+  const { cardStyle } = useCardStyles();
+  const colors = useColors();
+
+  // Display mode = the operator's UI choice (sticky even with an empty token
+  // field). The BACKEND mode is derived from token presence at payload-build
+  // time — leaving webhook mode clears the token so the two stay consistent.
+  const mode: SlackMode = form.slackPreferBotMode ? 'bot' : 'webhook';
+
+  const setMode = (next: SlackMode) => {
+    if (next === mode) return;
+    if (next === 'webhook') {
+      // Leaving bot mode: drop the token so the backend resolves to webhook mode.
+      setField({ slackPreferBotMode: false, slackBotToken: '', slackBotTokenMasked: false });
+    } else {
+      // Enter bot mode; the token field below captures the xoxb- value.
+      setField({ slackPreferBotMode: true });
+    }
+  };
+
+  // ── Glob row mutators (stable-id keyed, never array index) ──
+  const updateGlob = (
+    key: 'slackIncludeRows' | 'slackExcludeRows',
+    id: string,
+    glob: string,
+  ) =>
+    setField({
+      [key]: form[key].map((r) => (r.id === id ? { ...r, glob } : r)),
+    } as Partial<WebhookFormState>);
+  const addGlob = (key: 'slackIncludeRows' | 'slackExcludeRows') =>
+    setField({
+      [key]: [...form[key], { id: nextId(), glob: '' } as SlackGlobRow],
+    } as Partial<WebhookFormState>);
+  const removeGlob = (key: 'slackIncludeRows' | 'slackExcludeRows', id: string) =>
+    setField({
+      [key]: form[key].filter((r) => r.id !== id),
+    } as Partial<WebhookFormState>);
+
+  const toggleKind = (kind: string, on: boolean) => {
+    const set = new Set(form.slackNotifyKinds);
+    if (on) set.add(kind);
+    else set.delete(kind);
+    // Preserve canonical ordering so the YAML diff stays stable.
+    setField({ slackNotifyKinds: SLACK_NOTIFY_KINDS.filter((k) => set.has(k)) });
+  };
+
+  return (
+    <div style={cardStyle}>
+      <SectionHeader
+        icon={<SlackOutlined />}
+        title="Slack connector"
+        description="Post object events to a Slack channel as a formatted message. No restart — applies live."
+      />
+
+      {/* No-OAuth callout */}
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginTop: 16 }}
+        message="No OAuth needed — paste a credential."
+        description="Works on private / internal instances (outbound HTTPS only). Slack never needs to reach back to this proxy."
+      />
+
+      {errors.length > 0 && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginTop: 12 }}
+          message="Fix these before applying"
+          description={
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {errors.map((e, i) => (
+                <li key={i}>{e}</li>
+              ))}
+            </ul>
+          }
+        />
+      )}
+
+      {/* Mode sub-toggle */}
+      <div style={{ marginTop: 16 }}>
+        <FormField
+          label="How to connect"
+          helpText="Incoming Webhook is the quickest. Use a bot token when you need multiple channels or @mentions."
+        >
+          <Radio.Group
+            value={mode}
+            onChange={(e) => setMode(e.target.value as SlackMode)}
+            style={{ display: 'flex', gap: 0 }}
+          >
+            <Radio.Button value="webhook" style={{ fontSize: 13 }} title="Post via a hooks.slack.com Incoming Webhook URL">
+              Incoming Webhook (simplest)
+            </Radio.Button>
+            <Radio.Button value="bot" style={{ fontSize: 13 }} title="Post via the Slack Web API with a bot token">
+              Bot token (multi-channel + @mentions)
+            </Radio.Button>
+          </Radio.Group>
+        </FormField>
+      </div>
+
+      {mode === 'webhook' ? (
+        <WebhookModeFields
+          form={form}
+          inputRadius={inputRadius}
+          updateUrl={updateUrl}
+          addUrl={addUrl}
+          removeUrl={removeUrl}
+          setField={setField}
+          colors={colors}
+        />
+      ) : (
+        <BotModeFields form={form} setField={setField} inputRadius={inputRadius} colors={colors} />
+      )}
+
+      {/* What gets posted */}
+      <AdvancedDisclosure title="What gets posted (event kinds + prefix filters)">
+        <FormField
+          label="Event kinds"
+          yamlPath="advanced.event_delivery.slack_notify_kinds"
+          helpText="Only these event kinds are posted to Slack. ObjectCreated is the default."
+        >
+          <Space direction="vertical" size={4} style={{ width: '100%' }}>
+            {SLACK_NOTIFY_KINDS.map((kind) => (
+              <Checkbox
+                key={kind}
+                checked={form.slackNotifyKinds.includes(kind)}
+                onChange={(e) => toggleKind(kind, e.target.checked)}
+              >
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>{kind}</span>
+              </Checkbox>
+            ))}
+          </Space>
+        </FormField>
+
+        <GlobRowsField
+          label="Include prefixes"
+          yamlPath="advanced.event_delivery.slack_include_globs"
+          helpText="Only keys matching at least one glob notify Slack. Empty = every key."
+          rows={form.slackIncludeRows}
+          onUpdate={(id, g) => updateGlob('slackIncludeRows', id, g)}
+          onAdd={() => addGlob('slackIncludeRows')}
+          onRemove={(id) => removeGlob('slackIncludeRows', id)}
+          inputRadius={inputRadius}
+          placeholder="releases/**"
+        />
+        <GlobRowsField
+          label="Exclude prefixes"
+          yamlPath="advanced.event_delivery.slack_exclude_globs"
+          helpText="Keys matching any of these are never posted (exclude wins over include)."
+          rows={form.slackExcludeRows}
+          onUpdate={(id, g) => updateGlob('slackExcludeRows', id, g)}
+          onAdd={() => addGlob('slackExcludeRows')}
+          onRemove={(id) => removeGlob('slackExcludeRows', id)}
+          inputRadius={inputRadius}
+          placeholder="tmp/**"
+        />
+      </AdvancedDisclosure>
+
+      {/* Live preview */}
+      <div style={{ marginTop: 20 }}>
+        <Text
+          type="secondary"
+          style={{
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: 0.5,
+            textTransform: 'uppercase',
+            display: 'block',
+            marginBottom: 8,
+          }}
+        >
+          Live preview — what lands in the channel
+        </Text>
+        <SlackPreview form={form} mode={mode} colors={colors} />
+      </div>
+
+      <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 12 }}>
+        Need an app?{' '}
+        <a href={APP_LINK} target="_blank" rel="noreferrer">
+          Create a Slack app →
+        </a>
+      </Text>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Mode-specific field groups
+// ─────────────────────────────────────────────────────────────────────────
+
+function MiniGuide({ steps }: { steps: string[] }) {
+  const { TEXT_MUTED, BORDER } = useColors();
+  return (
+    <ol
+      style={{
+        margin: '0 0 12px',
+        paddingLeft: 0,
+        listStyle: 'none',
+        counterReset: 'slk',
+        borderLeft: `2px solid ${BORDER}`,
+      }}
+    >
+      {steps.map((s, i) => (
+        <li
+          key={i}
+          style={{
+            counterIncrement: 'slk',
+            position: 'relative',
+            paddingLeft: 28,
+            marginBottom: 6,
+            fontSize: 12,
+            color: TEXT_MUTED,
+            lineHeight: 1.4,
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              position: 'absolute',
+              left: 8,
+              top: 0,
+              fontWeight: 700,
+              fontFamily: 'var(--font-mono)',
+            }}
+          >
+            {i + 1}.
+          </span>
+          {s}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function WebhookModeFields({
+  form,
+  inputRadius,
+  updateUrl,
+  addUrl,
+  removeUrl,
+  setField,
+  colors,
+}: {
+  form: WebhookFormState;
+  inputRadius: React.CSSProperties;
+  updateUrl: (id: string, url: string) => void;
+  addUrl: () => void;
+  removeUrl: (id: string) => void;
+  setField: (patch: Partial<WebhookFormState>) => void;
+  colors: ReturnType<typeof useColors>;
+}) {
+  return (
+    <div style={{ marginTop: 8 }}>
+      <MiniGuide
+        steps={[
+          'Create a Slack app (or open an existing one).',
+          'Enable “Incoming Webhooks” and add one for your channel.',
+          'Paste the hooks.slack.com webhook URL below.',
+        ]}
+      />
+      <FormField
+        label="Incoming Webhook URL"
+        yamlPath="advanced.event_delivery.webhook_urls"
+        helpText="The hooks.slack.com/services/… URL Slack generated. Each URL posts to its own bound channel."
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          {form.urlRows.length === 0 && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              No webhook URL yet. Add the one Slack gave you.
+            </Text>
+          )}
+          {form.urlRows.map((row: WebhookUrlRow) => (
+            <Space.Compact key={row.id} style={{ width: '100%' }}>
+              <Input
+                value={row.url}
+                onChange={(e) => updateUrl(row.id, e.target.value)}
+                placeholder="https://hooks.slack.com/services/T000/B000/xxxx"
+                style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+              />
+              <Button
+                icon={<DeleteOutlined />}
+                onClick={() => removeUrl(row.id)}
+                title="Remove webhook URL"
+              />
+            </Space.Compact>
+          ))}
+          <Button icon={<PlusOutlined />} onClick={addUrl} size="small">
+            Add webhook URL
+          </Button>
+        </Space>
+      </FormField>
+
+      <FormField
+        label="Sender name (optional)"
+        yamlPath="advanced.event_delivery.slack_username"
+        helpText="Overrides the display name the message posts as. Webhook mode only."
+      >
+        <Input
+          value={form.slackUsername}
+          onChange={(e) => setField({ slackUsername: e.target.value })}
+          placeholder="DeltaGlider"
+          style={{ ...inputRadius, fontSize: 13, maxWidth: 280 }}
+        />
+      </FormField>
+
+      <FormField
+        label="Icon emoji (optional)"
+        yamlPath="advanced.event_delivery.slack_icon_emoji"
+        helpText="A Slack emoji shortcode used as the avatar, e.g. :package:. Webhook mode only."
+      >
+        <Input
+          value={form.slackIconEmoji}
+          onChange={(e) => setField({ slackIconEmoji: e.target.value })}
+          placeholder=":package:"
+          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 200, color: colors.TEXT_PRIMARY }}
+        />
+      </FormField>
+    </div>
+  );
+}
+
+function BotModeFields({
+  form,
+  setField,
+  inputRadius,
+  colors,
+}: {
+  form: WebhookFormState;
+  setField: (patch: Partial<WebhookFormState>) => void;
+  inputRadius: React.CSSProperties;
+  colors: ReturnType<typeof useColors>;
+}) {
+  return (
+    <div style={{ marginTop: 8 }}>
+      <MiniGuide
+        steps={[
+          'Create a Slack app (or open an existing one).',
+          'Add the chat:write and chat:write.public bot scopes.',
+          'Install the app to your workspace.',
+          'Paste the xoxb- bot token and the target channel below.',
+        ]}
+      />
+      <FormField
+        label="Bot token"
+        yamlPath="advanced.event_delivery.slack_bot_token"
+        helpText="The xoxb-… token from OAuth & Permissions. Stored encrypted and shown masked; leave it untouched to keep the current one."
+      >
+        <Input.Password
+          value={form.slackBotTokenMasked ? '' : form.slackBotToken}
+          onChange={(e) =>
+            // Typing unmasks: it's now a real, operator-entered value.
+            setField({ slackBotToken: e.target.value, slackBotTokenMasked: false })
+          }
+          placeholder={
+            form.slackBotTokenMasked
+              ? '•••••••• (unchanged — type to replace)'
+              : 'xoxb-…'
+          }
+          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 420, color: colors.TEXT_PRIMARY }}
+        />
+      </FormField>
+
+      <FormField
+        label="Channel"
+        yamlPath="advanced.event_delivery.slack_channel"
+        helpText="Channel id (like C0123ABC) or #name. Required in bot-token mode."
+      >
+        <Input
+          value={form.slackChannel}
+          onChange={(e) => setField({ slackChannel: e.target.value })}
+          placeholder="#deploys or C0123ABC"
+          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 280 }}
+        />
+      </FormField>
+    </div>
+  );
+}
+
+function GlobRowsField({
+  label,
+  yamlPath,
+  helpText,
+  rows,
+  onUpdate,
+  onAdd,
+  onRemove,
+  inputRadius,
+  placeholder,
+}: {
+  label: string;
+  yamlPath: string;
+  helpText: string;
+  rows: SlackGlobRow[];
+  onUpdate: (id: string, glob: string) => void;
+  onAdd: () => void;
+  onRemove: (id: string) => void;
+  inputRadius: React.CSSProperties;
+  placeholder: string;
+}) {
+  return (
+    <FormField label={label} yamlPath={yamlPath} helpText={helpText}>
+      <Space direction="vertical" style={{ width: '100%' }}>
+        {rows.length === 0 && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            None.
+          </Text>
+        )}
+        {rows.map((row) => (
+          <Space.Compact key={row.id} style={{ width: '100%', maxWidth: 420 }}>
+            <Input
+              value={row.glob}
+              onChange={(e) => onUpdate(row.id, e.target.value)}
+              placeholder={placeholder}
+              style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+            />
+            <Button icon={<DeleteOutlined />} onClick={() => onRemove(row.id)} title="Remove glob" />
+          </Space.Compact>
+        ))}
+        <Button icon={<PlusOutlined />} onClick={onAdd} size="small">
+          Add prefix glob
+        </Button>
+      </Space>
+    </FormField>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Live faux-Slack preview — rendered purely client-side from current settings.
+// ─────────────────────────────────────────────────────────────────────────
+
+function SlackPreview({
+  form,
+  mode,
+  colors,
+}: {
+  form: WebhookFormState;
+  mode: SlackMode;
+  colors: ReturnType<typeof useColors>;
+}) {
+  // Slack's surfaces are always light; render a fixed light card so the preview
+  // reads as "this is what Slack shows", independent of the admin theme.
+  const appName =
+    mode === 'webhook' && form.slackUsername.trim() ? form.slackUsername.trim() : 'DeltaGlider';
+  const kind = form.slackNotifyKinds[0] ?? 'ObjectCreated';
+  const channelLabel = useMemo(() => {
+    if (mode === 'bot') {
+      const c = form.slackChannel.trim();
+      return c ? (c.startsWith('#') || c.startsWith('C') ? c : `#${c}`) : '#your-channel';
+    }
+    return 'webhook channel';
+  }, [mode, form.slackChannel]);
+
+  const verb =
+    kind === 'ObjectDeleted'
+      ? 'Deleted'
+      : kind === 'ObjectCopied' || kind === 'ReplicationObjectCopied'
+        ? 'Copied'
+        : kind === 'LifecycleExpired'
+          ? 'Expired'
+          : kind === 'LifecycleTransitioned'
+            ? 'Transitioned'
+            : 'New object';
+
+  return (
+    <div
+      style={{
+        background: '#ffffff',
+        border: `1px solid ${colors.BORDER}`,
+        borderRadius: 10,
+        padding: 14,
+        display: 'flex',
+        gap: 10,
+        fontFamily:
+          'Slack-Lato, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        color: '#1d1c1d',
+        boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
+      }}
+    >
+      {/* Avatar */}
+      <div
+        style={{
+          width: 36,
+          height: 36,
+          borderRadius: 8,
+          background: '#4a154b',
+          color: '#fff',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 18,
+          flexShrink: 0,
+        }}
+        aria-hidden="true"
+      >
+        📦
+      </div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+          <span style={{ fontWeight: 700, fontSize: 13 }}>{appName}</span>
+          <span
+            style={{
+              fontSize: 10,
+              background: '#e8e8e8',
+              color: '#616061',
+              borderRadius: 3,
+              padding: '0 4px',
+              fontWeight: 700,
+            }}
+          >
+            APP
+          </span>
+          <span style={{ fontSize: 11, color: '#616061' }}>just now</span>
+        </div>
+        <div style={{ fontSize: 13, lineHeight: 1.45 }}>
+          <div style={{ fontWeight: 700, marginBottom: 2 }}>
+            📦 {verb} in <span style={{ color: '#1264a3' }}>{channelLabel}</span>
+          </div>
+          <div>
+            <span style={{ fontWeight: 700 }}>my-bucket</span>{' '}
+            <code
+              style={{
+                background: '#f6f6f6',
+                border: '1px solid #e0e0e0',
+                borderRadius: 3,
+                padding: '0 4px',
+                fontSize: 12,
+                color: '#c0392b',
+              }}
+            >
+              releases/app-v1.2.0.tar.gz
+            </code>
+          </div>
+          <div style={{ color: '#616061', fontSize: 12, marginTop: 2 }}>2.4 MB · application/gzip</div>
+        </div>
+      </div>
+    </div>
+  );
+}

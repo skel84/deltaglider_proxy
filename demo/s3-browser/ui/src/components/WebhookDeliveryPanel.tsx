@@ -26,6 +26,7 @@ import {
   Button,
   Input,
   InputNumber,
+  Radio,
   Space,
   Switch,
   Tag,
@@ -41,6 +42,7 @@ import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import ApplyDialog from './ApplyDialog';
 import { AdvancedDisclosure } from './ruleEditorFields';
+import SlackConnectorCard from './SlackConnectorCard';
 import {
   formFromWire,
   buildPayloadFromForm,
@@ -71,6 +73,16 @@ const EMPTY_FORM: WebhookFormState = {
   delivered_retention: '24h',
   delivered_max_rows: 10000,
   prune_batch: 100,
+  format: 'raw',
+  slackPreferBotMode: false,
+  slackBotToken: '',
+  slackBotTokenMasked: false,
+  slackChannel: '',
+  slackUsername: '',
+  slackIconEmoji: '',
+  slackIncludeRows: [],
+  slackExcludeRows: [],
+  slackNotifyKinds: ['ObjectCreated'],
 };
 
 function PanelShell({ children }: { children: React.ReactNode }) {
@@ -233,7 +245,9 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
         />
       )}
 
-      {liveErrors.length > 0 && (
+      {/* Raw-mode errors surface here; Slack-mode errors render inline in the
+          connector card (single surface either way — no duplication). */}
+      {form.format === 'raw' && liveErrors.length > 0 && (
         <Alert
           type="error"
           showIcon
@@ -275,12 +289,12 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
         />
       )}
 
-      {/* Master switch + endpoints */}
+      {/* Master switch + format selector */}
       <div style={cardStyle}>
         <SectionHeader
           icon={<SendOutlined />}
-          title="Webhook delivery"
-          description="Deliver durable object events (create/delete/copy) to HTTP endpoints. The outbox accrues events even while disabled — they deliver once you enable + add an endpoint."
+          title="Event delivery"
+          description="Deliver durable object events (create/delete/copy) downstream. The outbox accrues events even while disabled — they deliver once you enable + configure a destination."
         />
         <div style={{ marginTop: 16 }}>
           <FormField label="Enable delivery" yamlPath="advanced.event_delivery.enabled">
@@ -288,76 +302,115 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
           </FormField>
 
           <FormField
-            label="Endpoints"
-            yamlPath="advanced.event_delivery.webhook_urls"
-            helpText="HTTP(S) URLs that receive a deltaglider.event.v1 JSON payload. An event is marked delivered only after every endpoint returns 2xx."
+            label="Payload format"
+            yamlPath="advanced.event_delivery.format"
+            helpText="Raw posts the deltaglider.event.v1 JSON envelope to your endpoints. Slack formats each event as a chat message."
           >
-            <Space direction="vertical" style={{ width: '100%' }}>
-              {form.urlRows.length === 0 && (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  No endpoints. Add one to start delivering.
-                </Text>
-              )}
-              {form.urlRows.map((row) => (
-                <Space.Compact key={row.id} style={{ width: '100%' }}>
-                  <Input
-                    value={row.url}
-                    onChange={(e) => updateUrl(row.id, e.target.value)}
-                    placeholder="https://hooks.example.com/deltaglider"
-                    style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
-                  />
-                  <Button
-                    icon={<DeleteOutlined />}
-                    onClick={() => removeUrl(row.id)}
-                    title="Remove endpoint"
-                  />
-                </Space.Compact>
-              ))}
-              <Button icon={<PlusOutlined />} onClick={addUrl} size="small">
-                Add endpoint
-              </Button>
-            </Space>
+            <Radio.Group
+              value={form.format}
+              onChange={(e) => setField({ format: e.target.value as 'raw' | 'slack' })}
+              style={{ display: 'flex', gap: 0 }}
+            >
+              <Radio.Button value="raw" style={{ fontSize: 13 }} title="Raw JSON webhook payload">
+                Raw webhook
+              </Radio.Button>
+              <Radio.Button value="slack" style={{ fontSize: 13 }} title="Format events as Slack messages">
+                Slack
+              </Radio.Button>
+            </Radio.Group>
           </FormField>
 
-          <FormField
-            label="Headers"
-            yamlPath="advanced.event_delivery.webhook_headers"
-            helpText="Static headers sent with every request — e.g. an Authorization bearer token. Values are stored encrypted and shown masked; leave a masked value untouched to keep it."
-          >
-            <Space direction="vertical" style={{ width: '100%' }}>
-              {form.headerRows.length === 0 && (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  No headers.
-                </Text>
-              )}
-              {form.headerRows.map((row) => (
-                <Space.Compact key={row.id} style={{ width: '100%' }}>
-                  <Input
-                    value={row.name}
-                    onChange={(e) => updateHeader(row.id, { name: e.target.value })}
-                    placeholder="Authorization"
-                    style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, width: '40%' }}
-                  />
-                  <Input
-                    value={row.masked ? '' : row.value}
-                    onChange={(e) => updateHeader(row.id, { value: e.target.value })}
-                    placeholder={row.masked ? '•••••••• (unchanged — type to replace)' : 'Bearer …'}
-                    style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
-                  />
-                  <Button
-                    icon={<DeleteOutlined />}
-                    onClick={() => removeHeader(row.id)}
-                    title="Remove header"
-                  />
-                </Space.Compact>
-              ))}
-              <Button icon={<PlusOutlined />} onClick={addHeader} size="small">
-                Add header
-              </Button>
-            </Space>
-          </FormField>
+          {/* Raw mode: endpoints + headers. Slack mode hides these — headers
+              don't apply to the Slack connector. */}
+          {form.format === 'raw' && (
+            <>
+              <FormField
+                label="Endpoints"
+                yamlPath="advanced.event_delivery.webhook_urls"
+                helpText="HTTP(S) URLs that receive a deltaglider.event.v1 JSON payload. An event is marked delivered only after every endpoint returns 2xx."
+              >
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {form.urlRows.length === 0 && (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      No endpoints. Add one to start delivering.
+                    </Text>
+                  )}
+                  {form.urlRows.map((row) => (
+                    <Space.Compact key={row.id} style={{ width: '100%' }}>
+                      <Input
+                        value={row.url}
+                        onChange={(e) => updateUrl(row.id, e.target.value)}
+                        placeholder="https://hooks.example.com/deltaglider"
+                        style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+                      />
+                      <Button
+                        icon={<DeleteOutlined />}
+                        onClick={() => removeUrl(row.id)}
+                        title="Remove endpoint"
+                      />
+                    </Space.Compact>
+                  ))}
+                  <Button icon={<PlusOutlined />} onClick={addUrl} size="small">
+                    Add endpoint
+                  </Button>
+                </Space>
+              </FormField>
+
+              <FormField
+                label="Headers"
+                yamlPath="advanced.event_delivery.webhook_headers"
+                helpText="Static headers sent with every request — e.g. an Authorization bearer token. Values are stored encrypted and shown masked; leave a masked value untouched to keep it."
+              >
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {form.headerRows.length === 0 && (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      No headers.
+                    </Text>
+                  )}
+                  {form.headerRows.map((row) => (
+                    <Space.Compact key={row.id} style={{ width: '100%' }}>
+                      <Input
+                        value={row.name}
+                        onChange={(e) => updateHeader(row.id, { name: e.target.value })}
+                        placeholder="Authorization"
+                        style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, width: '40%' }}
+                      />
+                      <Input
+                        value={row.masked ? '' : row.value}
+                        onChange={(e) => updateHeader(row.id, { value: e.target.value })}
+                        placeholder={row.masked ? '•••••••• (unchanged — type to replace)' : 'Bearer …'}
+                        style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+                      />
+                      <Button
+                        icon={<DeleteOutlined />}
+                        onClick={() => removeHeader(row.id)}
+                        title="Remove header"
+                      />
+                    </Space.Compact>
+                  ))}
+                  <Button icon={<PlusOutlined />} onClick={addHeader} size="small">
+                    Add header
+                  </Button>
+                </Space>
+              </FormField>
+            </>
+          )}
         </div>
       </div>
+
+      {/* Slack connector — edits the SAME form value (single source of truth). */}
+      {form.format === 'slack' && (
+        <SlackConnectorCard
+          form={form}
+          setField={setField}
+          nextId={nextId}
+          errors={liveErrors}
+          inputRadius={inputRadius}
+          updateUrl={updateUrl}
+          addUrl={addUrl}
+          removeUrl={removeUrl}
+        />
+      )}
 
       {/* Advanced tuning */}
       <div style={cardStyle}>

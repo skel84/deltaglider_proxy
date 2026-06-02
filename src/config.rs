@@ -2044,6 +2044,11 @@ impl Config {
         for value in export.event_delivery.webhook_headers.values_mut() {
             *value = REDACTED_SENTINEL.to_string();
         }
+        // Slack bot token is a secret too — mask it (keep Some so the GUI shows a
+        // token IS configured), preserved on an untouched round-trip.
+        if export.event_delivery.slack_bot_token.is_some() {
+            export.event_delivery.slack_bot_token = Some(REDACTED_SENTINEL.to_string());
+        }
         export
     }
 
