@@ -120,6 +120,7 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
 
       {creating ? (
         <UserForm
+          key="new"
           user={null}
           onSaved={handleSaved}
           onCreated={handleCreated}

@@ -119,6 +119,7 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
 
   const detail = creating ? (
     <GroupForm
+      key="new"
       group={null}
       users={users}
       onSaved={handleSaved}
@@ -250,31 +251,24 @@ function GroupForm({ group, users, onSaved, onDeleted, onCancel, onSavingChange 
   const isEdit = group !== null;
   const { inputRadius } = useCardStyles();
 
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [permissions, setPermissions] = useState<PermissionRow[]>([]);
-  const [memberIds, setMemberIds] = useState<Set<number>>(new Set());
+  // Initialize from `group` once. The edit form is remounted with
+  // `key={selectedGroup.id}` (see render site), and the create form mounts
+  // fresh — so a keyed remount resets all state from these initializers. No
+  // prop→state sync effect needed (it was a redundant mirror of the prop).
+  const [name, setName] = useState(() => group?.name ?? '');
+  const [description, setDescription] = useState(() => group?.description ?? '');
+  const [permissions, setPermissions] = useState<PermissionRow[]>(() =>
+    group ? permissionsToRows(group.permissions) : [{ effect: 'Allow', actions: [], resources: '' }],
+  );
+  const [memberIds, setMemberIds] = useState<Set<number>>(
+    () => new Set(group?.member_ids ?? []),
+  );
   const [saving, setSavingState] = useState(false);
   const [deleting, setDeletingState] = useState(false);
   const [error, setError] = useState('');
 
   const setSaving = (v: boolean) => { setSavingState(v); onSavingChange?.(v); };
   const setDeleting = (v: boolean) => { setDeletingState(v); onSavingChange?.(v); };
-
-  useEffect(() => {
-    if (group) {
-      setName(group.name);
-      setDescription(group.description);
-      setPermissions(permissionsToRows(group.permissions));
-      setMemberIds(new Set(group.member_ids));
-    } else {
-      setName('');
-      setDescription('');
-      setPermissions([{ effect: 'Allow', actions: [], resources: '' }]);
-      setMemberIds(new Set());
-    }
-    setError('');
-  }, [group]);
 
   const handleSave = async () => {
     if (!name.trim()) { setError('Name is required'); return; }
