@@ -51,6 +51,7 @@ import ReplicationRuleFields from './ReplicationRuleFields';
 import ReplicationRuntimeDetails from './ReplicationRuntimeDetails';
 import ReplicationApplySummary from './ReplicationApplySummary';
 import { statusTone } from './replicationStatus';
+import { EmptyState } from './StatePlaceholders';
 
 const { Text } = Typography;
 
@@ -283,6 +284,7 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
               <Input
                 value={replication.tick_interval}
                 onChange={(e) => updateConfig({ tick_interval: e.target.value })}
+                placeholder="30s"
                 style={{ ...inputRadius, fontFamily: 'var(--font-mono)' }}
               />
               <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
@@ -293,6 +295,7 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
               <Input
                 value={replication.lease_ttl}
                 onChange={(e) => updateConfig({ lease_ttl: e.target.value })}
+                placeholder="60s"
                 style={{ ...inputRadius, fontFamily: 'var(--font-mono)' }}
               />
               <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
@@ -303,6 +306,7 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
               <Input
                 value={replication.heartbeat_interval}
                 onChange={(e) => updateConfig({ heartbeat_interval: e.target.value })}
+                placeholder="20s"
                 style={{ ...inputRadius, fontFamily: 'var(--font-mono)' }}
               />
               <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
@@ -426,20 +430,20 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
 
 function EmptyReplicationState({ onAdd }: { onAdd: () => void }) {
   return (
-    <div style={{ textAlign: 'center', padding: '48px 24px' }}>
-      <SyncOutlined style={{ fontSize: 32, opacity: 0.6 }} />
-      <div style={{ marginTop: 12 }}><Text strong>No object replication rules</Text></div>
-      <Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-        Add a source → destination rule to copy object data through the engine.
-      </Text>
-      <Space style={{ marginTop: 16 }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={onAdd}>
-          Add replication rule
-        </Button>
-        <Button href="/_/docs/reference-replication">
-          Read replication docs
-        </Button>
-      </Space>
-    </div>
+    <EmptyState
+      icon={<SyncOutlined />}
+      title="No object replication rules"
+      hint="Add a source → destination rule to copy object data through the engine."
+      action={
+        <Space>
+          <Button type="primary" icon={<PlusOutlined />} onClick={onAdd}>
+            Add replication rule
+          </Button>
+          <Button href="/_/docs/reference-replication">
+            Read replication docs
+          </Button>
+        </Space>
+      }
+    />
   );
 }

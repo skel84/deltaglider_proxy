@@ -48,41 +48,32 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
    */
   const [expandedConditions, setExpandedConditions] = useState<Set<string>>(() => new Set());
 
-  // Backfill stable ids on any row that arrived without one (literal presets,
-  // FALLBACK_PRESETS, inline spreads). Done in an effect + propagated upward so
-  // the id sticks in the controlled prop and stays constant across renders —
-  // the guard keeps it from looping once every row has an id.
+  // Adopt externally-supplied rows the component doesn't control the creation
+  // of (GroupsPanel's literal initial row, a backup-restored grant, hand-edited
+  // YAML loaded into the DB). Two normalizations the source can't do for us:
+  //   1. assign a stable `_uiId` to any id-less row, so every mutation below can
+  //      key by id (never array index) — this is the single source of "creation"
+  //      for rows that enter via the prop instead of the Add button.
+  //   2. strip a phantom `admin` from a prefix-scoped grant. The Admin chip is
+  //      disabled at prefix scope, so an `admin` (or `*`) that arrived that way
+  //      could never be revoked interactively. The WHERE handler reconciles on
+  //      every resource edit; this catches grants that load already-bad.
+  // Idempotent — both checks no-op once a row is clean, so it can't loop. Rows
+  // added via the Add button already carry an id, so they pass through untouched.
   useEffect(() => {
-    if (permissions.some((p) => !p._uiId)) {
-      onChange(
-        permissions.map((p) => (p._uiId ? p : { ...p, _uiId: freshPermissionRowId() })),
-      );
-    }
-  }, [permissions, onChange]);
-
-  // Normalize away any phantom `admin` on a prefix-scoped grant that arrived
-  // that way (loaded from the DB / hand-edited YAML / a pre-existing bad rule).
-  // The Admin chip is disabled in that case and so can't revoke it interactively
-  // — without this, an invalid `admin` would persist invisibly. Idempotent: only
-  // fires when a row actually needs fixing, so it can't loop.
-  useEffect(() => {
-    if (permissions.some((p) => {
-      const next = reconcileActionsForScope(p.actions, isPrefixScoped(p.resources));
-      return next !== p.actions;
-    })) {
+    const needsAdoption = permissions.some(
+      (p) => !p._uiId || reconcileActionsForScope(p.actions, isPrefixScoped(p.resources)) !== p.actions,
+    );
+    if (needsAdoption) {
       onChange(
         permissions.map((p) => {
-          const next = reconcileActionsForScope(p.actions, isPrefixScoped(p.resources));
-          return next === p.actions ? p : { ...p, actions: next };
+          const withId = p._uiId ? p : { ...p, _uiId: freshPermissionRowId() };
+          const actions = reconcileActionsForScope(withId.actions, isPrefixScoped(withId.resources));
+          return actions === withId.actions ? withId : { ...withId, actions };
         }),
       );
     }
   }, [permissions, onChange]);
-
-  // Stable per-row key for this render even before the effect above persists
-  // the id. Falls back to a deterministic index-based key ONLY for the transient
-  // first render of an id-less row (the effect replaces it immediately after).
-  const rowKey = (row: PermissionRow, index: number): string => row._uiId ?? `pending-${index}`;
 
   useEffect(() => {
     let cancelled = false;
@@ -99,18 +90,28 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
     };
   }, []);
 
-  // Drop expanded-state entries for rows that no longer exist (deleted), keyed
-  // by id so a delete can't leak an expanded pane onto a surviving sibling.
-  useEffect(() => {
+  // Id-keyed mutation helpers — never index. The `permissions` prop IS the
+  // state (controlled), so each helper maps/filters by `_uiId` and pushes the
+  // result up via onChange. Index-based writes (`updated[i] = …`) re-associate
+  // edits to whatever row shifts into a slot after a reorder/delete; keying by
+  // the stable id is the whole point of `_uiId`.
+  const updateRow = (id: string | undefined, change: Partial<PermissionRow>) => {
+    if (!id) return;
+    onChange(permissions.map((p) => (p._uiId === id ? { ...p, ...change } : p)));
+  };
+
+  const removeRow = (id: string | undefined) => {
+    if (!id) return;
+    onChange(permissions.filter((p) => p._uiId !== id));
+    // Prune the deleted row's expanded-state inline (was a whole-list GC effect)
+    // so a delete can't leak an open pane onto a surviving sibling.
     setExpandedConditions((prev) => {
-      const liveIds = new Set(permissions.map((p) => p._uiId).filter(Boolean) as string[]);
-      const next = new Set<string>();
-      for (const id of prev) {
-        if (liveIds.has(id)) next.add(id);
-      }
-      return next.size === prev.size ? prev : next;
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
     });
-  }, [permissions]);
+  };
 
   const toggleConditions = (row: PermissionRow) => {
     if (!row._uiId || hasConditions(row.conditions)) {
@@ -149,7 +150,8 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
           </div>
         </div>
       </details>
-      {permissions.map((row, i) => {
+      {permissions.map((row) => {
+        const id = row._uiId;
         const isDeny = row.effect === 'Deny';
         const hasCond = hasConditions(row.conditions);
         const conditionsVisible = (row._uiId ? expandedConditions.has(row._uiId) : false) || hasCond;
@@ -165,7 +167,7 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
         const isIncomplete = noActions || noResource;
 
         return (
-          <div key={rowKey(row, i)} style={{
+          <div key={id} style={{
             border: `1px solid ${isDeny ? `${colors.ACCENT_RED}40` : colors.BORDER}`,
             borderLeft: isDeny ? `3px solid ${colors.ACCENT_RED}` : `1px solid ${colors.BORDER}`,
             borderRadius: 8,
@@ -180,11 +182,7 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
                   <Segmented
                     size="small"
                     value={row.effect || 'Allow'}
-                    onChange={v => {
-                      const updated = [...permissions];
-                      updated[i] = { ...updated[i], effect: v as string };
-                      onChange(updated);
-                    }}
+                    onChange={v => updateRow(id, { effect: v as string })}
                     options={[
                       { label: 'Allow', value: 'Allow' },
                       { label: <span style={{ color: isDeny ? colors.ACCENT_RED : undefined, fontWeight: isDeny ? 600 : undefined }}>Deny</span>, value: 'Deny' },
@@ -212,7 +210,7 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
                 >
                   Conditions
                 </Button>
-                <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => onChange(permissions.filter((_, j) => j !== i))}>
+                <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => removeRow(id)}>
                   Remove
                 </Button>
               </div>
@@ -234,13 +232,11 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
                 <ResourcePatternInput
                 value={row.resources}
                 onChange={value => {
-                  const updated = [...permissions];
                   // Reconcile actions to the new scope: narrowing from a bucket
                   // to a prefix invalidates `admin` (bucket-only op), so strip it
                   // here — the disabled Admin chip can no longer revoke it.
-                  const actions = reconcileActionsForScope(updated[i].actions, isPrefixScoped(value));
-                  updated[i] = { ...updated[i], resources: value, actions };
-                  onChange(updated);
+                  const actions = reconcileActionsForScope(row.actions, isPrefixScoped(value));
+                  updateRow(id, { resources: value, actions });
                 }}
                 buckets={bucketNames}
                 style={{ ...inputRadius, marginTop: 4 }}
@@ -290,11 +286,7 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
                     <button
                       type="button"
                       title="Turn off all actions for this grant"
-                      onClick={() => {
-                        const updated = [...permissions];
-                        updated[i] = { ...updated[i], actions: [] };
-                        onChange(updated);
-                      }}
+                      onClick={() => updateRow(id, { actions: [] })}
                       style={{
                         border: 'none',
                         background: 'transparent',
@@ -315,11 +307,7 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
                   <ActionChips
                     actions={row.actions}
                     prefixScoped={isPrefixScoped(row.resources)}
-                    onChange={next => {
-                      const updated = [...permissions];
-                      updated[i] = { ...updated[i], actions: next };
-                      onChange(updated);
-                    }}
+                    onChange={next => updateRow(id, { actions: next })}
                   />
                   <div style={{
                     fontSize: 11,
@@ -371,14 +359,9 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
                     <ConditionPrefixInput
                       value={prefixVal}
                       bucket={firstConcreteResourceBucket(row.resources)}
-                      onChange={value => {
-                        const updated = [...permissions];
-                        updated[i] = {
-                          ...updated[i],
-                          conditions: setConditionArray(row.conditions, 'StringLike', 's3:prefix', value),
-                        };
-                        onChange(updated);
-                      }}
+                      onChange={value => updateRow(id, {
+                        conditions: setConditionArray(row.conditions, 'StringLike', 's3:prefix', value),
+                      })}
                       style={{ ...inputRadius, width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }}
                     />
                   </div>
@@ -393,14 +376,9 @@ export default function PermissionEditor({ permissions, onChange }: PermissionEd
                     </div>
                     <Input
                       value={ipVal}
-                      onChange={e => {
-                        const updated = [...permissions];
-                        updated[i] = {
-                          ...updated[i],
-                          conditions: setConditionValue(row.conditions, 'IpAddress', 'aws:SourceIp', e.target.value),
-                        };
-                        onChange(updated);
-                      }}
+                      onChange={e => updateRow(id, {
+                        conditions: setConditionValue(row.conditions, 'IpAddress', 'aws:SourceIp', e.target.value),
+                      })}
                       placeholder="e.g. 192.168.0.0/16, 10.0.0.0/8"
                       style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 12 }}
                     />

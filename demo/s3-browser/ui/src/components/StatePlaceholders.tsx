@@ -1,0 +1,112 @@
+/**
+ * StatePlaceholders — shared loading + empty-state chrome.
+ *
+ * Before this existed every panel hand-rolled its own centered <Spin> and
+ * empty-state block with slightly different padding (40 / 64 / 32 / 48),
+ * icon sizes, and type scales. These two primitives own ONLY the chrome
+ * (centering, padding, icon size, title/hint type scale) so the look is
+ * identical everywhere; callers still supply their own copy / icon / action
+ * so each placeholder stays meaningful in context.
+ *
+ * Type scale is borrowed from SectionHeader / FormField so an empty state
+ * reads as subordinate to a real card header: title at 15px/600 (between
+ * SectionHeader's 17 and FormField's 13.5), hint at FormField's 12.5 muted.
+ */
+import type { ReactNode } from 'react';
+import { Spin } from 'antd';
+import { useColors } from '../ThemeContext';
+
+/**
+ * Centered spinner with consistent padding and an optional label below it.
+ * Replaces the ad-hoc `<div style={{ textAlign: 'center', padding: N }}><Spin /></div>`
+ * blocks (padding ranged 32–64 across panels; we standardise on 40).
+ */
+export function LoadingState({ label }: { label?: string }) {
+  const { TEXT_MUTED } = useColors();
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 12,
+        padding: 40,
+      }}
+    >
+      <Spin />
+      {label && (
+        <div
+          style={{
+            fontSize: 12.5,
+            color: TEXT_MUTED,
+            fontFamily: 'var(--font-ui)',
+            lineHeight: 1.4,
+          }}
+        >
+          {label}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Centered empty state: muted icon, title, optional hint sentence, optional
+ * action button (already-rendered AntD <Button>, passed as `action`).
+ */
+export function EmptyState({
+  icon,
+  title,
+  hint,
+  action,
+}: {
+  icon: ReactNode;
+  title: ReactNode;
+  hint?: ReactNode;
+  action?: ReactNode;
+}) {
+  const { TEXT_PRIMARY, TEXT_MUTED, TEXT_FAINT } = useColors();
+  return (
+    <div
+      style={{
+        textAlign: 'center',
+        padding: '48px 24px',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+      }}
+    >
+      <div style={{ fontSize: 32, color: TEXT_FAINT, lineHeight: 1, marginBottom: 12 }}>
+        {icon}
+      </div>
+      <div
+        style={{
+          fontFamily: 'var(--font-ui)',
+          fontSize: 15,
+          fontWeight: 600,
+          color: TEXT_PRIMARY,
+          lineHeight: 1.3,
+          letterSpacing: '-0.005em',
+        }}
+      >
+        {title}
+      </div>
+      {hint && (
+        <div
+          style={{
+            fontFamily: 'var(--font-ui)',
+            fontSize: 12.5,
+            color: TEXT_MUTED,
+            lineHeight: 1.45,
+            marginTop: 6,
+            maxWidth: 380,
+          }}
+        >
+          {hint}
+        </div>
+      )}
+      {action && <div style={{ marginTop: 16 }}>{action}</div>}
+    </div>
+  );
+}

@@ -2,19 +2,21 @@
  * PrefixListEditor — the specific-prefixes editor surfaced inside a
  * {@link BucketCard} when its anonymous-read mode is `prefixes`.
  *
- * Extracted verbatim from BucketsPanel's inline `publicMode === 'prefixes'`
- * block. Every prefix carries a stable synthetic `id` so React keys by
- * identity, not array index; all edits route through the parent's
- * functional `onPrefixesChange` transform so they never read a stale
- * closure (recent bug fix preserved). The trailing-slash normalisation
- * on blur is unchanged.
+ * Originally extracted verbatim from BucketsPanel's inline `prefixes` block;
+ * now a thin wrapper over the shared {@link RowListEditor} so the id discipline
+ * (stable id, mutate-by-id, never array index) lives in one place. The
+ * trailing-slash normalisation on blur is unchanged.
+ *
+ * Public API still takes a FUNCTIONAL `onPrefixesChange` (the parent applies the
+ * transform via its functional setRows, never a stale closure). Internally that
+ * is bridged to RowListEditor's `onChange(next)` by ignoring the previous value
+ * and committing `next` directly — RowListEditor already computed it by id.
  */
 import { Button, Input } from 'antd';
-import { PlusOutlined } from '@ant-design/icons';
-import { useColors } from '../ThemeContext';
 import { formRow } from './ruleEditorHelpers';
 import type { PrefixEntry } from './bucketPolicyPayload';
 import { freshId } from './bucketPolicyPayload';
+import RowListEditor from './RowListEditor';
 
 interface Props {
   prefixes: PrefixEntry[];
@@ -29,41 +31,25 @@ export default function PrefixListEditor({
   onPrefixesChange,
   inputRadius,
 }: Props) {
-  const colors = useColors();
-
   return (
-    <div
-      style={{
-        marginTop: 8,
-        paddingLeft: 16,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 4,
-      }}
-    >
-      {prefixes.map((prefix) => (
-        <div
-          key={prefix.id}
-          style={formRow(4)}
-        >
+    <RowListEditor<PrefixEntry>
+      items={prefixes}
+      onChange={(next) => onPrefixesChange(() => next)}
+      newItem={() => ({ id: freshId(), value: '' })}
+      addLabel="Add prefix"
+      addButtonType="text"
+      style={{ marginTop: 8, paddingLeft: 16, gap: 4 }}
+      gap={4}
+      addButtonStyle={{ padding: '0 8px', fontSize: 11 }}
+      renderRow={(prefix, update, remove) => (
+        <div style={formRow(4)}>
           <Input
             value={prefix.value}
-            onChange={(e) => {
-              const value = e.target.value;
-              onPrefixesChange((prev) =>
-                prev.map((p) =>
-                  p.id === prefix.id ? { ...p, value } : p
-                )
-              );
-            }}
+            onChange={(e) => update({ value: e.target.value })}
             onBlur={(e) => {
               const v = e.target.value.trim();
               if (v && !v.endsWith('/')) {
-                onPrefixesChange((prev) =>
-                  prev.map((p) =>
-                    p.id === prefix.id ? { ...p, value: v + '/' } : p
-                  )
-                );
+                update({ value: v + '/' });
               }
             }}
             placeholder="e.g. builds/"
@@ -79,36 +65,13 @@ export default function PrefixListEditor({
             type="text"
             size="small"
             danger
-            onClick={() => {
-              onPrefixesChange((prev) =>
-                prev.filter((p) => p.id !== prefix.id)
-              );
-            }}
+            onClick={remove}
             style={{ padding: '0 8px', minWidth: 0 }}
           >
             ×
           </Button>
         </div>
-      ))}
-      <Button
-        type="text"
-        size="small"
-        icon={<PlusOutlined />}
-        onClick={() => {
-          onPrefixesChange((prev) => [
-            ...prev,
-            { id: freshId(), value: '' },
-          ]);
-        }}
-        style={{
-          padding: '0 8px',
-          color: colors.TEXT_MUTED,
-          alignSelf: 'flex-start',
-          fontSize: 11,
-        }}
-      >
-        Add prefix
-      </Button>
-    </div>
+      )}
+    />
   );
 }

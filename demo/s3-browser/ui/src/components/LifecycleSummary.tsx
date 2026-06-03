@@ -3,6 +3,7 @@ import { ClockCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import type { LifecycleConfig } from '../adminApi';
 import { useColors } from '../ThemeContext';
 import { actionKind, actionLabel } from './lifecyclePayload';
+import { EmptyState } from './StatePlaceholders';
 
 const { Text } = Typography;
 
@@ -55,15 +56,15 @@ export function LifecycleApplySummary({ lifecycle }: { lifecycle: LifecycleConfi
 /** Empty-state shown by RuleListEditor when no lifecycle rules exist yet. */
 export function EmptyLifecycleState({ onAdd }: { onAdd: () => void }) {
   return (
-    <div style={{ textAlign: 'center', padding: '48px 24px' }}>
-      <ClockCircleOutlined style={{ fontSize: 32, opacity: 0.6 }} />
-      <div style={{ marginTop: 12 }}><Text strong>No lifecycle rules</Text></div>
-      <Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-        Add a disabled draft rule, preview it, then explicitly enable deletion.
-      </Text>
-      <Button type="primary" icon={<PlusOutlined />} onClick={onAdd} style={{ marginTop: 16 }}>
-        Add lifecycle rule
-      </Button>
-    </div>
+    <EmptyState
+      icon={<ClockCircleOutlined />}
+      title="No lifecycle rules"
+      hint="Add a disabled draft rule, preview it, then explicitly enable deletion."
+      action={
+        <Button type="primary" icon={<PlusOutlined />} onClick={onAdd}>
+          Add lifecycle rule
+        </Button>
+      }
+    />
   );
 }

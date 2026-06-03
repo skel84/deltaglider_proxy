@@ -504,6 +504,7 @@ function ConfigureBackendStep({
       <FormField
         label="Region"
         yamlPath="storage.backend.region"
+        helpText="Region of the S3 endpoint. Required by AWS SigV4; many S3-compatible stores accept any value."
         examples={['us-east-1', 'eu-central-1', 'hel1']}
         onExampleClick={(v) => update({ s3Region: String(v) })}
       >
@@ -517,6 +518,7 @@ function ConfigureBackendStep({
         <FormField
           label="Access key ID"
           yamlPath="storage.backend.access_key_id"
+          helpText="Access key the proxy uses to reach the upstream S3 backend."
         >
           <Input
             value={state.s3AccessKey}
@@ -528,6 +530,7 @@ function ConfigureBackendStep({
         <FormField
           label="Secret access key"
           yamlPath="storage.backend.secret_access_key"
+          helpText="Secret paired with the access key ID. Stored in the backend config; never exposed to S3 clients."
         >
           <Input.Password
             value={state.s3SecretKey}

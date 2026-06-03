@@ -13,6 +13,7 @@ import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import BackendEncryptionEditor, { type BackendEncryptionPatch } from './BackendEncryptionEditor';
 import { buildEncryptionSectionBody } from '../backendEncryptionPayload';
+import MaskedSecretInput from './MaskedSecretInput';
 
 const { Text } = Typography;
 
@@ -359,7 +360,13 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
                     <Input value={formAccessKey} onChange={(e) => setFormAccessKey(e.target.value)} placeholder="AKIAIOSFODNN7EXAMPLE" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
                   </FormField>
                   <FormField label="Secret Access Key" yamlPath="storage.backends[].secret_access_key">
-                    <Input.Password value={formSecretKey} onChange={(e) => setFormSecretKey(e.target.value)} placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLE" style={{ ...inputRadius }} />
+                    <MaskedSecretInput
+                      mode="blank-keeps"
+                      value={formSecretKey}
+                      onChange={setFormSecretKey}
+                      placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLE"
+                      style={{ ...inputRadius }}
+                    />
                   </FormField>
                 </>
               )}

@@ -37,6 +37,7 @@ import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import { SlackSetupGuideDrawer } from './SlackSetupGuide';
 import { AdvancedDisclosure } from './ruleEditorFields';
+import MaskedSecretInput from './MaskedSecretInput';
 import {
   SLACK_NOTIFY_KINDS,
   resolveSlackChannelsPreview,
@@ -245,7 +246,7 @@ export default function SlackConnectorCard({
           colors={colors}
         />
       ) : (
-        <BotModeFields form={form} setField={setField} inputRadius={inputRadius} colors={colors} />
+        <BotModeFields form={form} setField={setField} inputRadius={inputRadius} />
       )}
 
       {/* Channel routing — bot-token mode only (Incoming Webhook URLs are each
@@ -495,12 +496,10 @@ function BotModeFields({
   form,
   setField,
   inputRadius,
-  colors,
 }: {
   form: WebhookFormState;
   setField: (patch: Partial<WebhookFormState>) => void;
   inputRadius: React.CSSProperties;
-  colors: ReturnType<typeof useColors>;
 }) {
   return (
     <div style={{ marginTop: 8 }}>
@@ -509,18 +508,14 @@ function BotModeFields({
         yamlPath="advanced.event_delivery.slack_bot_token"
         helpText="The xoxb-… token from OAuth & Permissions. Stored encrypted and shown masked; leave it untouched to keep the current one."
       >
-        <Input.Password
-          value={form.slackBotTokenMasked ? '' : form.slackBotToken}
-          onChange={(e) =>
-            // Typing unmasks: it's now a real, operator-entered value.
-            setField({ slackBotToken: e.target.value, slackBotTokenMasked: false })
-          }
-          placeholder={
-            form.slackBotTokenMasked
-              ? '•••••••• (unchanged — type to replace)'
-              : 'xoxb-…'
-          }
-          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14, maxWidth: 480, color: colors.TEXT_PRIMARY }}
+        <MaskedSecretInput
+          mode="sentinel"
+          value={form.slackBotToken}
+          masked={form.slackBotTokenMasked}
+          // Typing unmasks: it's now a real, operator-entered value.
+          onChange={(value) => setField({ slackBotToken: value, slackBotTokenMasked: false })}
+          placeholder={form.slackBotTokenMasked ? undefined : 'xoxb-…'}
+          style={{ ...inputRadius, fontSize: 14, maxWidth: 480 }}
         />
       </FormField>
 

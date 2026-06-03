@@ -42,6 +42,7 @@ import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import ApplyDialog from './ApplyDialog';
 import StickyDirtyBar from './StickyDirtyBar';
+import { LoadingState } from './StatePlaceholders';
 
 const { Text } = Typography;
 
@@ -238,7 +239,7 @@ export function ListenerTlsPanel({ onSessionExpired }: PanelProps) {
   const { value, setValue, isDirty, discard, loading, error } = subset;
 
   if (error) return <Alert type="error" showIcon message="Failed to load" description={error} />;
-  if (loading) return <PanelShell><Text type="secondary">Loading...</Text></PanelShell>;
+  if (loading) return <PanelShell><LoadingState /></PanelShell>;
 
   const tls = value.tls ?? {};
   const tlsEnabled = tls.enabled === true;
@@ -297,7 +298,11 @@ export function ListenerTlsPanel({ onSessionExpired }: PanelProps) {
           description="Optional HTTPS for the listener. When disabled, the proxy speaks plain HTTP — put it behind a reverse proxy that terminates TLS for you."
         />
         <div>
-          <FormField label="Enable TLS" yamlPath="advanced.tls.enabled">
+          <FormField
+            label="Enable TLS"
+            yamlPath="advanced.tls.enabled"
+            helpText="Serve HTTPS directly. Requires a cert + key path below. Leave off to speak plain HTTP behind a TLS-terminating reverse proxy."
+          >
             <Switch
               checked={tlsEnabled}
               onChange={(v) => setTls({ enabled: v })}
@@ -356,7 +361,7 @@ export function CachesPanel({ onSessionExpired }: PanelProps) {
   const subset = useAdvancedSubset(CACHES_INITIAL, onSessionExpired, 'configuration/advanced/caches');
   const { value, setValue, isDirty, discard, loading, error } = subset;
   if (error) return <Alert type="error" showIcon message="Failed to load" description={error} />;
-  if (loading) return <PanelShell><Text type="secondary">Loading...</Text></PanelShell>;
+  if (loading) return <PanelShell><LoadingState /></PanelShell>;
 
   return (
     <PanelShell>
@@ -482,7 +487,7 @@ export function LimitsPanel({ onSessionExpired }: PanelProps) {
     const msg = queryError instanceof Error ? queryError.message : 'Failed to load';
     return <Alert type="error" showIcon message="Failed to load" description={msg} />;
   }
-  if (!config) return <PanelShell><Text type="secondary">Loading...</Text></PanelShell>;
+  if (!config) return <PanelShell><LoadingState /></PanelShell>;
 
   const readOnlyField = (
     label: string,
@@ -622,7 +627,7 @@ export function LoggingPanel({ onSessionExpired }: PanelProps) {
   }, [value.log_level]);
 
   if (error) return <Alert type="error" showIcon message="Failed to load" description={error} />;
-  if (loading) return <PanelShell><Text type="secondary">Loading...</Text></PanelShell>;
+  if (loading) return <PanelShell><LoadingState /></PanelShell>;
 
   const currentPreset = value.log_level ? findMatchingPreset(value.log_level) : null;
   const radioValue = custom ? '__custom__' : currentPreset;
@@ -703,7 +708,7 @@ export function ConfigDbSyncPanel({ onSessionExpired }: PanelProps) {
   const subset = useAdvancedSubset(SYNC_INITIAL, onSessionExpired, 'configuration/advanced/sync');
   const { value, setValue, isDirty, discard, loading, error } = subset;
   if (error) return <Alert type="error" showIcon message="Failed to load" description={error} />;
-  if (loading) return <PanelShell><Text type="secondary">Loading...</Text></PanelShell>;
+  if (loading) return <PanelShell><LoadingState /></PanelShell>;
 
   const enabled = !!(value.config_sync_bucket && value.config_sync_bucket.length > 0);
 

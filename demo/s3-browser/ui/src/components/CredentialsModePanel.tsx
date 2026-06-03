@@ -54,6 +54,7 @@ import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import ApplyDialog from './ApplyDialog';
 import PasswordChangeCard from './PasswordChangeCard';
+import MaskedSecretInput from './MaskedSecretInput';
 
 const { Text } = Typography;
 
@@ -360,9 +361,10 @@ export default function CredentialsModePanel({ onSessionExpired }: Props) {
               tabIndex={-1}
               style={{ display: 'none' }}
             />
-            <Input.Password
+            <MaskedSecretInput
+              mode="blank-keeps"
               value={form.secret_access_key ?? ''}
-              onChange={(e) => setSecretKey(e.target.value)}
+              onChange={setSecretKey}
               placeholder="Leave empty to keep current"
               autoComplete="new-password"
               style={{ ...inputRadius }}

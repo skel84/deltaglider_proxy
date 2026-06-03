@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
-import { Button, Typography, Spin, Alert, Input } from 'antd';
+import { Button, Typography, Alert, Input } from 'antd';
 import { PlusOutlined, SearchOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
+import { LoadingState } from './StatePlaceholders';
 
 const { Text } = Typography;
 
@@ -105,9 +106,7 @@ export default function MasterDetailPanel<T>({
           </div>
 
           <div style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}>
-            {loading && items.length === 0 && (
-              <div style={{ textAlign: 'center', padding: 32 }}><Spin /></div>
-            )}
+            {loading && items.length === 0 && <LoadingState />}
             {error && (
               <Alert type="error" message={error} showIcon style={{ margin: 8, borderRadius: 8 }} />
             )}

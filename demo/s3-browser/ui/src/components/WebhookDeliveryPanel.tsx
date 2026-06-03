@@ -32,7 +32,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { ApiOutlined, DeleteOutlined, PlusOutlined, SendOutlined } from '@ant-design/icons';
+import { ApiOutlined, DeleteOutlined, SendOutlined } from '@ant-design/icons';
 import type { SectionApplyResponse } from '../adminApi';
 import { fetchEventOutbox } from '../adminApi';
 import { useCardStyles } from './shared-styles';
@@ -46,6 +46,8 @@ import ApplyDialog from './ApplyDialog';
 import { AdvancedDisclosure } from './ruleEditorFields';
 import SlackConnectorCard from './SlackConnectorCard';
 import StickyDirtyBar from './StickyDirtyBar';
+import RowListEditor from './RowListEditor';
+import MaskedSecretInput from './MaskedSecretInput';
 import {
   formFromWire,
   buildPayloadFromForm,
@@ -225,28 +227,10 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
   const removeUrl = (id: string) =>
     setField({ urlRows: form.urlRows.filter((r) => r.id !== id) });
 
-  const updateHeader = (id: string, patch: Partial<WebhookHeaderRow>) =>
-    setField({
-      headerRows: form.headerRows.map((r) =>
-        r.id === id
-          ? {
-              ...r,
-              ...patch,
-              // Editing the VALUE unmasks it (now a real, operator-typed value).
-              masked: patch.value !== undefined ? false : r.masked,
-            }
-          : r
-      ),
-    });
-  const addHeader = () =>
-    setField({
-      headerRows: [
-        ...form.headerRows,
-        { id: nextId(), name: '', value: '', origName: '', masked: false } as WebhookHeaderRow,
-      ],
-    });
-  const removeHeader = (id: string) =>
-    setField({ headerRows: form.headerRows.filter((r) => r.id !== id) });
+  // Header rows are edited inline via RowListEditor in the raw-webhook block;
+  // the value field's MaskedSecretInput emits `{ value, masked: false }` so a
+  // retyped secret unmasks. (urlRows mutators above are still shared with the
+  // Slack connector card, which reuses the webhook_urls editor.)
 
   // Live, non-blocking validation preview.
   const liveErrors = useMemo(() => {
@@ -461,31 +445,32 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
                 yamlPath="advanced.event_delivery.webhook_urls"
                 helpText="HTTP(S) URLs that receive the payload. An event is marked delivered only after every endpoint returns 2xx."
               >
-                <Space direction="vertical" style={{ width: '100%' }}>
-                  {form.urlRows.length === 0 && (
+                <RowListEditor<WebhookUrlRow>
+                  items={form.urlRows}
+                  onChange={(urlRows) => setField({ urlRows })}
+                  newItem={() => ({ id: nextId(), url: '' })}
+                  addLabel="Add endpoint"
+                  emptyHint={
                     <Text type="secondary" style={{ fontSize: 13 }}>
                       No endpoints. Add one to start delivering.
                     </Text>
-                  )}
-                  {form.urlRows.map((row) => (
-                    <Space.Compact key={row.id} style={{ width: '100%' }}>
+                  }
+                  renderRow={(row, update, remove) => (
+                    <Space.Compact style={{ width: '100%' }}>
                       <Input
                         value={row.url}
-                        onChange={(e) => updateUrl(row.id, e.target.value)}
+                        onChange={(e) => update({ url: e.target.value })}
                         placeholder="https://hooks.example.com/deltaglider"
                         style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14 }}
                       />
                       <Button
                         icon={<DeleteOutlined />}
-                        onClick={() => removeUrl(row.id)}
+                        onClick={remove}
                         title="Remove endpoint"
                       />
                     </Space.Compact>
-                  ))}
-                  <Button icon={<PlusOutlined />} onClick={addUrl} size="small">
-                    Add endpoint
-                  </Button>
-                </Space>
+                  )}
+                />
               </FormField>
 
               <FormField
@@ -493,37 +478,47 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
                 yamlPath="advanced.event_delivery.webhook_headers"
                 helpText="Static headers sent with every request — e.g. an Authorization bearer token. Values are stored encrypted and shown masked; leave a masked value untouched to keep it."
               >
-                <Space direction="vertical" style={{ width: '100%' }}>
-                  {form.headerRows.length === 0 && (
+                <RowListEditor<WebhookHeaderRow>
+                  items={form.headerRows}
+                  onChange={(headerRows) => setField({ headerRows })}
+                  newItem={() => ({
+                    id: nextId(),
+                    name: '',
+                    value: '',
+                    origName: '',
+                    masked: false,
+                  })}
+                  addLabel="Add header"
+                  emptyHint={
                     <Text type="secondary" style={{ fontSize: 13 }}>
                       No headers.
                     </Text>
-                  )}
-                  {form.headerRows.map((row) => (
-                    <Space.Compact key={row.id} style={{ width: '100%' }}>
+                  }
+                  renderRow={(row, update, remove) => (
+                    <Space.Compact style={{ width: '100%' }}>
                       <Input
                         value={row.name}
-                        onChange={(e) => updateHeader(row.id, { name: e.target.value })}
+                        onChange={(e) => update({ name: e.target.value })}
                         placeholder="Authorization"
                         style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14, width: '40%' }}
                       />
-                      <Input
-                        value={row.masked ? '' : row.value}
-                        onChange={(e) => updateHeader(row.id, { value: e.target.value })}
-                        placeholder={row.masked ? '•••••••• (unchanged — type to replace)' : 'Bearer …'}
-                        style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14 }}
+                      <MaskedSecretInput
+                        mode="sentinel"
+                        reveal
+                        value={row.value}
+                        masked={row.masked}
+                        // Typing unmasks: it's now a real, operator-entered value.
+                        onChange={(value) => update({ value, masked: false })}
+                        style={{ ...inputRadius, fontSize: 14, flex: 1 }}
                       />
                       <Button
                         icon={<DeleteOutlined />}
-                        onClick={() => removeHeader(row.id)}
+                        onClick={remove}
                         title="Remove header"
                       />
                     </Space.Compact>
-                  ))}
-                  <Button icon={<PlusOutlined />} onClick={addHeader} size="small">
-                    Add header
-                  </Button>
-                </Space>
+                  )}
+                />
               </FormField>
             </div>
           </>
