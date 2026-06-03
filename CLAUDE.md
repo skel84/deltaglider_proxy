@@ -51,11 +51,10 @@ HTTP request
   → api/handlers/       S3-compatible handlers split by domain:
       object.rs            GET/PUT/HEAD/DELETE (range, conditional, Content-MD5, ACL stubs)
       object_helpers.rs    Shared helpers extracted from object.rs (headers, conditional evaluation)
-      bucket.rs            Bucket CRUD and ListObjectsV2 (start-after, encoding-type, fetch-owner, base64 tokens); hosts `validate_bucket_name` + `is_ip_format` as pure validators with unit + proptest coverage
+      bucket.rs            Bucket CRUD and ListObjectsV2 (start-after, encoding-type, fetch-owner, base64 tokens). The canonical `validate_bucket_name` + `bucket_name_is_ip_like` pure validators live in `src/security.rs` (unit + proptest coverage), shared by the CLI URL parser
       multipart.rs         Multipart upload lifecycle
       status.rs            /health, /stats, /metrics
   → api/auth.rs         SigV4 authentication middleware (bootstrap or per-user IAM)
-  → api/extractors.rs   ValidatedBucket/ValidatedPath extractors (S3 name rules, path traversal protection)
   → deltaglider/engine/   Orchestration split into submodules:
       mod.rs               Core engine: route, compress, cache, metadata resolution
       store.rs             PUT pipeline: delta encoding, migration, reference management
@@ -163,7 +162,7 @@ S3 integration tests require MinIO running on localhost:9000. CI starts MinIO au
 
 Async rebuild barrier: after any IAM mutation, use `get_iam_version(&http, &endpoint).await` BEFORE the call and `wait_for_iam_rebuild(&http, &endpoint, before_version).await` AFTER. Backed by a monotonic `AtomicU64` exposed at `GET /_/api/admin/iam/version` — replaces blind `sleep(1s)` with a ~50ms deterministic poll. HA sync is exercised via `POST /api/admin/config/sync-now` in `tests/config_sync_ha_test.rs`.
 
-Property tests via `proptest` (dev-dep) live in the same module as the pure functions they exercise (see `src/api/handlers/bucket.rs` for `validate_bucket_name` / `is_ip_format`). Coverage is collected via `cargo-llvm-cov` as a non-blocking CI job — use it as signal, not a gate.
+Property tests via `proptest` (dev-dep) live in the same module as the pure functions they exercise (see `src/security.rs` for `validate_bucket_name` / `bucket_name_is_ip_like`). Coverage is collected via `cargo-llvm-cov` as a non-blocking CI job — use it as signal, not a gate.
 
 ## Conventions
 
@@ -176,7 +175,7 @@ Property tests via `proptest` (dev-dep) live in the same module as the pure func
 
 ## Testability principles (write code that's testable from day one)
 
-- **Pure functions at decision points.** When a handler is deciding "is this request valid / authorized / retryable", extract the decision into a `fn(typed_input) -> typed_output` and have the handler do I/O around it. Prior art: `classify_s3_error` / `classify_get_error` in `src/storage/s3.rs`, `validate_bucket_name` / `is_ip_format` in `src/api/handlers/bucket.rs`. Both are unit-tested against the full truth table (and proptested in the bucket case) without spinning up a server.
+- **Pure functions at decision points.** When a handler is deciding "is this request valid / authorized / retryable", extract the decision into a `fn(typed_input) -> typed_output` and have the handler do I/O around it. Prior art: `classify_s3_error` / `classify_get_error` in `src/storage/s3.rs`, `validate_bucket_name` / `bucket_name_is_ip_like` in `src/security.rs`. Both are unit-tested against the full truth table (and proptested in the bucket case) without spinning up a server.
 - **Expose observable counters for async state transitions.** The `IAM_VERSION` `AtomicU64` in `src/iam/mod.rs` + `GET /_/api/admin/iam/version` turned a 1s sleep into a 50ms deterministic barrier (`wait_for_iam_rebuild` in `tests/common/mod.rs`). Future async state changes (config reloads, external-auth discovery, scanner refreshes) should follow the same pattern: a monotonic counter bumped after the new state is published, polled by whoever needs to wait for it.
 - **Don't put test-relevant helpers in binary-only modules.** `reopen_and_rebuild_iam` had to move from `src/startup.rs` (binary) to `src/config_db_sync.rs` (library) before the admin `sync-now` handler could reach it. Rule: if a helper might be called from more than one trigger (startup, periodic task, admin endpoint, test), put it in the library side from day one — `src/startup.rs` is the last mile, not a grab bag.
 - **Test the observable contract, not the implementation.** Integration tests cost a TestServer spawn (~200ms + MinIO when S3). Unit-test anything that doesn't need the whole HTTP/SigV4/storage stack; reserve integration tests for request-pipeline seams, concurrency races, and cross-subsystem invariants (metadata cache vs storage, admission vs auth, etc.). The hygiene pass in `5f38941` deleted 659 LOC of integration tests that were re-covering pure-function logic.

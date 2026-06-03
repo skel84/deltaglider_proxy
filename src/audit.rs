@@ -85,26 +85,29 @@ static AUDIT_RING: OnceLock<Mutex<VecDeque<AuditEntry>>> = OnceLock::new();
 /// case of maxed-out sanitised strings).
 const DEFAULT_RING_SIZE: usize = 500;
 
+/// Resolve the audit-ring capacity from `DGP_AUDIT_RING_SIZE` (default
+/// 500). Routed through `config::env_parse_with_default` for consistent
+/// warn-on-invalid behaviour; a parsed `0` is also treated as invalid
+/// (an empty ring would silently drop every entry) and falls back to
+/// the default.
+fn ring_capacity() -> usize {
+    let cap = crate::config::env_parse_with_default("DGP_AUDIT_RING_SIZE", DEFAULT_RING_SIZE);
+    if cap == 0 {
+        DEFAULT_RING_SIZE
+    } else {
+        cap
+    }
+}
+
 fn ring() -> &'static Mutex<VecDeque<AuditEntry>> {
-    AUDIT_RING.get_or_init(|| {
-        let cap = std::env::var("DGP_AUDIT_RING_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_RING_SIZE);
-        Mutex::new(VecDeque::with_capacity(cap))
-    })
+    AUDIT_RING.get_or_init(|| Mutex::new(VecDeque::with_capacity(ring_capacity())))
 }
 
 /// Push a sanitised entry to the ring. When the ring is at
 /// capacity, the oldest entry falls off the back (ring buffer
 /// semantics) so pushes stay O(1) and memory stays flat.
 fn push_ring(entry: AuditEntry) {
-    let cap = std::env::var("DGP_AUDIT_RING_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_RING_SIZE);
+    let cap = ring_capacity();
     let mut guard = ring().lock();
     while guard.len() >= cap {
         guard.pop_front();

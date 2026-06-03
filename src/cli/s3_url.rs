@@ -54,23 +54,12 @@ pub fn parse_s3_url(s: &str) -> Result<S3Loc, UrlError> {
     })
 }
 
-/// Minimal bucket-name validation that catches the IP-shaped cases the
-/// upstream `security::bucket_name_is_ip_like` rejects, plus the basic
-/// DNS-label rules. The S3 layer will re-reject anything we let through.
+/// Bucket-name validation for the CLI URL parser. Delegates to the
+/// canonical [`crate::security::validate_bucket_name`] (shared with the
+/// S3 API extractor) and collapses the typed reason to a `bool` — the
+/// caller maps a `false` to `UrlError::InvalidBucketName`.
 fn is_valid_bucket_name(name: &str) -> bool {
-    if name.len() < 3 || name.len() > 63 {
-        return false;
-    }
-    if crate::security::bucket_name_is_ip_like(name) {
-        return false;
-    }
-    // Lowercase letters, digits, dot, dash; must start and end alnum.
-    let bytes = name.as_bytes();
-    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    if !alnum(bytes[0]) || !alnum(bytes[bytes.len() - 1]) {
-        return false;
-    }
-    bytes.iter().all(|&b| alnum(b) || b == b'.' || b == b'-')
+    crate::security::validate_bucket_name(name).is_ok()
 }
 
 #[cfg(test)]

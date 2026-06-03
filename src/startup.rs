@@ -114,39 +114,32 @@ pub fn log_startup_banner(config: &Config) {
 /// - Credentials present → bootstrap/IAM mode (auto-detected)
 /// - `authentication = "none"` → explicit open access (with loud warnings)
 /// - Nothing configured → **FATAL error, process exits**
+///
+/// The decision itself is the pure [`Config::classify_auth_config`]; this
+/// wrapper owns the logging and the `process::exit` (the un-testable I/O).
 fn validate_auth_config(config: &Config) {
-    // Normalize the authentication field: lowercase + trim whitespace
-    let auth_mode = config
-        .authentication
-        .as_deref()
-        .map(|s| s.trim().to_ascii_lowercase());
-    let auth_mode = auth_mode.as_deref();
-
-    if config.auth_enabled() {
-        // Credentials are set — auth is on regardless of `authentication` field
-        info!(
-            "  Authentication: SigV4 ENABLED (access key: {})",
-            config.access_key_id.as_deref().unwrap_or("")
-        );
-        if auth_mode == Some("none") {
-            warn!("  Note: authentication = \"none\" is ignored because S3 credentials are configured");
+    use deltaglider_proxy::config::AuthConfigOutcome;
+    match config.classify_auth_config() {
+        AuthConfigOutcome::CredentialsEnabled { redundant_none } => {
+            info!(
+                "  Authentication: SigV4 ENABLED (access key: {})",
+                config.access_key_id.as_deref().unwrap_or("")
+            );
+            if redundant_none {
+                warn!("  Note: authentication = \"none\" is ignored because S3 credentials are configured");
+            }
         }
-        return;
-    }
-
-    // No credentials — check the `authentication` field
-    match auth_mode {
-        Some("none") => {
+        AuthConfigOutcome::OpenAccess => {
             warn!("  Authentication: DISABLED (authentication = \"none\")");
             warn!("  ╔══════════════════════════════════════════════════════════════════╗");
             warn!("  ║  WARNING: All S3 data is accessible without credentials.        ║");
             warn!("  ║  Set access_key_id + secret_access_key for production use.      ║");
             warn!("  ╚══════════════════════════════════════════════════════════════════╝");
         }
-        Some(other) => {
+        AuthConfigOutcome::UnrecognizedMode => {
             error!(
                 "FATAL: Unrecognized authentication mode: \"{}\"",
-                config.authentication.as_deref().unwrap_or(other)
+                config.authentication.as_deref().unwrap_or("")
             );
             error!("");
             error!("  Accepted values:");
@@ -158,8 +151,7 @@ fn validate_auth_config(config: &Config) {
             error!("    secret_access_key = \"...\"");
             std::process::exit(1);
         }
-        None => {
-            // No credentials AND no explicit authentication mode → refuse to start
+        AuthConfigOutcome::Missing => {
             error!("FATAL: No authentication configured.");
             error!("");
             error!("  The proxy refuses to start without explicit authentication configuration.");

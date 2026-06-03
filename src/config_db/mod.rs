@@ -677,6 +677,51 @@ impl std::fmt::Display for ConfigDbError {
 
 impl std::error::Error for ConfigDbError {}
 
+/// Coarse classification of a `rusqlite::Error` at a query site.
+///
+/// Pure: maps the raw error to the three categories call sites actually
+/// branch on — "row not found", "UNIQUE constraint conflict", and
+/// "everything else". Lets the per-query handlers attach their own
+/// context string (`"Auth provider ID 3"`) without each re-implementing
+/// the `match e { QueryReturnedNoRows => …, … }` boilerplate, and gives
+/// us one place to unit-test the discrimination truth table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteErrorClass {
+    /// `SELECT … query_row` matched zero rows.
+    NotFound,
+    /// A UNIQUE constraint was violated (duplicate key on INSERT/UPDATE).
+    Conflict,
+    /// Any other SQLite error.
+    Other,
+}
+
+/// Classify a `rusqlite::Error` into [`SqliteErrorClass`]. Pure fn —
+/// see the variant docs. The UNIQUE-constraint detection inspects the
+/// extended error code (`ErrorCode::ConstraintViolation`) so it doesn't
+/// depend on the human-readable message text.
+pub fn classify_sqlite_error(e: &rusqlite::Error) -> SqliteErrorClass {
+    use rusqlite::ffi::ErrorCode;
+    match e {
+        rusqlite::Error::QueryReturnedNoRows => SqliteErrorClass::NotFound,
+        rusqlite::Error::SqliteFailure(err, msg) => {
+            // A UNIQUE/PRIMARY-KEY violation surfaces as a
+            // ConstraintViolation extended code; the message (when
+            // present) contains "UNIQUE constraint failed".
+            let is_unique = err.code == ErrorCode::ConstraintViolation
+                && msg
+                    .as_deref()
+                    .map(|m| m.contains("UNIQUE constraint failed"))
+                    .unwrap_or(true);
+            if is_unique {
+                SqliteErrorClass::Conflict
+            } else {
+                SqliteErrorClass::Other
+            }
+        }
+        _ => SqliteErrorClass::Other,
+    }
+}
+
 impl From<rusqlite::Error> for ConfigDbError {
     fn from(e: rusqlite::Error) -> Self {
         Self::Sqlite(e)
@@ -692,6 +737,47 @@ impl From<std::io::Error> for ConfigDbError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_sqlite_error_not_found() {
+        let e = rusqlite::Error::QueryReturnedNoRows;
+        assert_eq!(classify_sqlite_error(&e), SqliteErrorClass::NotFound);
+    }
+
+    #[test]
+    fn classify_sqlite_error_conflict_on_unique_violation() {
+        // Drive a real UNIQUE(access_key_id) violation through the DB so we
+        // exercise the genuine rusqlite error shape, not a hand-built one.
+        let db = ConfigDb::in_memory("test-pass").unwrap();
+        let perms = vec![];
+        db.create_user("alice", "AKDUP1234567", "secret123456", true, &perms)
+            .unwrap();
+        // Same access_key_id → UNIQUE constraint failure.
+        let err = db
+            .create_user("bob", "AKDUP1234567", "secret654321", true, &perms)
+            .expect_err("duplicate access key must fail");
+        match err {
+            ConfigDbError::Sqlite(ref sqlite_err) => {
+                assert_eq!(
+                    classify_sqlite_error(sqlite_err),
+                    SqliteErrorClass::Conflict,
+                    "duplicate key should classify as Conflict (got {sqlite_err:?})"
+                );
+            }
+            other => panic!("expected ConfigDbError::Sqlite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_sqlite_error_other_for_non_constraint() {
+        // A non-constraint failure (e.g. malformed SQL) classifies as Other.
+        let db = ConfigDb::in_memory("test-pass").unwrap();
+        let err = db
+            .conn
+            .execute("SELECT * FROM definitely_not_a_table", [])
+            .expect_err("bad SQL must fail");
+        assert_eq!(classify_sqlite_error(&err), SqliteErrorClass::Other);
+    }
 
     #[test]
     fn test_create_and_load_user() {

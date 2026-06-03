@@ -9,7 +9,10 @@
 
 mod common;
 
-use common::{admin_http_client, TestServer};
+use common::{
+    admin_http_client, get_ext_auth_version, get_iam_version, wait_for_ext_auth_rebuild,
+    wait_for_iam_rebuild, TestServer,
+};
 use reqwest::StatusCode;
 use serde_json::json;
 
@@ -340,6 +343,99 @@ async fn test_update_and_delete_mapping_rule() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+/// B1 regression: every mapping-rule mutation (create / update / delete)
+/// MUST rebuild the IAM index. Pre-fix the mapping handlers only triggered
+/// config-sync and skipped `rebuild_iam_index`, leaving stale group
+/// resolution (and split-brain across HA instances). We observe the fix via
+/// the monotonic `iam/version` counter, which is bumped INSIDE
+/// `rebuild_iam_index` — if the handler skips the rebuild, the version never
+/// advances and `wait_for_iam_rebuild` panics after its 5s deadline.
+#[tokio::test]
+async fn mapping_mutations_rebuild_iam_index() {
+    let (server, admin) = setup().await;
+    let endpoint = server.endpoint();
+    let group = create_group(&admin, &endpoint, "mappers").await;
+    let gid = group["id"].as_i64().unwrap();
+
+    // CREATE bumps the IAM version.
+    let before_create = get_iam_version(&admin, &endpoint).await;
+    let rule = create_mapping_rule(&admin, &endpoint, "email_domain", "old.com", gid).await;
+    let rule_id = rule["id"].as_i64().unwrap();
+    wait_for_iam_rebuild(&admin, &endpoint, before_create).await;
+
+    // UPDATE bumps the IAM version.
+    let before_update = get_iam_version(&admin, &endpoint).await;
+    let resp = admin
+        .put(format!(
+            "{}/_/api/admin/ext-auth/mappings/{}",
+            endpoint, rule_id
+        ))
+        .json(&json!({"match_value": "new.com"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "update mapping rule failed");
+    wait_for_iam_rebuild(&admin, &endpoint, before_update).await;
+
+    // DELETE bumps the IAM version.
+    let before_delete = get_iam_version(&admin, &endpoint).await;
+    let resp = admin
+        .delete(format!(
+            "{}/_/api/admin/ext-auth/mappings/{}",
+            endpoint, rule_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    wait_for_iam_rebuild(&admin, &endpoint, before_delete).await;
+}
+
+/// B2 regression: provider create/update/delete must run `rebuild_external_auth`
+/// to completion and bump the ext-auth version counter ON SUCCESS. The counter
+/// is bumped only at the END of `rebuild_external_auth` (after the rebuilt
+/// provider set is live) — a skipped or errored rebuild would never advance it,
+/// hanging `wait_for_ext_auth_rebuild` to its 5s panic. This proves the rebuild
+/// is wired into the success path of each provider mutation.
+#[tokio::test]
+async fn provider_mutations_bump_ext_auth_version() {
+    let (server, admin) = setup().await;
+    let endpoint = server.endpoint();
+
+    // CREATE bumps the ext-auth version.
+    let before_create = get_ext_auth_version(&admin, &endpoint).await;
+    let provider = create_provider(&admin, &endpoint, "acme").await;
+    let pid = provider["id"].as_i64().unwrap();
+    wait_for_ext_auth_rebuild(&admin, &endpoint, before_create).await;
+
+    // UPDATE bumps the ext-auth version.
+    let before_update = get_ext_auth_version(&admin, &endpoint).await;
+    let resp = admin
+        .put(format!(
+            "{}/_/api/admin/ext-auth/providers/{}",
+            endpoint, pid
+        ))
+        .json(&json!({"display_name": "ACME Updated"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "update provider failed");
+    wait_for_ext_auth_rebuild(&admin, &endpoint, before_update).await;
+
+    // DELETE bumps the ext-auth version.
+    let before_delete = get_ext_auth_version(&admin, &endpoint).await;
+    let resp = admin
+        .delete(format!(
+            "{}/_/api/admin/ext-auth/providers/{}",
+            endpoint, pid
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    wait_for_ext_auth_rebuild(&admin, &endpoint, before_delete).await;
 }
 
 // ============================================================================

@@ -35,7 +35,9 @@ pub struct AuthProviderConfig {
     pub updated_at: String,
 }
 
-fn default_scopes() -> String {
+/// Default OAuth/OIDC scopes. Shared with the declarative-IAM YAML
+/// projection (`iam/declarative.rs`) so both serde shapes agree.
+pub(crate) fn default_scopes() -> String {
     "openid email profile".to_string()
 }
 
@@ -106,7 +108,8 @@ pub struct CreateMappingRuleRequest {
     pub group_id: i64,
 }
 
-fn default_email() -> String {
+/// Default mapping-rule match field. Shared with `iam/declarative.rs`.
+pub(crate) fn default_email() -> String {
     "email".to_string()
 }
 
@@ -189,11 +192,11 @@ impl ConfigDb {
                 params![id],
                 Self::auth_provider_from_row,
             )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => {
+            .map_err(|e| match super::classify_sqlite_error(&e) {
+                super::SqliteErrorClass::NotFound => {
                     ConfigDbError::NotFound(format!("Auth provider ID {}", id))
                 }
-                other => ConfigDbError::Sqlite(other),
+                _ => ConfigDbError::Sqlite(e),
             })
     }
 
@@ -393,11 +396,11 @@ impl ConfigDb {
                 params![id],
                 Self::group_mapping_rule_from_row,
             )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => {
+            .map_err(|e| match super::classify_sqlite_error(&e) {
+                super::SqliteErrorClass::NotFound => {
                     ConfigDbError::NotFound(format!("Mapping rule ID {}", id))
                 }
-                other => ConfigDbError::Sqlite(other),
+                _ => ConfigDbError::Sqlite(e),
             })
     }
 
@@ -565,11 +568,11 @@ impl ConfigDb {
                 params![id],
                 Self::external_identity_from_row,
             )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => {
+            .map_err(|e| match super::classify_sqlite_error(&e) {
+                super::SqliteErrorClass::NotFound => {
                     ConfigDbError::NotFound(format!("External identity ID {}", id))
                 }
-                other => ConfigDbError::Sqlite(other),
+                _ => ConfigDbError::Sqlite(e),
             })
     }
 

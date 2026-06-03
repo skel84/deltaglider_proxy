@@ -133,15 +133,19 @@ fn secure_cookies() -> bool {
 /// Use this on the response-issuing path so a TLS-terminated front
 /// proxy yields a `Secure` cookie even when DGP_TLS_ENABLED is unset.
 pub(super) fn secure_cookies_with(headers: Option<&HeaderMap>) -> bool {
-    match std::env::var("DGP_SECURE_COOKIES") {
-        Ok(v) if v == "true" || v == "1" => return true,
-        Ok(v) if v == "false" || v == "0" => return false,
-        _ => {}
+    // Tri-state: an explicit, *recognised* DGP_SECURE_COOKIES value wins
+    // (true OR false); absent or unrecognised falls through to TLS /
+    // forwarded-proto auto-detection. The accepted truth-set matches
+    // env_bool (true/1/yes/on, false/0/no/off) — kept inline because
+    // env_bool can't express the "fall through on unset/garbage" arm.
+    if let Ok(raw) = std::env::var("DGP_SECURE_COOKIES") {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => return true,
+            "false" | "0" | "no" | "off" => return false,
+            _ => {}
+        }
     }
-    if std::env::var("DGP_TLS_ENABLED")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
-    {
+    if crate::config::env_bool("DGP_TLS_ENABLED", false) {
         return true;
     }
     if crate::rate_limiter::trust_proxy_headers() {

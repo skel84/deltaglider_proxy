@@ -371,6 +371,12 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         // number and is consumed by integration tests + internal tooling
         // to barrier on IAM mutations without a blind `sleep(1s)`.
         .route("/_/api/admin/iam/version", get(admin::iam_version))
+        // Sibling of iam/version: monotonic counter bumped on every external-auth
+        // (OAuth/OIDC provider) rebuild. Public for the same reasons.
+        .route(
+            "/_/api/admin/ext-auth/version",
+            get(admin::external_auth::ext_auth_version),
+        )
         .route("/_/api/whoami", get(admin::whoami))
         // OAuth flow (public — browser redirects back here)
         .route(

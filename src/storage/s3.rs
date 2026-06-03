@@ -246,9 +246,7 @@ impl S3Backend {
             // env var (kept for backward-compat with existing
             // deployments and the proxy's env-driven config layer).
             // A hardened production env must keep both off.
-            let env_allow = std::env::var("DGP_BACKEND_ALLOW_LOCAL")
-                .map(|v| v == "1" || v == "true")
-                .unwrap_or(false);
+            let env_allow = crate::config::env_bool("DGP_BACKEND_ALLOW_LOCAL", false);
             let kind = if allow_local || env_allow {
                 crate::security::UrlKind::BackendDev
             } else {

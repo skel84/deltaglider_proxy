@@ -127,6 +127,98 @@ pub fn bucket_name_is_ip_like(name: &str) -> bool {
     false
 }
 
+/// Why a bucket name was rejected. Carries enough context for each call
+/// site to render its own error (the S3 API extractor maps these to
+/// `S3Error::InvalidBucketName` strings; the CLU collapses to a `bool`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BucketNameError {
+    /// Name is empty.
+    Empty,
+    /// Name is shorter than 3 or longer than 63 characters.
+    BadLength(usize),
+    /// Name contains a character outside `[a-z0-9.-]`.
+    BadChar,
+    /// Name contains consecutive dots (`..`) — also a path-traversal vector.
+    ConsecutiveDots,
+    /// Name does not start with a lowercase letter or digit.
+    BadStart,
+    /// Name does not end with a lowercase letter or digit.
+    BadEnd,
+    /// Name parses as an IP literal in some dotted notation (S3 forbids these).
+    IpLike,
+}
+
+impl std::fmt::Display for BucketNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BucketNameError::Empty => write!(f, "Bucket name cannot be empty"),
+            BucketNameError::BadLength(len) => write!(
+                f,
+                "Bucket name must be between 3 and 63 characters long, got {len}"
+            ),
+            BucketNameError::BadChar => write!(
+                f,
+                "Bucket name can only contain lowercase letters, numbers, hyphens, and dots"
+            ),
+            BucketNameError::ConsecutiveDots => {
+                write!(f, "Bucket name must not contain consecutive dots")
+            }
+            BucketNameError::BadStart => {
+                write!(f, "Bucket name must start with a letter or number")
+            }
+            BucketNameError::BadEnd => write!(f, "Bucket name must end with a letter or number"),
+            BucketNameError::IpLike => {
+                write!(f, "Bucket name must not be formatted as an IP address")
+            }
+        }
+    }
+}
+
+/// Canonical S3 bucket-name validator. The CLI URL parser
+/// (`cli/s3_url.rs`) collapses to `validate_bucket_name(name).is_ok()`;
+/// the live S3 request path delegates bucket-name syntax to the upstream
+/// `s3s` framework, so this is the single in-crate source of the rule.
+///
+/// Enforces the S3 DNS-compatible naming rules — 3-63 chars, lowercase
+/// ASCII + digits + `.` + `-`, start/end alphanumeric, no `..` — AND
+/// rejects IP-shaped names via [`bucket_name_is_ip_like`]. The IP-rejection
+/// is security-relevant: an IP-shaped bucket name on the filesystem backend
+/// is harmless, but it breaks downstream SSRF heuristics that key off
+/// "does this look like an IP", so we forbid it (intentionally stricter than
+/// AWS, which only forbids the literal 4-octet dotted-quad — we also reject
+/// BSD-shorthand and radix-tagged forms like `127.1` / `0x7f.0.0.1`).
+///
+/// Pure: no I/O. Order of checks is fixed so the returned variant is
+/// deterministic for a given input (tested below).
+pub fn validate_bucket_name(name: &str) -> Result<(), BucketNameError> {
+    if name.is_empty() {
+        return Err(BucketNameError::Empty);
+    }
+    let len = name.len();
+    if !(3..=63).contains(&len) {
+        return Err(BucketNameError::BadLength(len));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+    {
+        return Err(BucketNameError::BadChar);
+    }
+    if name.contains("..") {
+        return Err(BucketNameError::ConsecutiveDots);
+    }
+    if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return Err(BucketNameError::BadStart);
+    }
+    if !name.ends_with(|c: char| c.is_ascii_alphanumeric()) {
+        return Err(BucketNameError::BadEnd);
+    }
+    if bucket_name_is_ip_like(name) {
+        return Err(BucketNameError::IpLike);
+    }
+    Ok(())
+}
+
 fn parse_ip_segment(seg: &str) -> Option<u64> {
     if seg.is_empty() {
         return None;
@@ -400,5 +492,78 @@ mod tests {
         assert!(validate_public_prefix("../etc").is_err());
         assert!(validate_public_prefix("foo//bar/").is_err());
         assert!(validate_public_prefix("foo\0bar/").is_err());
+    }
+
+    #[test]
+    fn validate_bucket_name_accepts_legal_names() {
+        for n in [
+            "my-bucket",
+            "abc",
+            "a.b.c",
+            "releases-2024",
+            "0400", // numeric but single-token → not IP-like
+            "x".repeat(63).as_str(),
+        ] {
+            assert!(
+                validate_bucket_name(n).is_ok(),
+                "{n} should be a valid bucket name"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_bucket_name_rejects_with_specific_reasons() {
+        use BucketNameError::*;
+        assert_eq!(validate_bucket_name(""), Err(Empty));
+        assert_eq!(validate_bucket_name("ab"), Err(BadLength(2)));
+        assert_eq!(validate_bucket_name(&"x".repeat(64)), Err(BadLength(64)));
+        assert_eq!(validate_bucket_name("My-Bucket"), Err(BadChar)); // uppercase
+        assert_eq!(validate_bucket_name("a_b_c"), Err(BadChar)); // underscore
+        assert_eq!(validate_bucket_name("a..b"), Err(ConsecutiveDots));
+        assert_eq!(validate_bucket_name("-abc"), Err(BadStart));
+        assert_eq!(validate_bucket_name(".abc"), Err(BadStart));
+        assert_eq!(validate_bucket_name("abc-"), Err(BadEnd));
+        assert_eq!(validate_bucket_name("abc."), Err(BadEnd));
+    }
+
+    /// The behaviour change B3 was about: the S3 API path (which previously
+    /// used a hand-rolled validator) now rejects IP-shaped names too.
+    #[test]
+    fn validate_bucket_name_rejects_ip_like() {
+        use BucketNameError::*;
+        assert_eq!(validate_bucket_name("127.0.0.1"), Err(IpLike));
+        assert_eq!(validate_bucket_name("10.0.0.1"), Err(IpLike));
+        // BSD shorthand and radix-tagged forms covered by bucket_name_is_ip_like.
+        assert_eq!(validate_bucket_name("127.1"), Err(IpLike));
+    }
+}
+
+#[cfg(test)]
+mod bucket_name_proptests {
+    use super::{validate_bucket_name, BucketNameError};
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Any name `validate_bucket_name` accepts must satisfy every
+        /// individual S3 rule — this is the invariant a reader relies on.
+        #[test]
+        fn accepted_names_satisfy_all_rules(name in ".{0,80}") {
+            if validate_bucket_name(&name).is_ok() {
+                prop_assert!((3..=63).contains(&name.len()));
+                prop_assert!(name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'));
+                prop_assert!(!name.contains(".."));
+                prop_assert!(name.starts_with(|c: char| c.is_ascii_alphanumeric()));
+                prop_assert!(name.ends_with(|c: char| c.is_ascii_alphanumeric()));
+                prop_assert!(!super::bucket_name_is_ip_like(&name));
+            }
+        }
+
+        /// The validator never panics and always returns a determinate result.
+        #[test]
+        fn never_panics(name in ".{0,200}") {
+            let _: Result<(), BucketNameError> = validate_bucket_name(&name);
+        }
     }
 }

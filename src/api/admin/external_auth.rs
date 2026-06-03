@@ -10,6 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::config_db::auth_providers::{
@@ -23,6 +24,34 @@ use crate::rate_limiter;
 use crate::session::AuthMethod;
 
 use super::{audit_log, trigger_config_sync, users::rebuild_iam_index, AdminState};
+
+/// Monotonic external-auth (OAuth/OIDC provider) version counter.
+///
+/// Mirrors `iam::IAM_VERSION`: incremented inside [`rebuild_external_auth`]
+/// AFTER the new `ExternalAuthManager` state is published, so observers
+/// polling `GET /_/api/admin/ext-auth/version` see the bump only once the
+/// rebuilt provider set is live. Lets integration tests barrier on a
+/// provider mutation deterministically instead of `sleep`.
+///
+/// One counter per process — matches the one-process-per-TestServer model.
+static EXT_AUTH_VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// Increment the external-auth version counter and return the new value.
+/// Called from [`rebuild_external_auth`] after the new provider set is live.
+pub fn bump_ext_auth_version() -> u64 {
+    EXT_AUTH_VERSION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// Read the current external-auth version counter.
+pub fn current_ext_auth_version() -> u64 {
+    EXT_AUTH_VERSION.load(Ordering::SeqCst)
+}
+
+/// GET /api/admin/ext-auth/version — monotonic counter bumped on every
+/// `rebuild_external_auth` call. Sibling of `iam_version`; same JSON shape.
+pub async fn ext_auth_version() -> impl IntoResponse {
+    Json(serde_json::json!({ "version": current_ext_auth_version() }))
+}
 
 // ── OAuth Flow (public endpoints) ──
 
@@ -503,8 +532,17 @@ pub async fn oauth_callback(
         );
     }
 
-    // Rebuild IAM index to reflect the new/updated user and group memberships
-    let _ = rebuild_iam_index(&db, &state.iam_state);
+    // Rebuild IAM index to reflect the new/updated user and group memberships.
+    // This handler returns a redirect Response (not Result<_, StatusCode>), so
+    // we can't `?`-propagate here — but a swallowed rebuild error would leave
+    // the just-provisioned user invisible to auth, so log it loudly.
+    if let Err(status) = rebuild_iam_index(&db, &state.iam_state) {
+        tracing::error!(
+            "OAuth callback: IAM index rebuild failed after provisioning '{}' (status {})",
+            user.name,
+            status
+        );
+    }
 
     // Trigger config DB sync
     drop(db); // Release lock before triggering sync
@@ -639,7 +677,7 @@ pub async fn create_provider(
     .await?;
 
     audit_log("create_auth_provider", "", &body.name, &req_headers);
-    rebuild_external_auth(&state).await;
+    rebuild_external_auth(&state).await?;
     trigger_config_sync(&state);
 
     Ok((StatusCode::CREATED, Json(provider)))
@@ -658,7 +696,7 @@ pub async fn update_provider(
     .await?;
 
     audit_log("update_auth_provider", "", &updated.name, &req_headers);
-    rebuild_external_auth(&state).await;
+    rebuild_external_auth(&state).await?;
     trigger_config_sync(&state);
 
     Ok(Json(updated))
@@ -676,7 +714,7 @@ pub async fn delete_provider(
     .await?;
 
     audit_log("delete_auth_provider", "", &id.to_string(), &req_headers);
-    rebuild_external_auth(&state).await;
+    rebuild_external_auth(&state).await?;
     trigger_config_sync(&state);
 
     Ok(StatusCode::NO_CONTENT)
@@ -736,35 +774,33 @@ pub async fn list_mappings(
 /// POST /api/admin/ext-auth/mappings — create a mapping rule.
 pub async fn create_mapping(
     State(state): State<Arc<AdminState>>,
+    req_headers: HeaderMap,
     Json(body): Json<CreateMappingRuleRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let db = state.config_db.as_ref().ok_or(StatusCode::NOT_FOUND)?;
     let db = db.lock().await;
 
-    // Validate match_type
-    let valid_types = [
-        "email_exact",
-        "email_domain",
-        "email_glob",
-        "email_regex",
-        "claim_value",
-    ];
-    if !valid_types.contains(&body.match_type.as_str()) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // Validate regex if applicable
-    if body.match_type == "email_regex" && regex_lite::Regex::new(&body.match_value).is_err() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    validate_mapping_rule(&body.match_type, &body.match_value)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let rule = db.create_group_mapping_rule(&body).map_err(|e| {
         tracing::error!("Failed to create mapping rule: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Canonical post-mutation order (see users.rs / groups.rs): rebuild the
+    // IAM index so group resolution reflects the new rule, THEN trigger
+    // config sync, THEN audit. Skipping the rebuild left stale group
+    // resolution / split-brain across instances.
+    rebuild_iam_index(&db, &state.iam_state)?;
     drop(db);
     trigger_config_sync(&state);
+    audit_log(
+        "create_mapping_rule",
+        "admin",
+        &body.match_type,
+        &req_headers,
+    );
 
     Ok((StatusCode::CREATED, Json(rule)))
 }
@@ -773,42 +809,40 @@ pub async fn create_mapping(
 pub async fn update_mapping(
     State(state): State<Arc<AdminState>>,
     Path(id): Path<i64>,
+    req_headers: HeaderMap,
     Json(body): Json<UpdateMappingRuleRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // Validate match_type if provided
-    if let Some(ref mt) = body.match_type {
-        let valid_types = [
-            "email_exact",
-            "email_domain",
-            "email_glob",
-            "email_regex",
-            "claim_value",
-        ];
-        if !valid_types.contains(&mt.as_str()) {
-            return Err(StatusCode::BAD_REQUEST);
+    // Validate match_type / match_value when either is being changed.
+    // On a partial update we may have a type without a value (or vice
+    // versa); only run the full validator when both are present, but
+    // still reject a bad match_type on its own.
+    match (body.match_type.as_deref(), body.match_value.as_deref()) {
+        (Some(mt), Some(mv)) => {
+            validate_mapping_rule(mt, mv).map_err(|_| StatusCode::BAD_REQUEST)?;
         }
+        (Some(mt), None) => {
+            validate_match_type(mt).map_err(|_| StatusCode::BAD_REQUEST)?;
+        }
+        _ => {}
     }
 
-    // Validate regex if match_type is (or becomes) email_regex
-    let is_regex_type = body
-        .match_type
-        .as_deref()
-        .map(|t| t == "email_regex")
-        .unwrap_or(false);
-    if is_regex_type {
-        if let Some(ref val) = body.match_value {
-            if regex_lite::Regex::new(val).is_err() {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-        }
-    }
+    let db = state.config_db.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let db = db.lock().await;
 
-    let rule = super::with_config_db(&state, "update mapping rule", |db| {
-        db.update_group_mapping_rule(id, &body)
-    })
-    .await?;
+    let rule = db.update_group_mapping_rule(id, &body).map_err(|e| {
+        tracing::error!("Failed to update mapping rule: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
+    rebuild_iam_index(&db, &state.iam_state)?;
+    drop(db);
     trigger_config_sync(&state);
+    audit_log(
+        "update_mapping_rule",
+        "admin",
+        &id.to_string(),
+        &req_headers,
+    );
 
     Ok(Json(rule))
 }
@@ -817,13 +851,25 @@ pub async fn update_mapping(
 pub async fn delete_mapping(
     State(state): State<Arc<AdminState>>,
     Path(id): Path<i64>,
+    req_headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    super::with_config_db(&state, "delete mapping rule", |db| {
-        db.delete_group_mapping_rule(id)
-    })
-    .await?;
+    let db = state.config_db.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let db = db.lock().await;
 
+    db.delete_group_mapping_rule(id).map_err(|e| {
+        tracing::error!("Failed to delete mapping rule: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    rebuild_iam_index(&db, &state.iam_state)?;
+    drop(db);
     trigger_config_sync(&state);
+    audit_log(
+        "delete_mapping_rule",
+        "admin",
+        &id.to_string(),
+        &req_headers,
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -937,7 +983,9 @@ pub async fn sync_memberships(
     }
 
     if users_updated > 0 {
-        let _ = rebuild_iam_index(&db, &state.iam_state);
+        // Propagate a rebuild failure (this handler returns Result) rather
+        // than silently leaving a stale IAM index after mutating memberships.
+        rebuild_iam_index(&db, &state.iam_state)?;
         drop(db);
         trigger_config_sync(&state);
     }
@@ -949,6 +997,37 @@ pub async fn sync_memberships(
 }
 
 // ── Helpers ──
+
+/// The set of valid `match_type` discriminants for a group mapping rule.
+const VALID_MAPPING_MATCH_TYPES: &[&str] = &[
+    "email_exact",
+    "email_domain",
+    "email_glob",
+    "email_regex",
+    "claim_value",
+];
+
+/// Pure validator for a mapping-rule `match_type`. Returns `Err` with a
+/// human-readable reason if the type is not one of the known kinds.
+fn validate_match_type(match_type: &str) -> Result<(), String> {
+    if VALID_MAPPING_MATCH_TYPES.contains(&match_type) {
+        Ok(())
+    } else {
+        Err(format!("invalid match_type: {match_type}"))
+    }
+}
+
+/// Pure validator for a complete group mapping rule `(match_type, match_value)`
+/// pair. Enforces the known `match_type` set and, for `email_regex`, that the
+/// value compiles as a regex. Shared by `create_mapping` and `update_mapping`
+/// so the two handlers can't drift.
+fn validate_mapping_rule(match_type: &str, match_value: &str) -> Result<(), String> {
+    validate_match_type(match_type)?;
+    if match_type == "email_regex" && regex_lite::Regex::new(match_value).is_err() {
+        return Err(format!("invalid email_regex pattern: {match_value}"));
+    }
+    Ok(())
+}
 
 /// Build the OAuth callback URI from request headers.
 /// Respects X-Forwarded-Proto/X-Forwarded-Host from reverse proxies.
@@ -974,14 +1053,28 @@ fn build_callback_uri(headers: &HeaderMap) -> String {
 }
 
 /// Rebuild the ExternalAuthManager from current ConfigDb state.
-async fn rebuild_external_auth(state: &Arc<AdminState>) {
+///
+/// Fallible on purpose: if `load_auth_providers()` fails we must NOT proceed to
+/// `rebuild(&[])` (which would silently wipe every live provider) and must NOT
+/// bump the version counter (which would falsely signal a successful publish to
+/// `GET /_/api/admin/ext-auth/version` pollers). Callers propagate the error so
+/// a provider mutation whose rebuild failed surfaces a 500 instead of a lying
+/// 2xx — mirroring how `rebuild_iam_index` errors propagate.
+async fn rebuild_external_auth(state: &Arc<AdminState>) -> Result<(), StatusCode> {
     if let (Some(ext_auth), Some(config_db)) = (&state.external_auth, &state.config_db) {
         let db = config_db.lock().await;
-        let providers = db.load_auth_providers().unwrap_or_default();
+        let providers = db.load_auth_providers().map_err(|e| {
+            tracing::error!("rebuild_external_auth: load_auth_providers failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         ext_auth.rebuild(&providers);
         drop(db);
         ext_auth.discover_all().await;
+        // Bump AFTER the rebuilt provider set is live + discovery kicked off,
+        // so a version observer never sees the new number before the new state.
+        bump_ext_auth_version();
     }
+    Ok(())
 }
 
 /// Simple HTML error page for OAuth callback errors.
@@ -1055,9 +1148,51 @@ fn symmetric_diff_count(a: &[i64], b: &[i64]) -> usize {
 mod tests {
     use super::{
         extract_oauth_state_cookie, oauth_state_clear_cookie, oauth_state_cookie,
-        sanitize_next_param,
+        sanitize_next_param, validate_mapping_rule, validate_match_type,
     };
     use axum::http::HeaderMap;
+
+    #[test]
+    fn validate_match_type_accepts_known_kinds() {
+        for t in [
+            "email_exact",
+            "email_domain",
+            "email_glob",
+            "email_regex",
+            "claim_value",
+        ] {
+            assert!(validate_match_type(t).is_ok(), "{t} should be valid");
+        }
+    }
+
+    #[test]
+    fn validate_match_type_rejects_unknown() {
+        assert!(validate_match_type("").is_err());
+        assert!(validate_match_type("email").is_err());
+        assert!(validate_match_type("EMAIL_EXACT").is_err()); // case-sensitive
+        assert!(validate_match_type("claim").is_err());
+    }
+
+    #[test]
+    fn validate_mapping_rule_non_regex_ignores_value() {
+        // For non-regex types the value is opaque — anything goes.
+        assert!(validate_mapping_rule("email_exact", "a@b.com").is_ok());
+        assert!(validate_mapping_rule("email_domain", "(((").is_ok());
+        assert!(validate_mapping_rule("claim_value", "[not a regex").is_ok());
+    }
+
+    #[test]
+    fn validate_mapping_rule_regex_must_compile() {
+        assert!(validate_mapping_rule("email_regex", r"^.+@example\.com$").is_ok());
+        // Unbalanced group → compile failure → Err.
+        assert!(validate_mapping_rule("email_regex", "(((").is_err());
+        assert!(validate_mapping_rule("email_regex", "[a-").is_err());
+    }
+
+    #[test]
+    fn validate_mapping_rule_rejects_bad_type() {
+        assert!(validate_mapping_rule("nope", "x").is_err());
+    }
 
     #[test]
     fn accepts_safe_local_paths() {

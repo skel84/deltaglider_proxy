@@ -988,6 +988,53 @@ pub async fn wait_for_iam_rebuild(client: &reqwest::Client, endpoint: &str, base
     }
 }
 
+/// Read the proxy's external-auth (OAuth/OIDC provider) version counter.
+///
+/// Backed by `GET /_/api/admin/ext-auth/version`, incremented by
+/// `rebuild_external_auth` (src/api/admin/external_auth.rs) AFTER the
+/// rebuilt provider set is live. Sibling of [`get_iam_version`]. Used by
+/// [`wait_for_ext_auth_rebuild`] as the barrier primitive for provider
+/// mutations.
+pub async fn get_ext_auth_version(client: &reqwest::Client, endpoint: &str) -> u64 {
+    let resp = client
+        .get(format!("{endpoint}/_/api/admin/ext-auth/version"))
+        .send()
+        .await
+        .expect("ext-auth/version GET");
+    assert!(
+        resp.status().is_success(),
+        "ext-auth/version must return 2xx, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("ext-auth/version JSON");
+    body["version"].as_u64().expect("version is u64")
+}
+
+/// Wait until the proxy's external-auth rebuild counter advances past
+/// `baseline`. Same call pattern as [`wait_for_iam_rebuild`] but for
+/// OAuth/OIDC provider mutations (create/update/delete provider). Panics
+/// after 5s — a missing counter advance means `rebuild_external_auth`
+/// either didn't run or failed (and so correctly did NOT bump on error).
+pub async fn wait_for_ext_auth_rebuild(client: &reqwest::Client, endpoint: &str, baseline: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut attempts = 0u32;
+    loop {
+        let current = get_ext_auth_version(client, endpoint).await;
+        if current > baseline {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "wait_for_ext_auth_rebuild timed out after 5s: baseline={baseline}, \
+                 current={current}, attempts={attempts} — provider mutation didn't \
+                 trigger rebuild_external_auth or the counter isn't being bumped"
+            );
+        }
+        attempts += 1;
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Make a raw ListObjectsV2 request and return the XML body.
 pub async fn list_objects_raw(
     client: &reqwest::Client,

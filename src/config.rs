@@ -605,7 +605,7 @@ pub enum BackendEncryptionConfig {
         /// KMS key ARN or alias. Required.
         kms_key_id: String,
         /// Enable S3 bucket keys (reduces KMS cost on bursty traffic).
-        #[serde(default = "default_true")]
+        #[serde(default = "crate::types::default_true")]
         bucket_key_enabled: bool,
         /// Decrypt-only shim: keep reading objects written with the
         /// old proxy-mode key after migrating to SSE-KMS.
@@ -623,11 +623,6 @@ pub enum BackendEncryptionConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         legacy_key_id: Option<String>,
     },
-}
-
-/// Default function for `bucket_key_enabled` serde attribute.
-pub(crate) fn default_true() -> bool {
-    true
 }
 
 /// `skip_serializing_if` helper: backends with encryption `None` (and
@@ -984,6 +979,21 @@ impl Default for Config {
             group_mapping_rules: Vec::new(),
         }
     }
+}
+
+/// Outcome of [`Config::classify_auth_config`]. The caller maps each
+/// variant to the appropriate logging + (for the fatal cases) process exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthConfigOutcome {
+    /// SigV4 credentials are configured → auth is ON. `redundant_none` is
+    /// true if `authentication = "none"` was also set (ignored — worth a note).
+    CredentialsEnabled { redundant_none: bool },
+    /// No credentials, `authentication = "none"` → explicit open access.
+    OpenAccess,
+    /// No credentials, an unrecognised `authentication` value → FATAL.
+    UnrecognizedMode,
+    /// No credentials AND no `authentication` field → FATAL (refuse to start).
+    Missing,
 }
 
 /// Parse an env var into a typed value, warning on invalid input.
@@ -1346,14 +1356,10 @@ impl Config {
             self.backend = BackendConfig::S3 {
                 endpoint: std::env::var("DGP_S3_ENDPOINT").ok(),
                 region: std::env::var("DGP_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
-                force_path_style: std::env::var("DGP_S3_PATH_STYLE")
-                    .map(|v| v == "true" || v == "1")
-                    .unwrap_or(true),
+                force_path_style: env_bool("DGP_S3_PATH_STYLE", true),
                 access_key_id: std::env::var("DGP_BE_AWS_ACCESS_KEY_ID").ok(),
                 secret_access_key: std::env::var("DGP_BE_AWS_SECRET_ACCESS_KEY").ok(),
-                allow_local: std::env::var("DGP_BACKEND_ALLOW_LOCAL")
-                    .map(|v| v == "true" || v == "1")
-                    .unwrap_or(false),
+                allow_local: env_bool("DGP_BACKEND_ALLOW_LOCAL", false),
             };
         } else if let Ok(dir) = std::env::var("DGP_DATA_DIR") {
             self.backend = BackendConfig::Filesystem {
@@ -1438,14 +1444,12 @@ impl Config {
         apply_backend_encryption_env("default", &mut self.backend_encryption);
 
         // TLS configuration
-        if let Ok(enabled) = std::env::var("DGP_TLS_ENABLED") {
-            if enabled == "true" || enabled == "1" {
-                self.tls = Some(TlsConfig {
-                    enabled: true,
-                    cert_path: std::env::var("DGP_TLS_CERT").ok(),
-                    key_path: std::env::var("DGP_TLS_KEY").ok(),
-                });
-            }
+        if env_bool("DGP_TLS_ENABLED", false) {
+            self.tls = Some(TlsConfig {
+                enabled: true,
+                cert_path: std::env::var("DGP_TLS_CERT").ok(),
+                key_path: std::env::var("DGP_TLS_KEY").ok(),
+            });
         }
     }
 
@@ -1765,6 +1769,35 @@ impl Config {
     /// Returns true if SigV4 authentication is enabled (both credentials are set).
     pub fn auth_enabled(&self) -> bool {
         self.access_key_id.is_some() && self.secret_access_key.is_some()
+    }
+
+    /// Pure classification of the auth configuration at startup. Decides
+    /// *which* outcome the process should take; the caller (`startup.rs`)
+    /// owns the logging and the `process::exit` so this stays unit-testable
+    /// without spawning a process or capturing stderr.
+    ///
+    /// See [`AuthConfigOutcome`] for the meaning of each variant.
+    pub fn classify_auth_config(&self) -> AuthConfigOutcome {
+        // Normalize the authentication field: lowercase + trim whitespace.
+        let auth_mode = self
+            .authentication
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase());
+        let auth_mode = auth_mode.as_deref();
+
+        if self.auth_enabled() {
+            // Credentials are set — auth is on regardless of the field. A
+            // stray `authentication = "none"` is ignored (but worth a note).
+            return AuthConfigOutcome::CredentialsEnabled {
+                redundant_none: auth_mode == Some("none"),
+            };
+        }
+
+        match auth_mode {
+            Some("none") => AuthConfigOutcome::OpenAccess,
+            Some(_) => AuthConfigOutcome::UnrecognizedMode,
+            None => AuthConfigOutcome::Missing,
+        }
     }
 
     /// Returns true if TLS is enabled.
@@ -2264,6 +2297,64 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.listen_addr.port(), 9000);
         assert!(matches!(config.backend, BackendConfig::Filesystem { .. }));
+    }
+
+    /// Build a Config with the three auth-relevant fields set and
+    /// everything else defaulted (avoids clippy's field-reassign lint).
+    fn auth_cfg(ak: Option<&str>, sk: Option<&str>, auth: Option<&str>) -> Config {
+        Config {
+            access_key_id: ak.map(Into::into),
+            secret_access_key: sk.map(Into::into),
+            authentication: auth.map(Into::into),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn classify_auth_config_credentials_enabled() {
+        assert_eq!(
+            auth_cfg(Some("AK"), Some("SK"), None).classify_auth_config(),
+            AuthConfigOutcome::CredentialsEnabled {
+                redundant_none: false
+            }
+        );
+        // Credentials win even if authentication = "none" is also set.
+        assert_eq!(
+            auth_cfg(Some("AK"), Some("SK"), Some("none")).classify_auth_config(),
+            AuthConfigOutcome::CredentialsEnabled {
+                redundant_none: true
+            }
+        );
+    }
+
+    #[test]
+    fn classify_auth_config_open_access() {
+        // Case/whitespace-insensitive normalisation.
+        assert_eq!(
+            auth_cfg(None, None, Some("  NONE  ")).classify_auth_config(),
+            AuthConfigOutcome::OpenAccess
+        );
+    }
+
+    #[test]
+    fn classify_auth_config_unrecognized_mode_is_fatal() {
+        assert_eq!(
+            auth_cfg(None, None, Some("disabled")).classify_auth_config(),
+            AuthConfigOutcome::UnrecognizedMode
+        );
+    }
+
+    #[test]
+    fn classify_auth_config_missing_is_fatal() {
+        assert_eq!(
+            auth_cfg(None, None, None).classify_auth_config(),
+            AuthConfigOutcome::Missing
+        );
+        // A single credential without its pair is NOT "enabled" → still Missing.
+        assert_eq!(
+            auth_cfg(Some("AK"), None, None).classify_auth_config(),
+            AuthConfigOutcome::Missing
+        );
     }
 
     #[test]

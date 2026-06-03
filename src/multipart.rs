@@ -185,11 +185,10 @@ fn default_max_uploads() -> usize {
 /// safety margin so legitimate multi-uploader workloads still fit while
 /// attackers hit the ceiling before they can saturate memory.
 fn default_max_total_multipart_bytes(max_object_size: u64, max_uploads: usize) -> u64 {
-    // Allow operator override (absolute bytes).
-    if let Ok(v) = std::env::var("DGP_MAX_TOTAL_MULTIPART_BYTES") {
-        if let Ok(n) = v.parse::<u64>() {
-            return n;
-        }
+    // Allow operator override (absolute bytes). Routed through env_parse
+    // for consistent warn-on-invalid behaviour.
+    if let Some(n) = crate::config::env_parse::<u64>("DGP_MAX_TOTAL_MULTIPART_BYTES") {
+        return n;
     }
     // Default: max_object_size * (max_uploads / 4), clamped to at least
     // max_object_size (one full upload must always fit).

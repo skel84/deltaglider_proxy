@@ -109,9 +109,5 @@ pub(crate) async fn ensure_bucket_exists(
 /// Checked once at startup from the `DGP_DEBUG_HEADERS` env var.
 pub fn debug_headers_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("DGP_DEBUG_HEADERS")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false)
-    })
+    *ENABLED.get_or_init(|| crate::config::env_bool("DGP_DEBUG_HEADERS", false))
 }

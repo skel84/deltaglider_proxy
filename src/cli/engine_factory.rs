@@ -64,7 +64,9 @@ pub async fn build_cli_engine(opts: CliEngineOpts) -> Result<DynEngine, BuildErr
     };
     let mut cfg = Config {
         backend,
-        max_delta_ratio: opts.max_delta_ratio.unwrap_or_else(default_max_delta_ratio),
+        max_delta_ratio: opts
+            .max_delta_ratio
+            .unwrap_or_else(crate::config::default_max_delta_ratio),
         ..Config::default()
     };
     if let Some(size) = opts.max_object_size {
@@ -73,10 +75,6 @@ pub async fn build_cli_engine(opts: CliEngineOpts) -> Result<DynEngine, BuildErr
 
     let engine = DynEngine::new(&cfg, None).await?;
     Ok(engine)
-}
-
-fn default_max_delta_ratio() -> f32 {
-    Config::default().max_delta_ratio
 }
 
 /// Render an engine error for the operator. For `TooLarge` we surface

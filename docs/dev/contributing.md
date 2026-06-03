@@ -73,7 +73,6 @@ src/
 │   ├── auth.rs          # SigV4 auth middleware + public prefix bypass
 │   ├── admin/           # Admin API (login, config, users, groups, auth providers, backup)
 │   ├── aws_chunked.rs   # AWS chunked transfer encoding decoder
-│   ├── extractors.rs    # Axum request extractors (ValidatedBucket, ValidatedPath)
 │   ├── errors.rs        # S3 error responses
 │   └── xml.rs           # S3 XML response/request builders
 ├── deltaglider/

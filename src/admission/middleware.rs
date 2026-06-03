@@ -93,11 +93,12 @@ pub async fn admission_middleware(mut request: Request<Body>, next: Next) -> Res
                 "[admission] DENY matched block `{}`",
                 matched
             );
-            return s3_style_error(
-                StatusCode::FORBIDDEN,
-                "AccessDenied",
-                &format!("admission-deny:{}", matched),
-            );
+            // Route through the canonical S3 error builder so the XML
+            // shape (and the `x-amz-request-id` header) match every other
+            // AccessDenied the proxy emits. The matched-block name stays
+            // in the warn log above — we don't leak rule names to clients.
+            let _ = matched;
+            return crate::api::errors::S3Error::AccessDenied.into_response();
         }
         Decision::Reject {
             matched,
@@ -121,22 +122,6 @@ pub async fn admission_middleware(mut request: Request<Body>, next: Next) -> Res
     }
 
     next.run(request).await
-}
-
-/// S3-style XML error response used for admission `Deny` decisions.
-/// Matches the shape clients already expect from SigV4 / IAM
-/// rejections so integration tooling doesn't need a special case.
-fn s3_style_error(status: StatusCode, code: &str, message: &str) -> Response {
-    let body = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-         <Error><Code>{code}</Code><Message>{message}</Message></Error>"
-    );
-    let mut resp = (status, body).into_response();
-    resp.headers_mut().insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/xml"),
-    );
-    resp
 }
 
 /// Parse the request into the shape the evaluator consumes. Extracted so

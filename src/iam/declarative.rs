@@ -121,13 +121,9 @@ pub struct DeclarativeMappingRule {
     pub group: String,
 }
 
-fn default_scopes() -> String {
-    "openid email profile".to_string()
-}
-
-fn default_email() -> String {
-    "email".to_string()
-}
+// Provider/mapping serde defaults are shared with the config-DB shapes
+// (`config_db::auth_providers`) so the two representations can't drift.
+use crate::config_db::auth_providers::{default_email, default_scopes};
 
 /// The whole declarative IAM snapshot, projected out of `AccessSection`.
 /// Built inside `apply_config_transition` right before the reconciler
