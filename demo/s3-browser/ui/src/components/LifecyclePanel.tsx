@@ -368,7 +368,7 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
           title="Object lifecycle"
           description="Delete-only expiration rules. Preview is read-only; run-now is explicit and guarded."
         />
-        <div style={formRow(16, { flexWrap: 'wrap', marginTop: 14 })}>
+        <div style={formRow(16, { flexWrap: 'wrap' })}>
           <label style={formRow(8)}>
             <Switch checked={lifecycle.enabled} onChange={(enabled) => updateConfig({ enabled })} />
             <Text strong>Automatic scheduler</Text>

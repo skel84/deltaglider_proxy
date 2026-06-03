@@ -267,7 +267,7 @@ export function ListenerTlsPanel({ onSessionExpired }: PanelProps) {
           title="HTTP listener"
           description="Where the proxy binds for incoming S3 traffic."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <FormField
             label={
               <>
@@ -296,7 +296,7 @@ export function ListenerTlsPanel({ onSessionExpired }: PanelProps) {
           title="TLS"
           description="Optional HTTPS for the listener. When disabled, the proxy speaks plain HTTP — put it behind a reverse proxy that terminates TLS for you."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <FormField label="Enable TLS" yamlPath="advanced.tls.enabled">
             <Switch
               checked={tlsEnabled}
@@ -376,7 +376,7 @@ export function CachesPanel({ onSessionExpired }: PanelProps) {
           title="Caches"
           description="In-memory caches the proxy uses to accelerate delta reconstruction and metadata lookups. Larger values trade memory for throughput."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <FormField
             label={
               <>
@@ -645,7 +645,7 @@ export function LoggingPanel({ onSessionExpired }: PanelProps) {
           title="Log level"
           description="tracing-subscriber EnvFilter string. Hot-reloadable: changes take effect on the next request after Apply."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <Radio.Group
             value={radioValue}
             onChange={(e) => {

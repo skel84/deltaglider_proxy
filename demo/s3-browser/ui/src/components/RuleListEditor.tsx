@@ -67,7 +67,7 @@ export default function RuleListEditor<TRule>({
           title="Rules"
           description={loading ? 'Loading...' : `${rules.length} configured rule${rules.length === 1 ? '' : 's'}.`}
         />
-        <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {rules.map((rule) => {
             const name = getName(rule);
             const active = selectedKey === name;

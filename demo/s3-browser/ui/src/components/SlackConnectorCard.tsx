@@ -184,7 +184,6 @@ export default function SlackConnectorCard({
       {/* No-OAuth note — discreet one-liner, not a banner. */}
       <div
         style={{
-          marginTop: 14,
           display: 'flex',
           alignItems: 'center',
           gap: 8,

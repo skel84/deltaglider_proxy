@@ -265,7 +265,7 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
           title="Object replication"
           description="Copy object data between buckets or prefixes through the DeltaGlider engine, preserving encryption and compression transparency."
         />
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Switch checked={replication.enabled} onChange={(v) => updateConfig({ enabled: v })} />
             <Text strong>Automatic scheduler</Text>

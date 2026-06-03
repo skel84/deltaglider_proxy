@@ -322,7 +322,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
           title="Event delivery"
           description="Deliver durable object events (create/delete/copy) downstream. The outbox accrues events even while disabled — they deliver once you enable + configure a destination below."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <FormField label="Enable delivery" yamlPath="advanced.event_delivery.enabled">
             <Switch checked={form.enabled} onChange={(v) => setField({ enabled: v })} />
           </FormField>
@@ -455,7 +455,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
               title="Raw webhook destination"
               description="POST the deltaglider.event.v1 JSON envelope to one or more HTTP endpoints with optional static headers."
             />
-            <div style={{ marginTop: 16 }}>
+            <div>
               <FormField
                 label="Endpoints"
                 yamlPath="advanced.event_delivery.webhook_urls"

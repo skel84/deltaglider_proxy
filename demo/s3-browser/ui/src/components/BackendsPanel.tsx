@@ -328,7 +328,7 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
         {showForm && (
           <div style={cardStyle}>
             <SectionHeader icon={<PlusOutlined />} title="New Backend" />
-            <div style={{ marginTop: 16 }}>
+            <div>
               <FormField label="Name" yamlPath="storage.backends[].name">
                 <Input value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="e.g. local, hetzner, aws-prod" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
               </FormField>
@@ -384,7 +384,7 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
             title="Bucket policy routing"
             description="Per-bucket routing, compression, aliases, quotas, and public read live in the Buckets page."
           />
-          <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
             {[
               ['Policies', bucketPolicyEntries.length, 'custom bucket rows'],
               ['Routed', routedPolicies.length, 'non-default backend'],

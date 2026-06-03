@@ -11,10 +11,9 @@
  * ## Anatomy
  *
  * ```
- *  ┌── Label — Plain English name (not YAML key)
- *  │     YAML path • example chip • example chip
+ *  ┌── Label — Plain English name (not YAML key)  `yaml.path` (code chip)
  *  │     [       input (passed as children)       ]
- *  │     Help text below the input — one sentence.
+ *  │     Help text below the input — one sentence. • example chip
  *  └──
  *         ↑
  *    Amber left bar when `overrideActive` is true.
@@ -89,20 +88,22 @@ export default function FormField({
   children,
   style,
 }: FormFieldProps) {
-  const { TEXT_PRIMARY: TEXT, TEXT_MUTED, BG_CARD } = useColors();
+  const { TEXT_PRIMARY: TEXT, TEXT_MUTED, TEXT_FAINT, BG_CARD, BORDER } = useColors();
   const barColour = overrideColour || '#d18616'; // amber — matches §2.6 "override" indicator
+  // Tight groups, air between: the label→input→help unit hugs together; the
+  // BIG gap lives at the bottom of the group so each field reads as one chunk.
   const containerStyle: CSSProperties = {
     position: 'relative',
-    paddingLeft: overrideActive ? 10 : 0,
-    marginBottom: 20,
+    paddingLeft: overrideActive ? 12 : 0,
+    marginBottom: 32,
     transition: 'padding-left 120ms ease',
     ...style,
   };
   const barStyle: CSSProperties = {
     position: 'absolute',
     left: 0,
-    top: 2,
-    bottom: 2,
+    top: 0,
+    bottom: 0,
     width: 3,
     borderRadius: 3,
     background: barColour,
@@ -110,30 +111,43 @@ export default function FormField({
   };
 
   return (
-    <div style={containerStyle}>
+    <div className="dg-field" style={containerStyle}>
       <div style={barStyle} aria-hidden="true" />
-      {/* Label row: plain-English name, YAML path, owner badge */}
+      {/* Label row: plain-English name + the YAML path as a code chip on the
+          side. The chip is hidden until the field is hovered/focused (see
+          `.dg-field .dg-yaml-path` in theme.css) so the bold label is the only
+          thing competing for the eye at rest. */}
       <div
         style={{
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          marginBottom: 4,
+          marginBottom: 6,
           flexWrap: 'wrap',
         }}
       >
-        <span style={{ color: TEXT, fontSize: 13, fontWeight: 600 }}>{label}</span>
+        <span
+          style={{ color: TEXT, fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.005em' }}
+        >
+          {label}
+        </span>
         {yamlPath && (
-          <span
+          <code
+            className="dg-yaml-path"
             style={{
-              color: TEXT_MUTED,
-              fontSize: 11,
               fontFamily: 'var(--font-mono)',
+              fontSize: 11,
+              color: TEXT_FAINT,
+              background: BG_CARD,
+              border: `1px solid ${BORDER}`,
+              borderRadius: 4,
+              padding: '1px 6px',
+              lineHeight: '18px',
             }}
             title="YAML path for this field"
           >
             {yamlPath}
-          </span>
+          </code>
         )}
         {ownerBadge && (
           <Tag
@@ -151,15 +165,17 @@ export default function FormField({
           </Tag>
         )}
       </div>
-      {/* Input */}
+      {/* Input — hugs the label above it */}
       <div>{children}</div>
-      {/* Under-input row: help text and example chips */}
+      {/* Help text — clearly subordinate: smaller, fainter, tight line-height.
+          Example chips share this row. */}
       {(helpText || defaultPlaceholder || (examples && examples.length > 0)) && (
         <div
           style={{
-            marginTop: 4,
-            fontSize: 11,
+            marginTop: 6,
+            fontSize: 12.5,
             color: TEXT_MUTED,
+            lineHeight: 1.4,
             display: 'flex',
             flexWrap: 'wrap',
             gap: 8,
@@ -171,8 +187,8 @@ export default function FormField({
             <span
               style={{
                 fontFamily: 'var(--font-mono)',
-                fontSize: 10,
-                opacity: 0.8,
+                fontSize: 11,
+                color: TEXT_FAINT,
               }}
               title="Runtime default when this field is omitted"
             >
@@ -180,13 +196,7 @@ export default function FormField({
             </span>
           )}
           {examples && examples.length > 0 && (
-            <span
-              style={{
-                display: 'inline-flex',
-                gap: 4,
-                flexWrap: 'wrap',
-              }}
-            >
+            <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
               {examples.map((ex, i) => (
                 <button
                   key={i}
@@ -201,7 +211,7 @@ export default function FormField({
                     cursor: onExampleClick ? 'pointer' : 'default',
                     color: TEXT_MUTED,
                     fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
+                    fontSize: 11,
                   }}
                   title={onExampleClick ? `Use "${ex}" as the value` : `Example value "${ex}"`}
                 >
