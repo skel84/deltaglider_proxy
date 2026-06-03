@@ -34,6 +34,7 @@ import {
 import { useColors } from '../ThemeContext';
 import SectionHeader from './SectionHeader';
 import FormField from './FormField';
+import SlackSetupGuide from './SlackSetupGuide';
 import { AdvancedDisclosure } from './ruleEditorFields';
 import {
   SLACK_NOTIFY_KINDS,
@@ -62,7 +63,6 @@ interface Props {
   removeUrl: (id: string) => void;
 }
 
-const APP_LINK = 'https://api.slack.com/apps?new_app=1';
 
 export default function SlackConnectorCard({
   form,
@@ -317,13 +317,6 @@ export default function SlackConnectorCard({
         onBucket={setSampleBucket}
         onKey={setSampleKey}
       />
-
-      <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 12 }}>
-        Need an app?{' '}
-        <a href={APP_LINK} target="_blank" rel="noreferrer">
-          Create a Slack app →
-        </a>
-      </Text>
     </>
   );
 }
@@ -331,50 +324,6 @@ export default function SlackConnectorCard({
 // ─────────────────────────────────────────────────────────────────────────
 // Mode-specific field groups
 // ─────────────────────────────────────────────────────────────────────────
-
-function MiniGuide({ steps }: { steps: string[] }) {
-  const { TEXT_MUTED, BORDER } = useColors();
-  return (
-    <ol
-      style={{
-        margin: '0 0 12px',
-        paddingLeft: 0,
-        listStyle: 'none',
-        counterReset: 'slk',
-        borderLeft: `2px solid ${BORDER}`,
-      }}
-    >
-      {steps.map((s, i) => (
-        <li
-          key={i}
-          style={{
-            counterIncrement: 'slk',
-            position: 'relative',
-            paddingLeft: 28,
-            marginBottom: 6,
-            fontSize: 12,
-            color: TEXT_MUTED,
-            lineHeight: 1.4,
-          }}
-        >
-          <span
-            aria-hidden="true"
-            style={{
-              position: 'absolute',
-              left: 8,
-              top: 0,
-              fontWeight: 700,
-              fontFamily: 'var(--font-mono)',
-            }}
-          >
-            {i + 1}.
-          </span>
-          {s}
-        </li>
-      ))}
-    </ol>
-  );
-}
 
 function WebhookModeFields({
   form,
@@ -393,15 +342,10 @@ function WebhookModeFields({
   setField: (patch: Partial<WebhookFormState>) => void;
   colors: ReturnType<typeof useColors>;
 }) {
+  const noEndpoints = form.urlRows.every((r) => !r.url.trim());
   return (
     <div style={{ marginTop: 8 }}>
-      <MiniGuide
-        steps={[
-          'Create a Slack app (or open an existing one).',
-          'Enable “Incoming Webhooks” and add one for your channel.',
-          'Paste the hooks.slack.com webhook URL below.',
-        ]}
-      />
+      <SlackSetupGuide mode="webhook" defaultOpen={noEndpoints} />
       <FormField
         label="Incoming Webhook URL"
         yamlPath="advanced.event_delivery.webhook_urls"
@@ -474,16 +418,12 @@ function BotModeFields({
   inputRadius: React.CSSProperties;
   colors: ReturnType<typeof useColors>;
 }) {
+  // Open the guide by default when no token is configured yet (neither a
+  // server-masked one nor a freshly-typed value).
+  const noToken = !form.slackBotTokenMasked && !form.slackBotToken.trim();
   return (
     <div style={{ marginTop: 8 }}>
-      <MiniGuide
-        steps={[
-          'Create a Slack app (or open an existing one).',
-          'Add the chat:write and chat:write.public bot scopes.',
-          'Install the app to your workspace.',
-          'Paste the xoxb- bot token and the target channel below.',
-        ]}
-      />
+      <SlackSetupGuide mode="bot" defaultOpen={noToken} />
       <FormField
         label="Bot token"
         yamlPath="advanced.event_delivery.slack_bot_token"
