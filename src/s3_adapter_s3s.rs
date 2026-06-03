@@ -1699,6 +1699,7 @@ fn engine_error_to_s3s(err: impl Into<crate::api::S3Error>) -> s3s::S3Error {
             s3s::s3_error!(InvalidBucketName, "{}", msg)
         }
         crate::api::S3Error::AccessDenied => s3s::s3_error!(AccessDenied),
+        crate::api::S3Error::AccessDeniedReason(msg) => s3s::s3_error!(AccessDenied, "{}", msg),
         crate::api::S3Error::PreconditionFailed => s3s::s3_error!(PreconditionFailed),
         crate::api::S3Error::InvalidRange => s3s::s3_error!(InvalidRange),
         other => {

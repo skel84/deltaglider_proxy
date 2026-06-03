@@ -93,12 +93,17 @@ pub async fn admission_middleware(mut request: Request<Body>, next: Next) -> Res
                 "[admission] DENY matched block `{}`",
                 matched
             );
-            // Route through the canonical S3 error builder so the XML
-            // shape (and the `x-amz-request-id` header) match every other
-            // AccessDenied the proxy emits. The matched-block name stays
-            // in the warn log above — we don't leak rule names to clients.
-            let _ = matched;
-            return crate::api::errors::S3Error::AccessDenied.into_response();
+            // Route through the canonical S3 error builder so the XML shape
+            // (and the `x-amz-request-id` header) match every other
+            // AccessDenied the proxy emits — while keeping the matched-block
+            // name in the `<Message>` (`admission-deny:<block>`). That name is
+            // a deliberate operator-debugging affordance (asserted by
+            // tests/admission_test.rs): a denied client can see which rule
+            // fired, mirroring how SigV4/IAM denials are already traceable.
+            return crate::api::errors::S3Error::AccessDeniedReason(format!(
+                "admission-deny:{matched}"
+            ))
+            .into_response();
         }
         Decision::Reject {
             matched,

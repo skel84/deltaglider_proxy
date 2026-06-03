@@ -69,6 +69,13 @@ pub enum S3Error {
     #[error("AccessDenied: Access Denied")]
     AccessDenied,
 
+    /// AccessDenied with a specific reason in the `<Message>` (S3 code stays
+    /// `AccessDenied`). Used by the admission chain so a denied client sees
+    /// which block fired (`admission-deny:<block>`) — a deliberate operator
+    /// debugging affordance, asserted by `tests/admission_test.rs`.
+    #[error("{0}")]
+    AccessDeniedReason(String),
+
     #[error("SignatureDoesNotMatch: The request signature we calculated does not match the signature you provided.")]
     SignatureDoesNotMatch,
 
@@ -111,6 +118,7 @@ impl S3Error {
             S3Error::InvalidDigest => "InvalidDigest",
             S3Error::NotImplemented(_) => "NotImplemented",
             S3Error::AccessDenied => "AccessDenied",
+            S3Error::AccessDeniedReason(_) => "AccessDenied",
             S3Error::SignatureDoesNotMatch => "SignatureDoesNotMatch",
             S3Error::SlowDown(_) => "SlowDown",
             S3Error::RequestTimeTooSkewed => "RequestTimeTooSkewed",
@@ -140,6 +148,7 @@ impl S3Error {
             S3Error::InvalidDigest => StatusCode::BAD_REQUEST,
             S3Error::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             S3Error::AccessDenied => StatusCode::FORBIDDEN,
+            S3Error::AccessDeniedReason(_) => StatusCode::FORBIDDEN,
             S3Error::SignatureDoesNotMatch => StatusCode::FORBIDDEN,
             S3Error::SlowDown(_) => StatusCode::SERVICE_UNAVAILABLE,
             S3Error::RequestTimeTooSkewed => StatusCode::FORBIDDEN,
