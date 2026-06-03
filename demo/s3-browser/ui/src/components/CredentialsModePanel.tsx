@@ -229,7 +229,7 @@ export default function CredentialsModePanel({ onSessionExpired }: Props) {
           title="IAM mode"
           description="Who owns the user directory: this admin GUI + DB, or your YAML config?"
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <Radio.Group
             value={form.iam_mode ?? 'gui'}
             onChange={(e) => setIamMode(e.target.value as IamMode)}
@@ -284,7 +284,7 @@ export default function CredentialsModePanel({ onSessionExpired }: Props) {
           title="S3 authentication mode"
           description="Whether clients must sign their requests with SigV4."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <Radio.Group
             value={authMode}
             onChange={(e) => setAuthMode(e.target.value as AuthMode)}
@@ -326,7 +326,7 @@ export default function CredentialsModePanel({ onSessionExpired }: Props) {
           title="Bootstrap SigV4 credentials"
           description="Used before any IAM users exist, and by legacy scripted clients. Not the same as the admin GUI password."
         />
-        <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <FormField
             label="Access key ID"
             yamlPath="access.access_key_id"

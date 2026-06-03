@@ -121,6 +121,58 @@ docs/                    # Documentation
 - **StorageBackend**: A trait abstracting where bytes live — local filesystem or upstream S3. Adding a new backend means implementing this trait.
 - **File router**: Decides whether a file is delta-eligible based on its extension (`.zip`, `.jar`, `.tar`, etc.) or should be stored as passthrough (`.jpg`, `.mp4`, etc.).
 
+## Admin-UI patterns (frontend)
+
+The admin GUI (`demo/s3-browser/ui`) has converged on a small set of canonical
+patterns. New panels and edits should follow these rather than re-inventing —
+divergence here has historically produced a recurring "admin-editor bug class"
+(stale closures, array-index keys, double sources of truth).
+
+**Two data families, two pipelines.**
+- **Config sections** (`admission` / `access` / `storage` / `advanced`) → the
+  **`useSectionEditor`** hook. It owns fetch → dirty-tracking → validate →
+  `ApplyDialog` → section-PUT → re-fetch, with `pick` (wire→form) / `toPayload`
+  (form→wire) hooks. The editor `value` IS the single source of truth — never
+  keep a parallel state mirror of it. Examples: Admission, Credentials, all
+  Advanced sub-panels, Webhook delivery, Replication, Lifecycle, Buckets.
+- **IAM DB resources** (users / groups / OAuth providers / mapping rules) →
+  **react-query** (`queries/`, keyed by `qk.*`) for reads + per-record mutations.
+  Read the cached admin config with `useAdminConfig()` — do NOT hand-roll
+  `useEffect(getAdminConfig().then(setState))`. After a config mutation,
+  invalidate `qk.config()` (the section editor already does this on apply).
+
+**Single source of truth for forms.** A form's React state should be the only
+copy of its editable data. For master-detail forms (User/Group/etc.), initialize
+state from the selected record with **lazy `useState(() => ...)` initializers +
+a `key` on the form** (`key={record.id}` for edit, `key="new"` for create) so a
+keyed remount resets state — never a `useEffect([record])` prop→state mirror.
+
+**Stable row ids, never array index.** Row-list editors (endpoints, headers,
+glob rows, routes, permissions, rules) key React lists by a stable id (a
+per-instance `nextId()` counter or the record's own id), and mutate rows by id
+(`rows.map(r => r.id === id ? {...} : r)`), never by index.
+
+**Pure helpers + Node regression tests.** Validation, payload-building, and
+normalization live in pure functions (e.g. `webhookDeliveryPayload.ts`'s
+`formFromWire` / `buildPayloadFromForm`), not inline in components, and get a
+`scripts/*-regression-test.mjs` Node test (registered in `package.json` + CI).
+Mirrors the Rust convention of pure decision-fns at seams (`classify_*`,
+`validate_*`, `resolve_*`) with colocated unit tests.
+
+**Secret round-trip.** Secret fields (webhook headers, Slack bot token, SigV4)
+are masked to the `REDACTED_SENTINEL` (`__redacted__`) on GET; the UI shows a
+"•••• (unchanged — type to replace)" placeholder and, on save, passes the
+sentinel through untouched so the backend preserves the real value — on BOTH the
+section-PUT and document export→apply paths. Removed map entries emit an explicit
+`null` (RFC 7396 delete).
+
+**Shared visual primitives** (reuse, don't re-style): `useCardStyles` /
+`SectionHeader` (cards), `FormField` (label + YAML-path breadcrumb + helpText +
+example chips — wrap every field; help should always be present), `StickyDirtyBar`
+(the slim floating unsaved-changes bar — use `floating` when it can't be the last
+child in the scroll flow), `ApplyDialog` (plan → diff → apply). Every editable
+field should have a `helpText` and a `placeholder`/example.
+
 ## Submitting Changes
 
 1. Fork the repo and create a branch from `main`

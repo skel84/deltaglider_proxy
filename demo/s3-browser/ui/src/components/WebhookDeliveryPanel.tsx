@@ -26,21 +26,26 @@ import {
   Button,
   Input,
   InputNumber,
+  Radio,
   Space,
   Switch,
   Tag,
   Typography,
 } from 'antd';
-import { DeleteOutlined, PlusOutlined, SendOutlined } from '@ant-design/icons';
+import { ApiOutlined, DeleteOutlined, PlusOutlined, SendOutlined } from '@ant-design/icons';
 import type { SectionApplyResponse } from '../adminApi';
 import { fetchEventOutbox } from '../adminApi';
 import { useCardStyles } from './shared-styles';
+import { useColors } from '../ThemeContext';
+import { useIsNarrow } from '../useIsNarrow';
 import { useSectionEditor } from '../useSectionEditor';
 import { useNavigation } from '../NavigationContext';
 import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import ApplyDialog from './ApplyDialog';
 import { AdvancedDisclosure } from './ruleEditorFields';
+import SlackConnectorCard from './SlackConnectorCard';
+import StickyDirtyBar from './StickyDirtyBar';
 import {
   formFromWire,
   buildPayloadFromForm,
@@ -71,18 +76,32 @@ const EMPTY_FORM: WebhookFormState = {
   delivered_retention: '24h',
   delivered_max_rows: 10000,
   prune_batch: 100,
+  format: 'raw',
+  slackPreferBotMode: false,
+  slackBotToken: '',
+  slackBotTokenMasked: false,
+  slackChannel: '',
+  slackUsername: '',
+  slackIconEmoji: '',
+  slackIncludeRows: [],
+  slackExcludeRows: [],
+  slackNotifyKinds: ['ObjectCreated'],
+  slackRoutes: [],
 };
 
 function PanelShell({ children }: { children: React.ReactNode }) {
   return (
     <div
       style={{
-        maxWidth: 740,
+        // Wide canvas: the Slack destination zone lays out as two columns
+        // (config + pinned preview) and needs the horizontal room. The generic
+        // config card up top still reads fine at this width.
+        maxWidth: 1180,
         margin: '0 auto',
-        padding: 'clamp(16px, 3vw, 24px)',
+        padding: 'clamp(20px, 3vw, 32px)',
         display: 'flex',
         flexDirection: 'column',
-        gap: 16,
+        gap: 24,
       }}
     >
       {children}
@@ -90,9 +109,53 @@ function PanelShell({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** A labeled section divider: a hairline rule with a centered uppercase label,
+ *  marking the visual transition from generic config to the connector zone. */
+function ConnectorDivider({ label }: { label: string }) {
+  const c = useColors();
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        margin: '4px 2px',
+        userSelect: 'none',
+      }}
+    >
+      <div style={{ flex: 1, height: 1, background: c.BORDER }} />
+      <span
+        style={{
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: 1,
+          textTransform: 'uppercase',
+          color: c.TEXT_MUTED,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {label}
+      </span>
+      <div style={{ flex: 1, height: 1, background: c.BORDER }} />
+    </div>
+  );
+}
+
 export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
   const { cardStyle, inputRadius } = useCardStyles();
+  const colors = useColors();
   const nav = useNavigation();
+  // Below ~900px the Slack two-column (config + preview) split stacks vertically.
+  const isNarrow = useIsNarrow(900);
+
+  // The connector ("destination") card is visually set apart from the generic
+  // config above it: a teal accent on the left edge + a faintly tinted surface,
+  // so the eye reads "this is where events go" as a distinct zone.
+  const connectorCardStyle: React.CSSProperties = {
+    ...cardStyle,
+    borderLeft: `3px solid ${colors.ACCENT_BLUE}`,
+    background: `linear-gradient(${colors.BG_CARD}, ${colors.BG_CARD}) padding-box`,
+  };
 
   // Per-instance row-id counter (no module global) — only used for React keys
   // within this panel instance.
@@ -208,43 +271,20 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
 
   return (
     <PanelShell>
-      {isDirty && (
-        <Alert
-          type="warning"
-          showIcon
-          message="Unsaved changes to webhook delivery"
-          description="Review the diff in the Apply dialog before persisting. Changes apply live — no restart."
-          action={
-            <Space>
-              <Button size="small" onClick={discard} disabled={applying}>
-                Discard
-              </Button>
-              <Button
-                type="primary"
-                size="small"
-                onClick={runApply}
-                disabled={applying || liveErrors.length > 0}
-                loading={applying}
-              >
-                Apply
-              </Button>
-            </Space>
-          }
-        />
-      )}
-
-      {liveErrors.length > 0 && (
+      {/* Raw-mode errors surface here, compactly; Slack-mode errors render
+          inline in the connector card. The sticky bar below carries the count +
+          actions so this block staying mounted (min-height) avoids layout shift. */}
+      {form.format === 'raw' && liveErrors.length > 0 && (
         <Alert
           type="error"
           showIcon
-          message="Fix these before applying"
-          description={
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {liveErrors.map((e, i) => (
-                <li key={i}>{e}</li>
-              ))}
-            </ul>
+          banner
+          message={
+            <span style={{ fontSize: 13 }}>
+              {liveErrors.join(' · ')}
+            </span>
           }
+          style={{ borderRadius: 8 }}
         />
       )}
 
@@ -275,181 +315,231 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
         />
       )}
 
-      {/* Master switch + endpoints */}
+      {/* ── 1. GENERIC DELIVERY CONFIG (all format-agnostic settings together) ── */}
       <div style={cardStyle}>
         <SectionHeader
           icon={<SendOutlined />}
-          title="Webhook delivery"
-          description="Deliver durable object events (create/delete/copy) to HTTP endpoints. The outbox accrues events even while disabled — they deliver once you enable + add an endpoint."
+          title="Event delivery"
+          description="Deliver durable object events (create/delete/copy) downstream. The outbox accrues events even while disabled — they deliver once you enable + configure a destination below."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <FormField label="Enable delivery" yamlPath="advanced.event_delivery.enabled">
             <Switch checked={form.enabled} onChange={(v) => setField({ enabled: v })} />
           </FormField>
 
           <FormField
-            label="Endpoints"
-            yamlPath="advanced.event_delivery.webhook_urls"
-            helpText="HTTP(S) URLs that receive a deltaglider.event.v1 JSON payload. An event is marked delivered only after every endpoint returns 2xx."
+            label="Payload format"
+            yamlPath="advanced.event_delivery.format"
+            helpText="Raw posts the deltaglider.event.v1 JSON envelope to your endpoints. Slack formats each event as a chat message."
           >
-            <Space direction="vertical" style={{ width: '100%' }}>
-              {form.urlRows.length === 0 && (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  No endpoints. Add one to start delivering.
-                </Text>
-              )}
-              {form.urlRows.map((row) => (
-                <Space.Compact key={row.id} style={{ width: '100%' }}>
-                  <Input
-                    value={row.url}
-                    onChange={(e) => updateUrl(row.id, e.target.value)}
-                    placeholder="https://hooks.example.com/deltaglider"
-                    style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
-                  />
-                  <Button
-                    icon={<DeleteOutlined />}
-                    onClick={() => removeUrl(row.id)}
-                    title="Remove endpoint"
-                  />
-                </Space.Compact>
-              ))}
-              <Button icon={<PlusOutlined />} onClick={addUrl} size="small">
-                Add endpoint
-              </Button>
-            </Space>
+            <Radio.Group
+              value={form.format}
+              onChange={(e) => setField({ format: e.target.value as 'raw' | 'slack' })}
+              style={{ display: 'flex', gap: 0 }}
+            >
+              <Radio.Button value="raw" style={{ fontSize: 13 }} title="Raw JSON webhook payload">
+                Raw webhook
+              </Radio.Button>
+              <Radio.Button value="slack" style={{ fontSize: 13 }} title="Format events as Slack messages">
+                Slack
+              </Radio.Button>
+            </Radio.Group>
           </FormField>
+        </div>
 
-          <FormField
-            label="Headers"
-            yamlPath="advanced.event_delivery.webhook_headers"
-            helpText="Static headers sent with every request — e.g. an Authorization bearer token. Values are stored encrypted and shown masked; leave a masked value untouched to keep it."
-          >
-            <Space direction="vertical" style={{ width: '100%' }}>
-              {form.headerRows.length === 0 && (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  No headers.
-                </Text>
-              )}
-              {form.headerRows.map((row) => (
-                <Space.Compact key={row.id} style={{ width: '100%' }}>
-                  <Input
-                    value={row.name}
-                    onChange={(e) => updateHeader(row.id, { name: e.target.value })}
-                    placeholder="Authorization"
-                    style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, width: '40%' }}
-                  />
-                  <Input
-                    value={row.masked ? '' : row.value}
-                    onChange={(e) => updateHeader(row.id, { value: e.target.value })}
-                    placeholder={row.masked ? '•••••••• (unchanged — type to replace)' : 'Bearer …'}
-                    style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
-                  />
-                  <Button
-                    icon={<DeleteOutlined />}
-                    onClick={() => removeHeader(row.id)}
-                    title="Remove header"
-                  />
-                </Space.Compact>
-              ))}
-              <Button icon={<PlusOutlined />} onClick={addHeader} size="small">
-                Add header
-              </Button>
-            </Space>
-          </FormField>
+        {/* Generic delivery tuning lives WITH the rest of the generic config —
+            it's format-agnostic (applies to raw + Slack alike). */}
+        <div style={{ marginTop: 8 }}>
+          <AdvancedDisclosure title="Delivery tuning (retry, retention, batching)">
+            <DurationField
+              label="Tick interval"
+              yamlPath="advanced.event_delivery.tick_interval"
+              help="How often the dispatcher wakes to deliver due events."
+              value={form.tick_interval}
+              placeholder="10s"
+              onChange={(v) => setField({ tick_interval: v })}
+              inputRadius={inputRadius}
+            />
+            <NumberField
+              label="Batch size"
+              yamlPath="advanced.event_delivery.batch_size"
+              help="Max events claimed per tick (clamped 1–500)."
+              value={form.batch_size}
+              min={1}
+              max={500}
+              onChange={(v) => setField({ batch_size: v })}
+            />
+            <DurationField
+              label="Request timeout"
+              yamlPath="advanced.event_delivery.request_timeout"
+              help="Per-endpoint HTTP timeout."
+              value={form.request_timeout}
+              placeholder="5s"
+              onChange={(v) => setField({ request_timeout: v })}
+              inputRadius={inputRadius}
+            />
+            <NumberField
+              label="Max attempts"
+              yamlPath="advanced.event_delivery.max_attempts"
+              help="Attempts before an event becomes permanently failed."
+              value={form.max_attempts}
+              min={1}
+              onChange={(v) => setField({ max_attempts: v })}
+            />
+            <DurationField
+              label="Retry base"
+              yamlPath="advanced.event_delivery.retry_base"
+              help="Initial retry delay; exponential backoff doubles it per attempt."
+              value={form.retry_base}
+              placeholder="5s"
+              onChange={(v) => setField({ retry_base: v })}
+              inputRadius={inputRadius}
+            />
+            <DurationField
+              label="Retry max"
+              yamlPath="advanced.event_delivery.retry_max"
+              help="Ceiling for the backoff delay."
+              value={form.retry_max}
+              placeholder="5m"
+              onChange={(v) => setField({ retry_max: v })}
+              inputRadius={inputRadius}
+            />
+            <DurationField
+              label="Stale claim after"
+              yamlPath="advanced.event_delivery.stale_claim_after"
+              help="In-progress claims older than this are reclaimable (crash recovery)."
+              value={form.stale_claim_after}
+              placeholder="60s"
+              onChange={(v) => setField({ stale_claim_after: v })}
+              inputRadius={inputRadius}
+            />
+            <DurationField
+              label="Delivered retention"
+              yamlPath="advanced.event_delivery.delivered_retention"
+              help="Delivered rows older than this are pruned. 0s keeps them until manually pruned."
+              value={form.delivered_retention}
+              placeholder="24h"
+              onChange={(v) => setField({ delivered_retention: v })}
+              inputRadius={inputRadius}
+            />
+            <NumberField
+              label="Delivered max rows"
+              yamlPath="advanced.event_delivery.delivered_max_rows"
+              help="Cap on retained delivered rows (pending/failed never pruned by this)."
+              value={form.delivered_max_rows}
+              min={0}
+              onChange={(v) => setField({ delivered_max_rows: v })}
+            />
+            <NumberField
+              label="Prune batch"
+              yamlPath="advanced.event_delivery.prune_batch"
+              help="Max delivered rows pruned per tick."
+              value={form.prune_batch}
+              min={0}
+              onChange={(v) => setField({ prune_batch: v })}
+            />
+          </AdvancedDisclosure>
         </div>
       </div>
 
-      {/* Advanced tuning */}
-      <div style={cardStyle}>
-        <AdvancedDisclosure title="Delivery tuning (retry, retention, batching)">
-          <DurationField
-            label="Tick interval"
-            yamlPath="advanced.event_delivery.tick_interval"
-            help="How often the dispatcher wakes to deliver due events."
-            value={form.tick_interval}
-            placeholder="10s"
-            onChange={(v) => setField({ tick_interval: v })}
+      {/* ── 2. DESTINATION ZONE — labeled divider sets the connector apart ── */}
+      <ConnectorDivider label={form.format === 'slack' ? 'Slack destination' : 'Webhook destination'} />
+
+      {/* The connector card carries an accent left-border so it reads as a
+          distinct "where does it go" zone, separate from the generic config. */}
+      <div style={connectorCardStyle}>
+        {form.format === 'raw' ? (
+          <>
+            <SectionHeader
+              icon={<ApiOutlined />}
+              title="Raw webhook destination"
+              description="POST the deltaglider.event.v1 JSON envelope to one or more HTTP endpoints with optional static headers."
+            />
+            <div>
+              <FormField
+                label="Endpoints"
+                yamlPath="advanced.event_delivery.webhook_urls"
+                helpText="HTTP(S) URLs that receive the payload. An event is marked delivered only after every endpoint returns 2xx."
+              >
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {form.urlRows.length === 0 && (
+                    <Text type="secondary" style={{ fontSize: 13 }}>
+                      No endpoints. Add one to start delivering.
+                    </Text>
+                  )}
+                  {form.urlRows.map((row) => (
+                    <Space.Compact key={row.id} style={{ width: '100%' }}>
+                      <Input
+                        value={row.url}
+                        onChange={(e) => updateUrl(row.id, e.target.value)}
+                        placeholder="https://hooks.example.com/deltaglider"
+                        style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14 }}
+                      />
+                      <Button
+                        icon={<DeleteOutlined />}
+                        onClick={() => removeUrl(row.id)}
+                        title="Remove endpoint"
+                      />
+                    </Space.Compact>
+                  ))}
+                  <Button icon={<PlusOutlined />} onClick={addUrl} size="small">
+                    Add endpoint
+                  </Button>
+                </Space>
+              </FormField>
+
+              <FormField
+                label="Headers"
+                yamlPath="advanced.event_delivery.webhook_headers"
+                helpText="Static headers sent with every request — e.g. an Authorization bearer token. Values are stored encrypted and shown masked; leave a masked value untouched to keep it."
+              >
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {form.headerRows.length === 0 && (
+                    <Text type="secondary" style={{ fontSize: 13 }}>
+                      No headers.
+                    </Text>
+                  )}
+                  {form.headerRows.map((row) => (
+                    <Space.Compact key={row.id} style={{ width: '100%' }}>
+                      <Input
+                        value={row.name}
+                        onChange={(e) => updateHeader(row.id, { name: e.target.value })}
+                        placeholder="Authorization"
+                        style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14, width: '40%' }}
+                      />
+                      <Input
+                        value={row.masked ? '' : row.value}
+                        onChange={(e) => updateHeader(row.id, { value: e.target.value })}
+                        placeholder={row.masked ? '•••••••• (unchanged — type to replace)' : 'Bearer …'}
+                        style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14 }}
+                      />
+                      <Button
+                        icon={<DeleteOutlined />}
+                        onClick={() => removeHeader(row.id)}
+                        title="Remove header"
+                      />
+                    </Space.Compact>
+                  ))}
+                  <Button icon={<PlusOutlined />} onClick={addHeader} size="small">
+                    Add header
+                  </Button>
+                </Space>
+              </FormField>
+            </div>
+          </>
+        ) : (
+          <SlackConnectorCard
+            form={form}
+            setField={setField}
+            nextId={nextId}
+            errors={liveErrors}
             inputRadius={inputRadius}
+            updateUrl={updateUrl}
+            addUrl={addUrl}
+            removeUrl={removeUrl}
+            isNarrow={isNarrow}
           />
-          <NumberField
-            label="Batch size"
-            yamlPath="advanced.event_delivery.batch_size"
-            help="Max events claimed per tick (clamped 1–500)."
-            value={form.batch_size}
-            min={1}
-            max={500}
-            onChange={(v) => setField({ batch_size: v })}
-          />
-          <DurationField
-            label="Request timeout"
-            yamlPath="advanced.event_delivery.request_timeout"
-            help="Per-endpoint HTTP timeout."
-            value={form.request_timeout}
-            placeholder="5s"
-            onChange={(v) => setField({ request_timeout: v })}
-            inputRadius={inputRadius}
-          />
-          <NumberField
-            label="Max attempts"
-            yamlPath="advanced.event_delivery.max_attempts"
-            help="Attempts before an event becomes permanently failed."
-            value={form.max_attempts}
-            min={1}
-            onChange={(v) => setField({ max_attempts: v })}
-          />
-          <DurationField
-            label="Retry base"
-            yamlPath="advanced.event_delivery.retry_base"
-            help="Initial retry delay; exponential backoff doubles it per attempt."
-            value={form.retry_base}
-            placeholder="5s"
-            onChange={(v) => setField({ retry_base: v })}
-            inputRadius={inputRadius}
-          />
-          <DurationField
-            label="Retry max"
-            yamlPath="advanced.event_delivery.retry_max"
-            help="Ceiling for the backoff delay."
-            value={form.retry_max}
-            placeholder="5m"
-            onChange={(v) => setField({ retry_max: v })}
-            inputRadius={inputRadius}
-          />
-          <DurationField
-            label="Stale claim after"
-            yamlPath="advanced.event_delivery.stale_claim_after"
-            help="In-progress claims older than this are reclaimable (crash recovery)."
-            value={form.stale_claim_after}
-            placeholder="60s"
-            onChange={(v) => setField({ stale_claim_after: v })}
-            inputRadius={inputRadius}
-          />
-          <DurationField
-            label="Delivered retention"
-            yamlPath="advanced.event_delivery.delivered_retention"
-            help="Delivered rows older than this are pruned. 0s keeps them until manually pruned."
-            value={form.delivered_retention}
-            placeholder="24h"
-            onChange={(v) => setField({ delivered_retention: v })}
-            inputRadius={inputRadius}
-          />
-          <NumberField
-            label="Delivered max rows"
-            yamlPath="advanced.event_delivery.delivered_max_rows"
-            help="Cap on retained delivered rows (pending/failed never pruned by this)."
-            value={form.delivered_max_rows}
-            min={0}
-            onChange={(v) => setField({ delivered_max_rows: v })}
-          />
-          <NumberField
-            label="Prune batch"
-            yamlPath="advanced.event_delivery.prune_batch"
-            help="Max delivered rows pruned per tick."
-            value={form.prune_batch}
-            min={0}
-            onChange={(v) => setField({ prune_batch: v })}
-          />
-        </AdvancedDisclosure>
+        )}
       </div>
 
       <ApplyDialog
@@ -459,6 +549,16 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
         onApply={confirmApply}
         onCancel={cancelApply}
         loading={applying}
+      />
+
+      {/* Slim floating action bar — pins to the bottom of the scroll viewport,
+          never displaces content above it. */}
+      <StickyDirtyBar
+        visible={isDirty}
+        applying={applying}
+        errorCount={liveErrors.length}
+        onDiscard={discard}
+        onApply={runApply}
       />
     </PanelShell>
   );
@@ -483,7 +583,7 @@ function DurationField(props: {
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
         placeholder={props.placeholder}
-        style={{ ...props.inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 160 }}
+        style={{ ...props.inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14, maxWidth: 200 }}
       />
     </FormField>
   );
@@ -505,7 +605,7 @@ function NumberField(props: {
         min={props.min}
         max={props.max}
         onChange={(v) => props.onChange(typeof v === 'number' ? v : props.min)}
-        style={{ maxWidth: 160 }}
+        style={{ maxWidth: 200 }}
       />
     </FormField>
   );

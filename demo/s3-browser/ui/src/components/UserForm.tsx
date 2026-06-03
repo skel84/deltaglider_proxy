@@ -40,11 +40,18 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
   const { inputRadius } = useCardStyles();
   const colors = useColors();
 
-  const [name, setName] = useState('');
-  const [accessKeyId, setAccessKeyId] = useState('');
+  // Initialize from `user` once. The form is remounted with a `key` per user
+  // (see render site), so a keyed remount resets all fields from these
+  // initializers — no prop→state sync effect (which was a redundant mirror).
+  const [name, setName] = useState(() => user?.name ?? '');
+  const [accessKeyId, setAccessKeyId] = useState(() => user?.access_key_id ?? '');
   const [secretKey, setSecretKey] = useState('');
-  const [enabled, setEnabled] = useState(true);
-  const [permissions, setPermissions] = useState<PermissionRow[]>([]);
+  const [enabled, setEnabled] = useState(() => user?.enabled ?? true);
+  const [permissions, setPermissions] = useState<PermissionRow[]>(() =>
+    user
+      ? permissionsToRows(user.permissions)
+      : [{ effect: 'Allow', actions: ['*'], resources: '*' }],
+  );
   const [saving, setSavingState] = useState(false);
   const [deleting, setDeletingState] = useState(false);
   const [error, setError] = useState('');
@@ -62,23 +69,6 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
     getGroups().then(groups => setUserGroups(groups)).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    if (user) {
-      setName(user.name);
-      setAccessKeyId(user.access_key_id);
-      setSecretKey('');
-      setEnabled(user.enabled);
-      setPermissions(permissionsToRows(user.permissions));
-    } else {
-      setName('');
-      setAccessKeyId('');
-      setSecretKey('');
-      setEnabled(true);
-      setPermissions([{ effect: 'Allow', actions: ['*'], resources: '*' }]);
-    }
-    setError('');
-    setSavedCredentials(null);
-  }, [user]);
 
   const handleSave = async () => {
     if (!name.trim()) { setError('Name is required'); return; }

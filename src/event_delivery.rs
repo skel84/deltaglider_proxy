@@ -3,13 +3,14 @@
 //! Background delivery for the durable event outbox.
 //!
 //! The dispatcher is intentionally conservative: it is disabled unless
-//! `advanced.event_delivery.enabled=true` and `webhook_url` is set. Request
-//! handlers never call this module; they only append to `event_outbox`.
+//! `advanced.event_delivery.enabled=true` and a delivery target is set (a
+//! webhook URL, or — in `format = slack` bot-token mode — a Slack bot token).
+//! Request handlers never call this module; they only append to `event_outbox`.
 
 use crate::background::parse_duration_or;
 use crate::config::SharedConfig;
 use crate::config_db::ConfigDb;
-use crate::config_sections::EventDeliveryConfig;
+use crate::config_sections::{EventDeliveryConfig, EventDeliveryFormat};
 use crate::event_outbox::{
     current_unix_seconds, EventOutboxRecord, STATUS_DELIVERED, STATUS_FAILED, STATUS_IN_PROGRESS,
     STATUS_PENDING,
@@ -18,10 +19,27 @@ use async_trait::async_trait;
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::Url;
 use serde::Serialize;
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+
+/// Map a Slack Web API JSON response to a delivery result. The API returns HTTP
+/// 200 even on failure; the authoritative status is the `ok` boolean, with the
+/// reason in `error`. Pure so the bot-token path's success/retry decision is
+/// unit-testable without a live Slack.
+fn slack_api_result(body: &Value) -> Result<(), String> {
+    if body.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        let err = body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        Err(format!("slack chat.postMessage error: {err}"))
+    }
+}
 
 const DEFAULT_TICK: Duration = Duration::from_secs(10);
 const MIN_TICK: Duration = Duration::from_secs(1);
@@ -64,6 +82,29 @@ impl EventDeliveryClient for HttpWebhookDeliveryClient {
         config: &EventDeliveryConfig,
         event: &EventOutboxRecord,
     ) -> Result<(), String> {
+        let timeout = parse_duration_or(
+            &config.request_timeout,
+            DEFAULT_TIMEOUT,
+            MIN_TIMEOUT,
+            "event_delivery.request_timeout",
+        );
+
+        match config.format {
+            EventDeliveryFormat::Slack => self.deliver_slack(config, event, timeout).await,
+            EventDeliveryFormat::Raw => self.deliver_raw(config, event, timeout).await,
+        }
+    }
+}
+
+impl HttpWebhookDeliveryClient {
+    /// Existing behavior: POST the `{schema,event}` envelope to every webhook
+    /// endpoint with the configured static headers.
+    async fn deliver_raw(
+        &self,
+        config: &EventDeliveryConfig,
+        event: &EventOutboxRecord,
+        timeout: Duration,
+    ) -> Result<(), String> {
         let endpoints = config.webhook_endpoints();
         if endpoints.is_empty() {
             return Err("event delivery enabled without webhook endpoint".to_string());
@@ -72,12 +113,6 @@ impl EventDeliveryClient for HttpWebhookDeliveryClient {
             schema: "deltaglider.event.v1",
             event,
         };
-        let timeout = parse_duration_or(
-            &config.request_timeout,
-            DEFAULT_TIMEOUT,
-            MIN_TIMEOUT,
-            "event_delivery.request_timeout",
-        );
         for endpoint in endpoints {
             let url = Url::parse(endpoint).map_err(|e| format!("invalid webhook endpoint: {e}"))?;
             let mut request = self
@@ -100,6 +135,136 @@ impl EventDeliveryClient for HttpWebhookDeliveryClient {
             if !response.status().is_success() {
                 return Err(format!(
                     "{endpoint}: webhook returned HTTP {}",
+                    response.status()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Slack delivery: format the event as a Slack message and POST it either to
+    /// the Incoming Webhook URLs or, when a bot token is set, to the Slack Web
+    /// API `chat.postMessage`. Events filtered out by `should_notify` are a
+    /// silent success (consumed, not posted).
+    async fn deliver_slack(
+        &self,
+        config: &EventDeliveryConfig,
+        event: &EventOutboxRecord,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let (include, exclude) = crate::slack_format::compile_slack_globs(config)?;
+        if !crate::slack_format::should_notify(event, config, &include, &exclude) {
+            return Ok(()); // not a notifying event — consume without posting
+        }
+        let mut body = crate::slack_format::slack_message(event, config);
+
+        if config.uses_slack_bot_token() {
+            // Slack Web API: chat.postMessage. Returns HTTP 200 even on error —
+            // the real status is in the JSON `{ "ok": bool, "error": ... }`.
+            let token = config
+                .slack_bot_token
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            // Resolve target channel(s): per-route fan-out, or the single
+            // slack_channel fallback. An event may hit several channels.
+            let channels = crate::slack_format::resolve_channels(event, config);
+            if channels.is_empty() {
+                // No route matched and no fallback channel — for a routed config
+                // this is a legitimate "post nowhere". For a misconfigured single
+                // destination, surface the missing channel.
+                if config.slack_routes.is_empty() {
+                    return Err("slack bot-token mode requires slack_channel".to_string());
+                }
+                return Ok(()); // routed, but this event matched no route
+            }
+            // Post to each resolved channel, collecting per-channel outcomes.
+            //
+            // CRITICAL (at-least-once + fan-out): the outbox tracks ONE status
+            // per event row, not per channel. If we returned Err the moment any
+            // single channel failed, the whole row would re-queue and the next
+            // retry would re-post to the channels that ALREADY succeeded —
+            // duplicate Slack spam (chat.postMessage has no idempotency key).
+            //
+            // So: a PARTIAL success counts as delivered. We only return Err (→
+            // retry) when EVERY channel failed — in which case a retry re-posts
+            // to all, but none had succeeded, so there's no duplication. Channels
+            // that fail while others succeed are logged and dropped (a missed
+            // notification to one bad channel beats duplicating to the good ones).
+            let mut any_ok = false;
+            let mut failures: Vec<String> = Vec::new();
+            for channel in &channels {
+                let mut msg = body.clone();
+                if let Value::Object(ref mut map) = msg {
+                    map.insert("channel".to_string(), Value::String(channel.clone()));
+                }
+                let result: Result<(), String> = async {
+                    let response = self
+                        .client
+                        .post("https://slack.com/api/chat.postMessage")
+                        .timeout(timeout)
+                        .bearer_auth(&token)
+                        .json(&msg)
+                        .send()
+                        .await
+                        .map_err(|e| format!("{e}"))?;
+                    if !response.status().is_success() {
+                        return Err(format!("HTTP {}", response.status()));
+                    }
+                    let parsed: Value = response.json().await.map_err(|e| format!("parse: {e}"))?;
+                    slack_api_result(&parsed)
+                }
+                .await;
+                match result {
+                    Ok(()) => any_ok = true,
+                    Err(e) => {
+                        warn!("slack chat.postMessage to {channel} failed: {e}");
+                        failures.push(format!("{channel}: {e}"));
+                    }
+                }
+            }
+            // Partial success (≥1 channel OK) or all OK → delivered. Only when
+            // EVERY channel failed do we fail the row for retry (no dup risk —
+            // nothing was delivered yet).
+            if any_ok {
+                return Ok(());
+            }
+            return Err(format!(
+                "slack chat.postMessage failed for all {} channel(s): {}",
+                channels.len(),
+                failures.join("; ")
+            ));
+        }
+
+        // Incoming Webhook mode: POST {text, blocks, username?, icon_emoji?} to
+        // every configured hooks.slack.com URL. 2xx = delivered.
+        let endpoints = config.webhook_endpoints();
+        if endpoints.is_empty() {
+            return Err("slack delivery enabled without a webhook URL or bot token".to_string());
+        }
+        if let Value::Object(ref mut map) = body {
+            if let Some(u) = config.slack_username.as_deref().filter(|s| !s.is_empty()) {
+                map.insert("username".to_string(), Value::String(u.to_string()));
+            }
+            if let Some(i) = config.slack_icon_emoji.as_deref().filter(|s| !s.is_empty()) {
+                map.insert("icon_emoji".to_string(), Value::String(i.to_string()));
+            }
+        }
+        for endpoint in endpoints {
+            let url =
+                Url::parse(endpoint).map_err(|e| format!("invalid slack webhook URL: {e}"))?;
+            let response = self
+                .client
+                .post(url)
+                .timeout(timeout)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("{endpoint}: {e}"))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "{endpoint}: slack webhook returned HTTP {}",
                     response.status()
                 ));
             }
@@ -342,8 +507,6 @@ mod tests {
         EventDeliveryConfig {
             enabled: true,
             webhook_url: Some("http://example.invalid/hook".to_string()),
-            webhook_urls: Vec::new(),
-            webhook_headers: Default::default(),
             tick_interval: "1s".to_string(),
             batch_size: 10,
             request_timeout: "1s".to_string(),
@@ -354,6 +517,7 @@ mod tests {
             delivered_retention: "1h".to_string(),
             delivered_max_rows: 10_000,
             prune_batch: 100,
+            ..Default::default()
         }
     }
 
@@ -513,6 +677,105 @@ mod tests {
         assert_eq!(row.attempts, 1);
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn slack_webhook_delivery_formats_block_kit_and_filters() {
+        // Mock Slack Incoming Webhook: capture the posted body, return 200.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let app = Router::new().route(
+            "/services/T/B/X",
+            post(move |Json(payload): Json<Value>| {
+                let tx = tx.clone();
+                async move {
+                    tx.send(payload).unwrap();
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let db = Arc::new(Mutex::new(ConfigDb::in_memory("test-pass").unwrap()));
+        // One notifying event + one that the kind filter drops.
+        let created = {
+            let db = db.lock().await;
+            let id = db
+                .event_outbox_insert(&NewEvent::new(
+                    EventKind::ObjectCreated,
+                    "builds",
+                    "ror/app.zip",
+                    EventSource::S3Api,
+                    1_700_000_000,
+                    json!({ "content_length": 2048, "storage_type": "delta" }),
+                ))
+                .unwrap();
+            // A delete — NOT in default notify_kinds → must be skipped (delivered, no POST).
+            db.event_outbox_insert(&NewEvent::new(
+                EventKind::ObjectDeleted,
+                "builds",
+                "ror/old.zip",
+                EventSource::S3Api,
+                1_700_000_001,
+                json!({}),
+            ))
+            .unwrap();
+            id
+        };
+
+        let mut config = cfg();
+        config.format = EventDeliveryFormat::Slack;
+        config.webhook_url = Some(format!("{base}/services/T/B/X"));
+        config.webhook_urls = Vec::new();
+
+        let client = HttpWebhookDeliveryClient::default();
+        dispatch_once(&db, &client, &config, "test-worker", 200).await;
+
+        // Exactly ONE Slack POST (the ObjectCreated); the delete was filtered.
+        let body = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .expect("one slack message");
+        assert!(
+            rx.try_recv().is_err(),
+            "filtered delete must NOT post to slack"
+        );
+
+        // Block Kit shape + text fallback.
+        assert!(body["text"].as_str().unwrap().contains("New object"));
+        assert!(body["text"]
+            .as_str()
+            .unwrap()
+            .contains("builds/ror/app.zip"));
+        let blocks = body["blocks"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "header");
+        assert!(blocks[1]["text"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("`ror/app.zip`"));
+
+        // Both rows end delivered (the created posted; the deleted was consumed).
+        let rows = db.lock().await.event_outbox_recent(10).unwrap();
+        for r in rows {
+            assert_eq!(r.status, STATUS_DELIVERED, "row {} not delivered", r.id);
+        }
+        let _ = created;
+        server.abort();
+    }
+
+    #[test]
+    fn slack_web_api_ok_false_is_failure() {
+        // The Slack Web API returns HTTP 200 even on error; the real status is
+        // the JSON `ok` field. `slack_api_result` is the pure decision used by
+        // the bot-token delivery path.
+        assert!(slack_api_result(&json!({ "ok": true })).is_ok());
+        let err =
+            slack_api_result(&json!({ "ok": false, "error": "channel_not_found" })).unwrap_err();
+        assert!(err.contains("channel_not_found"), "got: {err}");
+        // Missing / malformed ok → failure with "unknown".
+        let err2 = slack_api_result(&json!({})).unwrap_err();
+        assert!(err2.contains("unknown"), "got: {err2}");
     }
 
     #[test]

@@ -127,7 +127,7 @@ export default function TracePanel({ onSessionExpired }: Props) {
           title="Synthetic request"
           description="Evaluate the admission chain against a request shape of your choosing. No real traffic hits the backends — this is a dry-run against the live chain."
         />
-        <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <FormField label="Method" helpText="HTTP verb to trace.">
             <Radio.Group
               value={method}

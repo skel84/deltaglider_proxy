@@ -23,16 +23,7 @@
  * ApplyDialog renders it as a blue banner.
  */
 import { useEffect, useState } from 'react';
-import {
-  Alert,
-  Button,
-  Input,
-  InputNumber,
-  Radio,
-  Space,
-  Switch,
-  Typography,
-} from 'antd';
+import { Alert, Input, InputNumber, Radio, Switch, Typography } from 'antd';
 import {
   CloudServerOutlined,
   DatabaseOutlined,
@@ -40,8 +31,8 @@ import {
   ControlOutlined,
   SyncOutlined,
 } from '@ant-design/icons';
-import type { AdminConfig, SectionApplyResponse } from '../adminApi';
-import { getAdminConfig } from '../adminApi';
+import type { SectionApplyResponse } from '../adminApi';
+import { useAdminConfig } from '../queries/config';
 import { useColors } from '../ThemeContext';
 import { useCardStyles } from './shared-styles';
 import { useSectionEditor } from '../useSectionEditor';
@@ -50,6 +41,7 @@ import { undefinedToNullSubset } from './advancedPayload';
 import SectionHeader from './SectionHeader';
 import FormField from './FormField';
 import ApplyDialog from './ApplyDialog';
+import StickyDirtyBar from './StickyDirtyBar';
 
 const { Text } = Typography;
 
@@ -184,6 +176,10 @@ function useAdvancedSubset<T extends Partial<AdvancedSectionBody>>(
 
 /** Render the dirty-state banner + ApplyDialog pair. Every Advanced
  *  sub-panel uses this same tail. */
+// Shared dirty UX for the Advanced sub-panels. Rendered at the TOP of each
+// PanelShell, so it owns the ApplyDialog (a modal — placement-independent) and
+// the floating StickyDirtyBar. The bar uses fixed-to-viewport positioning so it
+// pins to the bottom regardless of where in the flow this rail sits.
 function AdvancedApplyRail(props: {
   isDirty: boolean;
   applying: boolean;
@@ -196,30 +192,13 @@ function AdvancedApplyRail(props: {
 }) {
   return (
     <>
-      {props.isDirty && (
-        <Alert
-          type="warning"
-          showIcon
-          message="Unsaved changes to this section"
-          description="Review the diff in the Apply dialog before persisting."
-          action={
-            <Space>
-              <Button size="small" onClick={props.onDiscard} disabled={props.applying}>
-                Discard
-              </Button>
-              <Button
-                type="primary"
-                size="small"
-                onClick={props.onApply}
-                disabled={props.applying}
-                loading={props.applying}
-              >
-                Apply
-              </Button>
-            </Space>
-          }
-        />
-      )}
+      <StickyDirtyBar
+        visible={props.isDirty}
+        applying={props.applying}
+        onDiscard={props.onDiscard}
+        onApply={props.onApply}
+        floating
+      />
       <ApplyDialog
         open={props.applyOpen}
         section="advanced"
@@ -288,7 +267,7 @@ export function ListenerTlsPanel({ onSessionExpired }: PanelProps) {
           title="HTTP listener"
           description="Where the proxy binds for incoming S3 traffic."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <FormField
             label={
               <>
@@ -317,7 +296,7 @@ export function ListenerTlsPanel({ onSessionExpired }: PanelProps) {
           title="TLS"
           description="Optional HTTPS for the listener. When disabled, the proxy speaks plain HTTP — put it behind a reverse proxy that terminates TLS for you."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <FormField label="Enable TLS" yamlPath="advanced.tls.enabled">
             <Switch
               checked={tlsEnabled}
@@ -397,7 +376,7 @@ export function CachesPanel({ onSessionExpired }: PanelProps) {
           title="Caches"
           description="In-memory caches the proxy uses to accelerate delta reconstruction and metadata lookups. Larger values trade memory for throughput."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <FormField
             label={
               <>
@@ -491,29 +470,18 @@ export function CachesPanel({ onSessionExpired }: PanelProps) {
 export function LimitsPanel({ onSessionExpired }: PanelProps) {
   const { cardStyle, inputRadius } = useCardStyles();
   const { ACCENT_AMBER, TEXT_SECONDARY, BG_ELEVATED, BORDER, TEXT_MUTED } = useColors();
-  const [config, setConfig] = useState<AdminConfig | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Read-only env-var view of the running config (cached react-query read).
+  const { data: config, error: queryError, isError } = useAdminConfig();
 
+  // getAdminConfig resolves to `null` on a 401; treat as session-expiry.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const cfg = await getAdminConfig();
-        if (cancelled) return;
-        if (!cfg) {
-          onSessionExpired?.();
-          return;
-        }
-        setConfig(cfg);
-      } catch (e) {
-        if (cancelled) return;
-        setError(e instanceof Error ? e.message : 'Failed to load');
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [onSessionExpired]);
+    if (config === null) onSessionExpired?.();
+  }, [config, onSessionExpired]);
 
-  if (error) return <Alert type="error" showIcon message="Failed to load" description={error} />;
+  if (isError) {
+    const msg = queryError instanceof Error ? queryError.message : 'Failed to load';
+    return <Alert type="error" showIcon message="Failed to load" description={msg} />;
+  }
   if (!config) return <PanelShell><Text type="secondary">Loading...</Text></PanelShell>;
 
   const readOnlyField = (
@@ -677,7 +645,7 @@ export function LoggingPanel({ onSessionExpired }: PanelProps) {
           title="Log level"
           description="tracing-subscriber EnvFilter string. Hot-reloadable: changes take effect on the next request after Apply."
         />
-        <div style={{ marginTop: 16 }}>
+        <div>
           <Radio.Group
             value={radioValue}
             onChange={(e) => {

@@ -157,3 +157,32 @@ storage:
 #   #   delivered_retention: "24h"
 #   #   delivered_max_rows: 10000
 #   #   prune_batch: 100
+#   #
+#   #   # Slack notifications (no OAuth — paste a credential; works on private
+#   #   # instances, outbound HTTPS only). Set format: slack, then EITHER point
+#   #   # webhook_url at an Incoming Webhook, OR set slack_bot_token + slack_channel.
+#   #   format: slack
+#   #   # Incoming Webhook mode (simplest, single channel):
+#   #   webhook_url: "https://hooks.slack.com/services/T000/B000/XXXX"
+#   #   slack_username: "DeltaGlider"
+#   #   slack_icon_emoji: ":package:"
+#   #   # Bot-token mode (multi-channel + @mentions) — set these INSTEAD of webhook_url:
+#   #   # slack_bot_token: "xoxb-..."   # needs chat:write + chat:write.public scopes
+#   #   # slack_channel: "C0123456"     # channel id or #name
+#   #   # What gets posted:
+#   #   slack_notify_kinds: ["ObjectCreated"]   # add ObjectDeleted, etc.
+#   #   slack_include_globs: ["builds/**"]      # empty = all user objects
+#   #   slack_exclude_globs: ["**/*.tmp"]
+#   #
+#   #   # Route different buckets/prefixes to different channels (bot-token mode
+#   #   # only — Incoming Webhook URLs are bound to one channel). An event posts
+#   #   # to EVERY route it matches. When slack_routes is set, slack_channel is
+#   #   # the fallback only for events that match no route.
+#   #   slack_routes:
+#   #     - name: "Releases → #ci"
+#   #       bucket: "releases"
+#   #       prefix_globs: ["builds/**"]   # empty = any key in the bucket
+#   #       channel: "C_CI"
+#   #     - name: "Audit → #security"
+#   #       bucket: "audit"
+#   #       channel: "C_SECURITY"

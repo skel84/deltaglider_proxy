@@ -663,11 +663,116 @@ pub struct EventDeliveryConfig {
     /// Max delivered rows pruned per tick.
     #[serde(default = "default_event_delivery_prune_batch")]
     pub prune_batch: u32,
+
+    /// Payload format. `raw` (default) posts the `{schema,event}` JSON envelope
+    /// to the webhook endpoints. `slack` formats each event as a Slack message
+    /// (Block Kit + text fallback) — delivered either to an Incoming Webhook URL
+    /// (`webhook_url`/`webhook_urls` pointed at `hooks.slack.com`) or, when
+    /// `slack_bot_token` is set, via the Slack Web API `chat.postMessage`.
+    #[serde(default)]
+    pub format: EventDeliveryFormat,
+
+    /// Slack bot token (`xoxb-…`). When set with `format = slack`, delivery uses
+    /// the Slack Web API (posts to `slack_channel`, supports `@`-mentions and any
+    /// channel via `chat:write.public`) instead of an Incoming Webhook URL.
+    /// SECRET — masked on export, preserved on an untouched round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack_bot_token: Option<String>,
+
+    /// Target Slack channel (id like `C0123` or `#name`). Required in bot-token
+    /// mode; ignored for Incoming Webhook URLs (which are bound to one channel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack_channel: Option<String>,
+
+    /// Cosmetic sender name override (Incoming Webhook mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack_username: Option<String>,
+
+    /// Cosmetic icon emoji override, e.g. `:package:` (Incoming Webhook mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack_icon_emoji: Option<String>,
+
+    /// Only object keys matching at least one of these globs notify Slack. Empty
+    /// = all user-object keys. Reuses the replication globset engine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slack_include_globs: Vec<String>,
+
+    /// Object keys matching any of these globs are NEVER posted to Slack
+    /// (exclude wins over include).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slack_exclude_globs: Vec<String>,
+
+    /// Which event kinds post to Slack. Default `["ObjectCreated"]`. Add
+    /// `ObjectDeleted`, `ObjectCopied`, etc. to widen.
+    #[serde(
+        default = "default_slack_notify_kinds",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub slack_notify_kinds: Vec<String>,
+
+    /// Per-bucket / per-prefix channel routing (bot-token mode only). When
+    /// NON-EMPTY, an eligible event is posted to EVERY route it matches — so
+    /// different buckets/prefixes can fan out to different channels (and one
+    /// object can hit several). When EMPTY, delivery falls back to the single
+    /// `slack_channel` (the default single-destination behavior).
+    ///
+    /// The top-level `slack_notify_kinds` + `slack_include/exclude_globs` are a
+    /// global pre-filter (what's eligible at all); routes then pick channels.
+    /// Incoming Webhook URLs are each bound to one channel by Slack, so routing
+    /// requires a bot token (`chat.postMessage`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slack_routes: Vec<SlackRoute>,
+}
+
+/// One bucket/prefix → channel routing rule. See [`EventDeliveryConfig::slack_routes`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SlackRoute {
+    /// Optional human label for the route (shown in the GUI; ignored by routing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Match only this bucket. `None`/absent = any bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+
+    /// Match only keys matching at least one of these globs. Empty = any key
+    /// (within the bucket constraint).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefix_globs: Vec<String>,
+
+    /// Slack channel to post to (id like `C0123` or `#name`). Required.
+    pub channel: String,
+}
+
+/// Event-delivery payload format. See [`EventDeliveryConfig::format`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EventDeliveryFormat {
+    /// The `{schema,event}` JSON envelope (existing behavior).
+    #[default]
+    Raw,
+    /// A Slack message (Block Kit + text fallback).
+    Slack,
+}
+
+fn default_slack_notify_kinds() -> Vec<String> {
+    vec!["ObjectCreated".to_string()]
 }
 
 impl EventDeliveryConfig {
     pub fn is_active(&self) -> bool {
-        self.enabled && !self.webhook_endpoints().is_empty()
+        self.enabled && (!self.webhook_endpoints().is_empty() || self.uses_slack_bot_token())
+    }
+
+    /// `true` when Slack delivery is configured to use the Web API (bot token)
+    /// rather than an Incoming Webhook URL.
+    pub fn uses_slack_bot_token(&self) -> bool {
+        self.format == EventDeliveryFormat::Slack
+            && self
+                .slack_bot_token
+                .as_deref()
+                .map(|t| !t.trim().is_empty())
+                .unwrap_or(false)
     }
 
     pub fn webhook_endpoints(&self) -> Vec<&str> {
@@ -698,6 +803,15 @@ impl Default for EventDeliveryConfig {
             delivered_retention: default_event_delivery_retention(),
             delivered_max_rows: default_event_delivery_delivered_max_rows(),
             prune_batch: default_event_delivery_prune_batch(),
+            format: EventDeliveryFormat::default(),
+            slack_bot_token: None,
+            slack_channel: None,
+            slack_username: None,
+            slack_icon_emoji: None,
+            slack_include_globs: Vec::new(),
+            slack_exclude_globs: Vec::new(),
+            slack_notify_kinds: default_slack_notify_kinds(),
+            slack_routes: Vec::new(),
         }
     }
 }
@@ -1568,9 +1682,9 @@ pub fn validate_lifecycle(cfg: &LifecycleConfig) -> Vec<String> {
 /// the dispatcher still treats invalid/missing webhook config as inactive.
 pub fn validate_event_delivery(cfg: &EventDeliveryConfig) -> Vec<String> {
     let mut warnings = Vec::new();
-    if cfg.enabled && cfg.webhook_endpoints().is_empty() {
+    if cfg.enabled && cfg.webhook_endpoints().is_empty() && !cfg.uses_slack_bot_token() {
         warnings.push(
-            "event_delivery.enabled=true but no webhook endpoint is configured; dispatcher will stay inactive"
+            "event_delivery.enabled=true but no webhook endpoint (or Slack bot token) is configured; dispatcher will stay inactive"
                 .to_string(),
         );
     }
@@ -1648,6 +1762,69 @@ pub fn validate_event_delivery(cfg: &EventDeliveryConfig) -> Vec<String> {
                 .to_string(),
         );
     }
+
+    // Slack-format validation.
+    if cfg.format == EventDeliveryFormat::Slack {
+        // A bot-token config needs SOME destination: either per-route channels
+        // OR the single slack_channel fallback.
+        let has_single_channel = cfg
+            .slack_channel
+            .as_deref()
+            .map(|c| !c.trim().is_empty())
+            .unwrap_or(false);
+        if cfg.uses_slack_bot_token() && cfg.slack_routes.is_empty() && !has_single_channel {
+            warnings.push(
+                "event_delivery: Slack bot-token mode needs either slack_channel or slack_routes; messages will fail until one is set"
+                    .to_string(),
+            );
+        }
+        if !cfg.slack_routes.is_empty() && !cfg.uses_slack_bot_token() {
+            warnings.push(
+                "event_delivery.slack_routes only applies in bot-token mode (Incoming Webhook URLs are bound to one channel); routes will be ignored"
+                    .to_string(),
+            );
+        }
+        for (i, route) in cfg.slack_routes.iter().enumerate() {
+            if route.channel.trim().is_empty() {
+                warnings.push(format!(
+                    "event_delivery.slack_routes[{i}] has an empty channel"
+                ));
+            }
+            for p in &route.prefix_globs {
+                if globset::Glob::new(p).is_err() {
+                    warnings.push(format!(
+                        "event_delivery.slack_routes[{i}].prefix_globs has invalid glob {p:?}"
+                    ));
+                }
+            }
+        }
+        for (label, patterns) in [
+            ("slack_include_globs", &cfg.slack_include_globs),
+            ("slack_exclude_globs", &cfg.slack_exclude_globs),
+        ] {
+            for p in patterns {
+                if globset::Glob::new(p).is_err() {
+                    warnings.push(format!("event_delivery.{label} has invalid glob {p:?}"));
+                }
+            }
+        }
+        const KNOWN_KINDS: [&str; 6] = [
+            "ObjectCreated",
+            "ObjectDeleted",
+            "ObjectCopied",
+            "ReplicationObjectCopied",
+            "LifecycleTransitioned",
+            "LifecycleExpired",
+        ];
+        for k in &cfg.slack_notify_kinds {
+            if !KNOWN_KINDS.contains(&k.as_str()) {
+                warnings.push(format!(
+                    "event_delivery.slack_notify_kinds has unknown kind {k:?}"
+                ));
+            }
+        }
+    }
+
     warnings
 }
 

@@ -2,11 +2,12 @@ import { useState, useEffect, useCallback } from 'react';
 import { Button, Typography, Input, Alert, Switch, Divider, Spin, message } from 'antd';
 import { PlusOutlined, SearchOutlined, CopyOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined } from '@ant-design/icons';
 import {
-  getAdminConfig, getAuthProviders, createAuthProvider, updateAuthProvider, deleteAuthProvider, testAuthProvider,
+  getAuthProviders, createAuthProvider, updateAuthProvider, deleteAuthProvider, testAuthProvider,
   getMappingRules, createMappingRule, updateMappingRule, deleteMappingRule,
   previewMapping, getExternalIdentities, syncMemberships, getGroups,
-  type AuthProvider, type IamMode, type MappingRule, type ExternalIdentity, type IamGroup, type ProviderTestResult,
+  type AuthProvider, type MappingRule, type ExternalIdentity, type IamGroup, type ProviderTestResult,
 } from '../adminApi';
+import { useAdminConfig } from '../queries/config';
 import { useColors } from '../ThemeContext';
 import { useFormLabelStyle } from './shared-styles';
 import IamSourceBanner from './IamSourceBanner';
@@ -26,19 +27,10 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
   const [groups, setGroups] = useState<IamGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [iamMode, setIamMode] = useState<IamMode | undefined>(undefined);
 
-  // Load IAM mode once for the source-of-truth banner.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const cfg = await getAdminConfig();
-      if (!cancelled && cfg) setIamMode(cfg.iam_mode);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // IAM mode for the source-of-truth banner (cached react-query read).
+  const { data: cfg } = useAdminConfig();
+  const iamMode = cfg?.iam_mode;
 
   // Provider form state
   const [selectedProvider, setSelectedProvider] = useState<AuthProvider | null>(null);
@@ -385,7 +377,7 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
         <Text type="secondary" style={{ fontSize: 12 }}>No rules configured. Add allowed email patterns (e.g. *@company.com) and assign them to groups.</Text>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
-          {rules.map((rule, idx) => (
+          {rules.map((rule) => (
             <MappingRuleRow
               key={rule.id}
               rule={rule}
@@ -395,9 +387,14 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
               disabled={rulesSaving}
               onUpdate={(req) => {
                 // Local edit only — no API call. Save button appears below.
-                const next = [...rules];
-                next[idx] = { ...next[idx], ...req as Partial<typeof rule> };
-                setRules(next);
+                // Key the update by the row's stable id, NOT the array index:
+                // an index write goes stale if the list ever reorders (the
+                // documented admin-editor bug class).
+                setRules((prev) =>
+                  prev.map((r) =>
+                    r.id === rule.id ? { ...r, ...(req as Partial<typeof rule>) } : r,
+                  ),
+                );
                 setRulesDirty(true);
               }}
               onDelete={async () => {

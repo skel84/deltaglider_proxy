@@ -917,6 +917,19 @@ body {
   }
 }
 
+/* ───── FormField: YAML-path code chip reveals on hover ───── */
+.dg-field .dg-yaml-path {
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+.dg-field:hover .dg-yaml-path,
+.dg-field:focus-within .dg-yaml-path,
+.dg-field .dg-yaml-path:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 /* ───── Accessibility: respect reduced motion ───── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
