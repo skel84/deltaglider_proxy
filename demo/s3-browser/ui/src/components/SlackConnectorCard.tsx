@@ -29,12 +29,13 @@ import {
   DeleteOutlined,
   InfoCircleOutlined,
   PlusOutlined,
+  QuestionCircleOutlined,
   SlackOutlined,
 } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import SectionHeader from './SectionHeader';
 import FormField from './FormField';
-import SlackSetupGuide from './SlackSetupGuide';
+import { SlackSetupGuideDrawer } from './SlackSetupGuide';
 import { AdvancedDisclosure } from './ruleEditorFields';
 import {
   SLACK_NOTIFY_KINDS,
@@ -61,6 +62,8 @@ interface Props {
   updateUrl: (id: string, url: string) => void;
   addUrl: () => void;
   removeUrl: (id: string) => void;
+  /** Below ~900px the two-column form/preview split collapses to one column. */
+  isNarrow: boolean;
 }
 
 
@@ -73,6 +76,7 @@ export default function SlackConnectorCard({
   updateUrl,
   addUrl,
   removeUrl,
+  isNarrow,
 }: Props) {
   const colors = useColors();
 
@@ -80,6 +84,10 @@ export default function SlackConnectorCard({
   // lets the operator see which channel(s) a given bucket/key would resolve to.
   const [sampleBucket, setSampleBucket] = useState('releases');
   const [sampleKey, setSampleKey] = useState('builds/app.zip');
+
+  // Setup-guide drawer (UI-only local state — never touches config). Opens the
+  // roomy step-by-step guide for the mode currently being edited.
+  const [guideOpen, setGuideOpen] = useState(false);
 
   // Display mode = the operator's UI choice (sticky even with an empty token
   // field). The BACKEND mode is derived from token presence at payload-build
@@ -164,10 +172,9 @@ export default function SlackConnectorCard({
     setField({ slackNotifyKinds: SLACK_NOTIFY_KINDS.filter((k) => set.has(k)) });
   };
 
-  return (
-    // No outer card here — the parent panel wraps this in the accent-bordered
-    // "destination" card so the raw and Slack connectors share one frame.
-    <>
+  // ── LEFT column: header + the whole config form ──
+  const formColumn = (
+    <div style={{ minWidth: 0 }}>
       <SectionHeader
         icon={<SlackOutlined />}
         title="Slack connector"
@@ -177,15 +184,15 @@ export default function SlackConnectorCard({
       {/* No-OAuth note — discreet one-liner, not a banner. */}
       <div
         style={{
-          marginTop: 12,
+          marginTop: 14,
           display: 'flex',
           alignItems: 'center',
-          gap: 7,
-          fontSize: 12,
+          gap: 8,
+          fontSize: 13,
           color: colors.TEXT_MUTED,
         }}
       >
-        <InfoCircleOutlined style={{ color: colors.ACCENT_BLUE, fontSize: 13 }} />
+        <InfoCircleOutlined style={{ color: colors.ACCENT_BLUE, fontSize: 14 }} />
         <span title="Delivery is outbound HTTPS only — Slack never needs to reach back to this proxy, so it works on private/internal instances.">
           No OAuth — just paste a credential. Works on private / internal instances.
         </span>
@@ -194,21 +201,21 @@ export default function SlackConnectorCard({
       {errors.length > 0 && (
         <div
           style={{
-            marginTop: 10,
-            fontSize: 12,
+            marginTop: 12,
+            fontSize: 13,
             color: colors.ACCENT_RED,
             display: 'flex',
             alignItems: 'flex-start',
-            gap: 7,
+            gap: 8,
           }}
         >
-          <CloseCircleFilled style={{ marginTop: 2, fontSize: 13 }} />
+          <CloseCircleFilled style={{ marginTop: 2, fontSize: 14 }} />
           <span>{errors.join(' · ')}</span>
         </div>
       )}
 
       {/* Mode sub-toggle */}
-      <div style={{ marginTop: 16 }}>
+      <div style={{ marginTop: 20 }}>
         <FormField
           label="How to connect"
           helpText="Incoming Webhook is the quickest. Use a bot token when you need multiple channels or @mentions."
@@ -218,10 +225,10 @@ export default function SlackConnectorCard({
             onChange={(e) => setMode(e.target.value as SlackMode)}
             style={{ display: 'flex', gap: 0 }}
           >
-            <Radio.Button value="webhook" style={{ fontSize: 13 }} title="Post via a hooks.slack.com Incoming Webhook URL">
+            <Radio.Button value="webhook" style={{ fontSize: 14 }} title="Post via a hooks.slack.com Incoming Webhook URL">
               Incoming Webhook (simplest)
             </Radio.Button>
-            <Radio.Button value="bot" style={{ fontSize: 13 }} title="Post via the Slack Web API with a bot token">
+            <Radio.Button value="bot" style={{ fontSize: 14 }} title="Post via the Slack Web API with a bot token">
               Bot token (multi-channel + @mentions)
             </Radio.Button>
           </Radio.Group>
@@ -268,14 +275,14 @@ export default function SlackConnectorCard({
           yamlPath="advanced.event_delivery.slack_notify_kinds"
           helpText="Only these event kinds are posted to Slack. ObjectCreated is the default."
         >
-          <Space direction="vertical" size={4} style={{ width: '100%' }}>
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
             {SLACK_NOTIFY_KINDS.map((kind) => (
               <Checkbox
                 key={kind}
                 checked={form.slackNotifyKinds.includes(kind)}
                 onChange={(e) => toggleKind(kind, e.target.checked)}
               >
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>{kind}</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14 }}>{kind}</span>
               </Checkbox>
             ))}
           </Space>
@@ -304,6 +311,24 @@ export default function SlackConnectorCard({
           placeholder="tmp/**"
         />
       </AdvancedDisclosure>
+    </div>
+  );
+
+  // ── RIGHT column: setup-help entry + the live preview, pinned ──
+  const sideColumn = (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 20,
+        // On wide viewports the preview tracks the operator as they scroll the
+        // (taller) form column; on narrow it just flows after the form.
+        position: isNarrow ? 'static' : 'sticky',
+        top: 16,
+        alignSelf: 'flex-start',
+      }}
+    >
+      <SetupHelpCard mode={mode} colors={colors} onOpen={() => setGuideOpen(true)} />
 
       {/* Live preview — ONE sample event drives both the resolved-channel chips
           AND the faux Slack message, so they never tell contradictory stories. */}
@@ -317,7 +342,69 @@ export default function SlackConnectorCard({
         onBucket={setSampleBucket}
         onKey={setSampleKey}
       />
+    </div>
+  );
+
+  return (
+    // No outer card here — the parent panel wraps this in the accent-bordered
+    // "destination" card so the raw and Slack connectors share one frame.
+    <>
+      <div
+        style={{
+          display: 'grid',
+          // Form takes the flexible left; the preview/help sits in a fixed-ish
+          // right rail. Collapses to a single stacked column under ~900px.
+          gridTemplateColumns: isNarrow ? '1fr' : 'minmax(0, 1fr) minmax(340px, 400px)',
+          gap: isNarrow ? 28 : 40,
+          alignItems: 'start',
+        }}
+      >
+        {formColumn}
+        {sideColumn}
+      </div>
+
+      <SlackSetupGuideDrawer open={guideOpen} mode={mode} onClose={() => setGuideOpen(false)} />
     </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Setup-help entry — replaces the inline guide. A calm card with a one-liner
+// and a button that opens the roomy step-by-step guide in a drawer.
+// ─────────────────────────────────────────────────────────────────────────
+
+function SetupHelpCard({
+  mode,
+  colors,
+  onOpen,
+}: {
+  mode: SlackMode;
+  colors: ReturnType<typeof useColors>;
+  onOpen: () => void;
+}) {
+  return (
+    <div
+      style={{
+        border: `1px solid ${colors.BORDER}`,
+        borderRadius: 12,
+        background: colors.BG_ELEVATED,
+        padding: 18,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 8 }}>
+        <SlackOutlined style={{ color: '#611f69', fontSize: 18 }} />
+        <span style={{ fontSize: 14, fontWeight: 600, color: colors.TEXT_PRIMARY }}>
+          Need a Slack app?
+        </span>
+      </div>
+      <div style={{ fontSize: 13, color: colors.TEXT_MUTED, lineHeight: 1.6, marginBottom: 14 }}>
+        One-time setup, ~2 minutes. We&apos;ll walk you through creating the app and grabbing the{' '}
+        {mode === 'webhook' ? 'webhook URL' : 'bot token'} — with screenshots.
+      </div>
+      <Button icon={<QuestionCircleOutlined />} onClick={onOpen} block>
+        Set up a Slack app
+      </Button>
+    </div>
   );
 }
 
@@ -342,10 +429,8 @@ function WebhookModeFields({
   setField: (patch: Partial<WebhookFormState>) => void;
   colors: ReturnType<typeof useColors>;
 }) {
-  const noEndpoints = form.urlRows.every((r) => !r.url.trim());
   return (
     <div style={{ marginTop: 8 }}>
-      <SlackSetupGuide mode="webhook" defaultOpen={noEndpoints} />
       <FormField
         label="Incoming Webhook URL"
         yamlPath="advanced.event_delivery.webhook_urls"
@@ -353,7 +438,7 @@ function WebhookModeFields({
       >
         <Space direction="vertical" style={{ width: '100%' }}>
           {form.urlRows.length === 0 && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
+            <Text type="secondary" style={{ fontSize: 13 }}>
               No webhook URL yet. Add the one Slack gave you.
             </Text>
           )}
@@ -363,7 +448,7 @@ function WebhookModeFields({
                 value={row.url}
                 onChange={(e) => updateUrl(row.id, e.target.value)}
                 placeholder="https://hooks.slack.com/services/T000/B000/xxxx"
-                style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+                style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14 }}
               />
               <Button
                 icon={<DeleteOutlined />}
@@ -387,7 +472,7 @@ function WebhookModeFields({
           value={form.slackUsername}
           onChange={(e) => setField({ slackUsername: e.target.value })}
           placeholder="DeltaGlider"
-          style={{ ...inputRadius, fontSize: 13, maxWidth: 280 }}
+          style={{ ...inputRadius, fontSize: 14, maxWidth: 360 }}
         />
       </FormField>
 
@@ -400,7 +485,7 @@ function WebhookModeFields({
           value={form.slackIconEmoji}
           onChange={(e) => setField({ slackIconEmoji: e.target.value })}
           placeholder=":package:"
-          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 200, color: colors.TEXT_PRIMARY }}
+          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14, maxWidth: 280, color: colors.TEXT_PRIMARY }}
         />
       </FormField>
     </div>
@@ -418,12 +503,8 @@ function BotModeFields({
   inputRadius: React.CSSProperties;
   colors: ReturnType<typeof useColors>;
 }) {
-  // Open the guide by default when no token is configured yet (neither a
-  // server-masked one nor a freshly-typed value).
-  const noToken = !form.slackBotTokenMasked && !form.slackBotToken.trim();
   return (
     <div style={{ marginTop: 8 }}>
-      <SlackSetupGuide mode="bot" defaultOpen={noToken} />
       <FormField
         label="Bot token"
         yamlPath="advanced.event_delivery.slack_bot_token"
@@ -440,7 +521,7 @@ function BotModeFields({
               ? '•••••••• (unchanged — type to replace)'
               : 'xoxb-…'
           }
-          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 420, color: colors.TEXT_PRIMARY }}
+          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14, maxWidth: 480, color: colors.TEXT_PRIMARY }}
         />
       </FormField>
 
@@ -453,7 +534,7 @@ function BotModeFields({
           value={form.slackChannel}
           onChange={(e) => setField({ slackChannel: e.target.value })}
           placeholder="#deploys or C0123ABC"
-          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 280 }}
+          style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14, maxWidth: 360 }}
         />
       </FormField>
     </div>
@@ -485,17 +566,17 @@ function GlobRowsField({
     <FormField label={label} yamlPath={yamlPath} helpText={helpText}>
       <Space direction="vertical" style={{ width: '100%' }}>
         {rows.length === 0 && (
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text type="secondary" style={{ fontSize: 13 }}>
             None.
           </Text>
         )}
         {rows.map((row) => (
-          <Space.Compact key={row.id} style={{ width: '100%', maxWidth: 420 }}>
+          <Space.Compact key={row.id} style={{ width: '100%', maxWidth: 480 }}>
             <Input
               value={row.glob}
               onChange={(e) => onUpdate(row.id, e.target.value)}
               placeholder={placeholder}
-              style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+              style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14 }}
             />
             <Button icon={<DeleteOutlined />} onClick={() => onRemove(row.id)} title="Remove glob" />
           </Space.Compact>
@@ -537,15 +618,15 @@ function ChannelRoutingEditor({
 }) {
   return (
     <div>
-      <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12, lineHeight: 1.5 }}>
+      <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 14, lineHeight: 1.6 }}>
         Send different buckets or prefixes to different channels. An event posts
         to every route it matches; the channel above is the fallback for
         unmatched events.
       </Text>
 
-      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Space direction="vertical" size={14} style={{ width: '100%' }}>
         {form.slackRoutes.length === 0 && (
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text type="secondary" style={{ fontSize: 13 }}>
             No routes — every event posts to the single channel above.
           </Text>
         )}
@@ -554,8 +635,8 @@ function ChannelRoutingEditor({
             key={route.id}
             style={{
               border: `1px solid ${colors.BORDER}`,
-              borderRadius: 8,
-              padding: 12,
+              borderRadius: 10,
+              padding: 16,
               background: colors.BG_CARD,
             }}
           >
@@ -583,7 +664,7 @@ function ChannelRoutingEditor({
                 value={route.name}
                 onChange={(e) => updateRoute(route.id, { name: e.target.value })}
                 placeholder="e.g. Releases → #ci"
-                style={{ ...inputRadius, fontSize: 13, maxWidth: 320 }}
+                style={{ ...inputRadius, fontSize: 14, maxWidth: 380 }}
               />
             </FormField>
 
@@ -592,7 +673,7 @@ function ChannelRoutingEditor({
                 value={route.bucket}
                 onChange={(e) => updateRoute(route.id, { bucket: e.target.value })}
                 placeholder="any bucket"
-                style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 280 }}
+                style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14, maxWidth: 360 }}
               />
             </FormField>
 
@@ -612,7 +693,7 @@ function ChannelRoutingEditor({
                 onChange={(e) => updateRoute(route.id, { channel: e.target.value })}
                 placeholder="C0123 or #name"
                 status={route.channel.trim().length === 0 ? 'error' : undefined}
-                style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 280 }}
+                style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14, maxWidth: 360 }}
               />
             </FormField>
 
@@ -688,14 +769,21 @@ function LivePreview({
 
   const chipBase: React.CSSProperties = {
     fontFamily: 'var(--font-mono)',
-    fontSize: 12,
+    fontSize: 13,
     borderRadius: 4,
-    padding: '1px 7px',
+    padding: '2px 8px',
     border: `1px solid ${colors.BORDER}`,
   };
 
   return (
-    <div style={{ marginTop: 20 }}>
+    <div
+      style={{
+        border: `1px solid ${colors.BORDER}`,
+        borderRadius: 12,
+        background: colors.BG_ELEVATED,
+        padding: 18,
+      }}
+    >
       <Text
         type="secondary"
         style={{
@@ -704,7 +792,7 @@ function LivePreview({
           letterSpacing: 0.5,
           textTransform: 'uppercase',
           display: 'block',
-          marginBottom: 8,
+          marginBottom: 12,
         }}
       >
         Live preview — what lands in the channel
@@ -714,32 +802,32 @@ function LivePreview({
       {mode === 'bot' && (
         <div
           style={{
-            marginBottom: 12,
-            padding: 12,
+            marginBottom: 16,
+            padding: 14,
             border: `1px dashed ${colors.BORDER}`,
             borderRadius: 8,
           }}
         >
-          <Text style={{ fontSize: 12, color: colors.TEXT_MUTED, display: 'block', marginBottom: 8 }}>
+          <Text style={{ fontSize: 13, color: colors.TEXT_MUTED, display: 'block', marginBottom: 10 }}>
             Try a sample event{routed ? '' : ' (add routes to send buckets to different channels)'}:
           </Text>
-          <Space.Compact style={{ width: '100%', maxWidth: 420, marginBottom: 10 }}>
+          <Space.Compact style={{ width: '100%', marginBottom: 12 }}>
             <Input
               value={sampleBucket}
               onChange={(e) => onBucket(e.target.value)}
               placeholder="bucket"
-              style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13, maxWidth: 150 }}
+              style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14, maxWidth: 150 }}
               title="Sample bucket"
             />
             <Input
               value={sampleKey}
               onChange={(e) => onKey(e.target.value)}
               placeholder="path/to/key.zip"
-              style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+              style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 14 }}
               title="Sample object key"
             />
           </Space.Compact>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 13 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 14 }}>
             <span style={{ color: colors.TEXT_MUTED }}>→</span>
             {resolved.matches.length > 0 ? (
               resolved.matches.map((m) => (

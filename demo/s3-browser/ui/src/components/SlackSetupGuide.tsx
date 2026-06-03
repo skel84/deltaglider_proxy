@@ -1,6 +1,9 @@
 /**
  * SlackSetupGuide — an illustrated, step-by-step "how to create a Slack app"
- * guide shown collapsibly inside the Slack connector.
+ * guide. The CONTENT (step cards + schematic Slack mockups) now lives in
+ * `SlackSetupGuideContent`, which the connector card opens in a roomy AntD
+ * `Drawer` (`SlackSetupGuideDrawer`) instead of cramming it inline. At drawer
+ * width (~560px) the mockups finally have breathing room.
  *
  * Two flows (webhook / bot token) share one StepCard primitive. The "mockups"
  * are pure CSS/SVG fac-similes of the relevant Slack settings screens (NO
@@ -12,14 +15,8 @@
  * (the scopes), so they don't have to transcribe them.
  */
 import { useState } from 'react';
-import { Button, Typography, message } from 'antd';
-import {
-  CheckOutlined,
-  CopyOutlined,
-  DownOutlined,
-  RightOutlined,
-  SlackOutlined,
-} from '@ant-design/icons';
+import { Button, Drawer, Typography, message } from 'antd';
+import { CheckOutlined, CopyOutlined, SlackOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 
 const { Text } = Typography;
@@ -28,64 +25,55 @@ const SLACK_APPS_URL = 'https://api.slack.com/apps?new_app=1';
 
 type Mode = 'webhook' | 'bot';
 
-export default function SlackSetupGuide({
+/**
+ * Roomy slide-in guide. The parent owns `open`/`onClose` (UI-only local state)
+ * and which `mode` to show; this just frames the step-by-step content with
+ * generous padding. At drawer width (~560px) the schematic Slack mockups
+ * finally have room — the whole point of moving them out of the inline column.
+ */
+export function SlackSetupGuideDrawer({
+  open,
   mode,
-  defaultOpen,
+  onClose,
 }: {
+  open: boolean;
   mode: Mode;
-  /** Open on first render (e.g. no token configured yet). */
-  defaultOpen: boolean;
+  onClose: () => void;
 }) {
   const c = useColors();
-  const [open, setOpen] = useState(defaultOpen);
-
   return (
-    <div
-      style={{
-        border: `1px solid ${c.BORDER}`,
-        borderRadius: 10,
-        marginBottom: 16,
-        overflow: 'hidden',
-        background: c.BG_ELEVATED,
-      }}
+    <Drawer
+      open={open}
+      onClose={onClose}
+      width={Math.min(640, typeof window !== 'undefined' ? window.innerWidth - 32 : 640)}
+      title={
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 16 }}>
+          <SlackOutlined style={{ color: '#611f69', fontSize: 20 }} />
+          Set up a Slack app
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: 0.5,
+              textTransform: 'uppercase',
+              color: c.TEXT_MUTED,
+              border: `1px solid ${c.BORDER}`,
+              borderRadius: 5,
+              padding: '1px 7px',
+            }}
+          >
+            {mode === 'webhook' ? 'Incoming Webhook' : 'Bot token'}
+          </span>
+        </span>
+      }
+      styles={{ body: { padding: '24px 28px 40px' } }}
     >
-      <button
-        onClick={() => setOpen((o) => !o)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '10px 14px',
-          background: 'transparent',
-          border: 'none',
-          cursor: 'pointer',
-          color: c.TEXT_PRIMARY,
-          fontSize: 13,
-          fontWeight: 600,
-          textAlign: 'left',
-        }}
-        aria-expanded={open}
-      >
-        <SlackOutlined style={{ color: '#611f69', fontSize: 16 }} />
-        How to set up a Slack app
-        <span style={{ flex: 1 }} />
-        {open ? (
-          <DownOutlined style={{ fontSize: 11, color: c.TEXT_MUTED }} />
-        ) : (
-          <RightOutlined style={{ fontSize: 11, color: c.TEXT_MUTED }} />
-        )}
-      </button>
-
-      {open && (
-        <div style={{ padding: '4px 14px 16px' }}>
-          <Text style={{ fontSize: 12, color: c.TEXT_MUTED, display: 'block', marginBottom: 14 }}>
-            One-time, ~2 minutes. No OAuth callback — you create the app and paste a credential.
-          </Text>
-          {mode === 'webhook' ? <WebhookFlow c={c} /> : <BotFlow c={c} />}
-        </div>
-      )}
-    </div>
+      <Text style={{ fontSize: 13, color: c.TEXT_MUTED, display: 'block', marginBottom: 24, lineHeight: 1.6 }}>
+        One-time, ~2 minutes. No OAuth callback — you create the app in Slack and paste a
+        credential back here. Nothing needs to reach this proxy.
+      </Text>
+      {mode === 'webhook' ? <WebhookFlow c={c} /> : <BotFlow c={c} />}
+    </Drawer>
   );
 }
 
@@ -105,36 +93,36 @@ function StepCard({
   c: ReturnType<typeof useColors>;
 }) {
   return (
-    <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+    <div style={{ display: 'flex', gap: 16, marginBottom: 24 }}>
       {/* Number column with connecting rail */}
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
         <div
           style={{
-            width: 26,
-            height: 26,
+            width: 30,
+            height: 30,
             borderRadius: '50%',
             background: c.ACCENT_BLUE,
             color: '#fff',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: 13,
+            fontSize: 14,
             fontWeight: 700,
             flexShrink: 0,
           }}
         >
           {n}
         </div>
-        <div style={{ flex: 1, width: 2, background: c.BORDER, marginTop: 4 }} />
+        <div style={{ flex: 1, width: 2, background: c.BORDER, marginTop: 6 }} />
       </div>
       <div style={{ flex: 1, minWidth: 0, paddingBottom: 4 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: c.TEXT_PRIMARY, marginBottom: 4 }}>
+        <div style={{ fontSize: 15, fontWeight: 600, color: c.TEXT_PRIMARY, marginBottom: 6 }}>
           {title}
         </div>
         {children && (
-          <div style={{ fontSize: 12, color: c.TEXT_SECONDARY, lineHeight: 1.5 }}>{children}</div>
+          <div style={{ fontSize: 13.5, color: c.TEXT_SECONDARY, lineHeight: 1.6 }}>{children}</div>
         )}
-        {mockup && <div style={{ marginTop: 8 }}>{mockup}</div>}
+        {mockup && <div style={{ marginTop: 12 }}>{mockup}</div>}
       </div>
     </div>
   );
@@ -158,17 +146,17 @@ function CopyChip({ value, c }: { value: string; c: ReturnType<typeof useColors>
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 5,
+        gap: 6,
         fontFamily: 'var(--font-mono)',
-        fontSize: 12,
-        padding: '2px 8px',
-        borderRadius: 5,
+        fontSize: 13,
+        padding: '4px 10px',
+        borderRadius: 6,
         border: `1px solid ${c.BORDER}`,
         background: c.BG_CARD,
         color: c.ACCENT_BLUE,
         cursor: 'pointer',
-        marginRight: 6,
-        marginTop: 4,
+        marginRight: 8,
+        marginTop: 6,
       }}
     >
       {value}
@@ -179,10 +167,8 @@ function CopyChip({ value, c }: { value: string; c: ReturnType<typeof useColors>
 
 function CreateAppButton() {
   return (
-    <a href={SLACK_APPS_URL} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 6 }}>
-      <Button size="small" icon={<SlackOutlined />}>
-        Open Slack app builder ↗
-      </Button>
+    <a href={SLACK_APPS_URL} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 10 }}>
+      <Button icon={<SlackOutlined />}>Open Slack app builder ↗</Button>
     </a>
   );
 }
@@ -205,7 +191,7 @@ function SlackScreen({
         border: `1px solid ${c.BORDER}`,
         borderRadius: 8,
         overflow: 'hidden',
-        maxWidth: 360,
+        maxWidth: 460,
         background: '#fff',
         color: '#1d1c1d',
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
@@ -216,17 +202,17 @@ function SlackScreen({
         style={{
           background: '#3f0e40',
           color: '#fff',
-          padding: '6px 10px',
-          fontSize: 11,
+          padding: '8px 14px',
+          fontSize: 12,
           fontWeight: 600,
           display: 'flex',
           alignItems: 'center',
-          gap: 6,
+          gap: 7,
         }}
       >
-        <SlackOutlined style={{ fontSize: 12 }} /> {title}
+        <SlackOutlined style={{ fontSize: 13 }} /> {title}
       </div>
-      <div style={{ padding: 10 }}>{children}</div>
+      <div style={{ padding: 14 }}>{children}</div>
     </div>
   );
 }
@@ -257,15 +243,15 @@ function ScopeRow({ name }: { name: string }) {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        padding: '5px 8px',
+        padding: '7px 10px',
         borderRadius: 4,
         background: '#f8f8f8',
-        marginBottom: 4,
-        fontSize: 12,
+        marginBottom: 6,
+        fontSize: 13,
       }}
     >
       <code style={{ color: '#1264a3', fontWeight: 600 }}>{name}</code>
-      <span style={{ color: '#007a5a', fontSize: 11, fontWeight: 700 }}>+ Add</span>
+      <span style={{ color: '#007a5a', fontSize: 12, fontWeight: 700 }}>+ Add</span>
     </div>
   );
 }
