@@ -50,8 +50,6 @@ NOT hand-rolled axum handlers. `startup.rs::build_s3_router` mounts
 `s3_adapter_s3s::DeltaGliderS3Service` (impls `s3s::S3`, ~32 verb methods) as the
 axum `fallback_service`. The legacy axum S3 handlers were retired; `s3s` is the
 only S3 implementation. The admin API + demo UI stays axum, mounted under `/_/`.
-(The top doc-comment in `s3_adapter_s3s.rs` still calls itself "experimental /
-not wired in" — that comment is stale; it IS the production path.)
 
 ```
 HTTP request (axum Router; cross-cutting layers: TraceLayer, body limit, timeout, concurrency cap, CORS)

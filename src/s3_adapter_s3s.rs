@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Experimental `s3s` protocol adapter.
+//! The `s3s` protocol adapter — THE production S3 implementation.
 //!
-//! This module is intentionally feature-gated (`s3s-adapter`) and not wired
-//! into the default server yet. The goal is to migrate the S3 protocol surface
-//! gradually: implement one `s3s::S3` operation at a time while the existing
-//! Axum handlers remain the production path.
+//! `DeltaGliderS3Service` implements `s3s::S3` (~32 verb methods) and is mounted
+//! as the axum `fallback_service` in `startup.rs::build_s3_router`. The migration
+//! is complete: the legacy hand-rolled axum S3 handlers were retired, and `s3s`
+//! is now the only S3 protocol surface. (`api/handlers/` retains only shared
+//! state + the shapes s3s can't model — browser form-POST, health/stats.)
 //!
 //! Boundary contract:
 //! - `s3s` owns HTTP/S3 parsing, generated DTOs, XML/error rendering, and
