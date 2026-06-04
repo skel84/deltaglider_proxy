@@ -5,11 +5,12 @@
 # (`GET /_/api/admin/config/export` + `/config/declarative-iam-export`).
 #
 # SECRETS: this file is SECRET-FREE and safe to commit. Every secret is either
-#   (a) injected at runtime as a DGP_* env var (backend S3 creds, bootstrap
-#       password) — see secrets.env, OR
-#   (b) a `${VAR}` placeholder that your deploy tooling MUST substitute before
-#       the proxy reads the file (DGP does NOT expand ${VAR} itself; an
-#       unexpanded placeholder fails loudly at load).
+#   (a) injected at runtime as a DGP_* env var (read natively by DGP), OR
+#   (b) a dollar-brace placeholder (VAR / VAR:-default syntax) that DGP expands
+#       in-process against the environment when it loads this file — no external
+#       envsubst step. An unset placeholder fails loudly at load.
+# NOTE: expansion is text-level, so do NOT write a literal dollar-brace example
+# in a comment unless you escape the dollar by doubling it.
 #
 # IAM is in `declarative` mode: this YAML is the source of truth for users,
 # groups, OAuth providers, and mapping rules. Admin-API IAM mutations return
@@ -20,18 +21,18 @@
 
 storage:
   # Named backends are the source of truth (the legacy singular `backend:` is
-  # ignored at runtime once `backends:` is non-empty, so it's omitted). Creds go
-  # inline as ${VAR} placeholders: the DGP_BE_AWS_* env vars only feed the
-  # singular backend, NOT named backends, so named-backend secrets must be
-  # substituted into the YAML by your deploy tooling.
+  # ignored at runtime once `backends:` is non-empty, so it's omitted). Creds are
+  # inline placeholders DGP expands from the env: the DGP_BE_AWS_* env vars only
+  # feed the singular backend, NOT named backends, so named-backend secrets must
+  # be placeholders here.
   backends:
     - name: HetznerHelsinki1
       type: s3
       endpoint: https://hel1.your-objectstorage.com
       region: hel1
       force_path_style: true
-      access_key_id: ${BACKEND_HETZNER_ACCESS_KEY_ID}
-      secret_access_key: ${BACKEND_HETZNER_SECRET_ACCESS_KEY}
+      access_key_id: ${env:BACKEND_HETZNER_ACCESS_KEY_ID}
+      secret_access_key: ${env:BACKEND_HETZNER_SECRET_ACCESS_KEY}
   default_backend: HetznerHelsinki1
 
   buckets:
@@ -43,10 +44,18 @@ access:
   # YAML owns IAM. The encrypted DB is reconciled to match this on every apply.
   iam_mode: declarative
 
+  # Bootstrap SigV4 pair. REQUIRED for the proxy to start: the startup auth gate
+  # accepts either these creds or `authentication: none`, and it runs BEFORE the
+  # declarative IAM users are reconciled into the (fresh) DB — so without this a
+  # cold start fails with "No authentication configured". This is the scripted-
+  # client / pre-IAM credential, distinct from the admin-GUI bootstrap password.
+  access_key_id: ${env:BOOTSTRAP_ACCESS_KEY_ID}
+  secret_access_key: ${env:BOOTSTRAP_SECRET_ACCESS_KEY}
+
   iam_users:
     - name: Simone Scarduzio
       access_key_id: AKF09PYNJ4TR0NSTPVW6
-      secret_access_key: ${USER_SIMONE_SECRET}
+      secret_access_key: ${env:USER_SIMONE_SECRET}
       enabled: true
       groups:
         - Administrators
@@ -54,7 +63,7 @@ access:
 
     - name: ror-ci-rw
       access_key_id: ror-ci-rw
-      secret_access_key: ${USER_ROR_CI_RW_SECRET}
+      secret_access_key: ${env:USER_ROR_CI_RW_SECRET}
       enabled: true
       permissions:
         - effect: Allow
@@ -66,7 +75,7 @@ access:
 
     - name: ror-ci-ro
       access_key_id: ror-ci-ro
-      secret_access_key: ${USER_ROR_CI_RO_SECRET}
+      secret_access_key: ${env:USER_ROR_CI_RO_SECRET}
       enabled: true
       permissions:
         - effect: Allow
@@ -82,14 +91,14 @@ access:
 
     - name: rorkbn-ci
       access_key_id: rorkbn-ci
-      secret_access_key: ${USER_RORKBN_CI_SECRET}
+      secret_access_key: ${env:USER_RORKBN_CI_SECRET}
       enabled: true
       groups:
         - ROR Staff
 
     - name: xperi
       access_key_id: xperi
-      secret_access_key: ${USER_XPERI_SECRET}
+      secret_access_key: ${env:USER_XPERI_SECRET}
       enabled: true
       groups:
         - Customers
@@ -99,7 +108,7 @@ access:
     # folding into the Administrators group or removing if superseded.
     - name: legacy-admin
       access_key_id: admin
-      secret_access_key: ${USER_LEGACY_ADMIN_SECRET}
+      secret_access_key: ${env:USER_LEGACY_ADMIN_SECRET}
       enabled: true
       permissions:
         - effect: Allow
@@ -167,7 +176,7 @@ access:
       client_id: 479270857704-gvs5pjf3284i587i3qccqh08ihuq9tcc.apps.googleusercontent.com
       issuer_url: https://accounts.google.com
       scopes: openid email profile
-      client_secret: ${GOOGLE_OAUTH_CLIENT_SECRET}
+      client_secret: ${env:GOOGLE_OAUTH_CLIENT_SECRET}
 
   group_mapping_rules:
     - priority: 0
@@ -184,5 +193,5 @@ access:
 advanced:
   # In prod the proxy listens on all interfaces (export shows the local
   # 127.0.0.1 override — set the real prod bind here / via DGP_LISTEN_ADDR).
-  listen_addr: ${DGP_LISTEN_ADDR}
+  listen_addr: ${env:DGP_LISTEN_ADDR}
   max_object_size: 536870912   # 512 MiB
