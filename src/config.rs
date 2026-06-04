@@ -1204,6 +1204,8 @@ impl Config {
     /// one shot.
     pub fn from_toml_file(path: &str) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
+        // Expand ${VAR} / ${VAR:-default} before parsing — see from_yaml_file.
+        let content = expand_env_vars(&content)?;
         let config = Self::from_toml_str(&content)?;
 
         // Phase 6 deprecation warn. Fires exactly once per load (no
@@ -1242,6 +1244,12 @@ impl Config {
     /// "unknown variant" coming from the flat-shape attempt.
     pub fn from_yaml_file(path: &str) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
+        // Expand ${VAR} / ${VAR:-default} against the environment BEFORE parsing
+        // (the in-process replacement for an external envsubst step). Loading a
+        // file from disk is unambiguously "render against my environment"; the
+        // admin `config apply` path parses a doc body via `from_yaml_str` and is
+        // deliberately NOT expanded (it would resolve against the server's env).
+        let content = expand_env_vars(&content)?;
         Self::from_yaml_str(&content)
     }
 
@@ -2273,6 +2281,127 @@ pub enum ConfigError {
 
     #[error("Parse error: {0}")]
     Parse(String),
+
+    #[error("config references ${{{0}}} but that environment variable is not set (and no `:-default` was given)")]
+    MissingEnvVar(String),
+
+    #[error("malformed `${{...}}` reference in config: {0}")]
+    BadEnvRef(String),
+}
+
+/// Expand `${env:NAME}` and `${env:NAME:-default}` references in a config file
+/// against the process environment, BEFORE the YAML/TOML is parsed. This is the
+/// in-process replacement for an external `envsubst` step — operators ship a
+/// secret-free config with `${env:...}` placeholders and inject the values as
+/// env vars.
+///
+/// **The `env:` prefix is mandatory and deliberate.** DGP already uses the bare
+/// `${...}` namespace for runtime IAM permission templates (`${username}`,
+/// `${access_key_id}`, `${email}`, `${filename}`), which are substituted
+/// per-request at auth time — NOT here. Scoping env expansion to `${env:NAME}`
+/// keeps the two namespaces from colliding: a bare `${username}` passes through
+/// this expander untouched for the IAM layer to resolve later.
+///
+/// Rules (a small, predictable subset — NOT a shell):
+/// - `${env:NAME}` → the value of env var `NAME`; **error** if unset (fail loud,
+///   never silently leave a hole — a blank secret is worse than a clear error).
+/// - `${env:NAME:-default}` → `NAME` if set & non-empty, else the literal
+///   `default` (which may itself be empty: `${env:NAME:-}`).
+/// - `${anything-else}` (no `env:` prefix) → left VERBATIM (IAM templates etc.).
+/// - `$$` → a literal `$` escape.
+/// - a bare `$` not followed by `{` or `$` is left untouched (so `$2b$10$...`
+///   bcrypt hashes, regex `$`, etc. pass through verbatim).
+///
+/// `VAR` must match `[A-Za-z_][A-Za-z0-9_]*`. An unterminated `${` or an empty
+/// `${}` is a [`ConfigError::BadEnvRef`]. Pure except for the env lookup, which
+/// is injected via `lookup` so the whole thing is unit-testable.
+pub fn expand_env_vars(input: &str) -> Result<String, ConfigError> {
+    expand_env_with(input, |name| std::env::var(name).ok())
+}
+
+/// Testable core of [`expand_env_vars`]: `lookup` resolves a var name to its
+/// value (`None` = unset).
+pub(crate) fn expand_env_with(
+    input: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<String, ConfigError> {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    // `cursor` is the start of the not-yet-copied run of literal text. We only
+    // ever break the run at an ASCII `$`, so `&input[cursor..i]` is always a
+    // valid UTF-8 slice (UTF-8 continuation bytes are all >= 0x80, never `$`).
+    let mut cursor = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        // Flush the literal run before this `$`.
+        out.push_str(&input[cursor..i]);
+        match bytes.get(i + 1) {
+            Some(b'$') => {
+                out.push('$'); // `$$` → literal `$`
+                i += 2;
+            }
+            Some(b'{') => {
+                let start = i + 2;
+                let end = input[start..]
+                    .find('}')
+                    .map(|rel| start + rel)
+                    .ok_or_else(|| {
+                        ConfigError::BadEnvRef(format!("unterminated `${{` near byte {i}"))
+                    })?;
+                let inner = &input[start..end];
+                // Only `${env:NAME...}` is an env reference. Anything else (IAM
+                // permission templates like `${username}`, or any other `${...}`)
+                // is emitted VERBATIM so the downstream consumer can handle it.
+                match inner.strip_prefix("env:") {
+                    None => {
+                        out.push_str(&input[i..=end]); // copy `${...}` unchanged
+                    }
+                    Some(spec) => {
+                        let (name, default) = match spec.split_once(":-") {
+                            Some((n, d)) => (n, Some(d)),
+                            None => (spec, None),
+                        };
+                        if name.is_empty() || !is_valid_env_name(name) {
+                            return Err(ConfigError::BadEnvRef(format!(
+                                "invalid variable name in `${{env:{spec}}}`"
+                            )));
+                        }
+                        match lookup(name) {
+                            Some(v) if !v.is_empty() => out.push_str(&v),
+                            // set-but-empty falls through to default.
+                            _ => match default {
+                                Some(d) => out.push_str(d),
+                                None => return Err(ConfigError::MissingEnvVar(name.to_string())),
+                            },
+                        }
+                    }
+                }
+                i = end + 1;
+            }
+            // bare `$` (EOI, or `$` + ordinary char) → literal `$`
+            _ => {
+                out.push('$');
+                i += 1;
+            }
+        }
+        cursor = i;
+    }
+    // Flush the trailing literal run.
+    out.push_str(&input[cursor..]);
+    Ok(out)
+}
+
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Write the bootstrap hash file with restrictive permissions (0600).
@@ -2297,6 +2426,208 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.listen_addr.port(), 9000);
         assert!(matches!(config.backend, BackendConfig::Filesystem { .. }));
+    }
+
+    // ── ${VAR} expansion (expand_env_with) ──────────────────────────────────
+
+    /// Build a lookup from pairs for the pure expander.
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn expand_basic_var() {
+        let r = expand_env_with("a=${env:X} b", env_of(&[("X", "1")])).unwrap();
+        assert_eq!(r, "a=1 b");
+    }
+
+    #[test]
+    fn expand_unset_var_is_error() {
+        let err = expand_env_with("a=${env:MISSING}", env_of(&[])).unwrap_err();
+        assert!(matches!(err, ConfigError::MissingEnvVar(v) if v == "MISSING"));
+    }
+
+    #[test]
+    fn expand_default_used_when_unset() {
+        let r = expand_env_with("a=${env:X:-fallback}", env_of(&[])).unwrap();
+        assert_eq!(r, "a=fallback");
+    }
+
+    #[test]
+    fn expand_default_used_when_set_but_empty() {
+        let r = expand_env_with("a=${env:X:-d}", env_of(&[("X", "")])).unwrap();
+        assert_eq!(r, "a=d");
+    }
+
+    #[test]
+    fn expand_set_value_wins_over_default() {
+        let r = expand_env_with("a=${env:X:-d}", env_of(&[("X", "real")])).unwrap();
+        assert_eq!(r, "a=real");
+    }
+
+    #[test]
+    fn expand_empty_default_is_allowed() {
+        let r = expand_env_with("a=[${env:X:-}]", env_of(&[])).unwrap();
+        assert_eq!(r, "a=[]");
+    }
+
+    /// THE collision guard: bare `${...}` (IAM permission templates) is NEVER
+    /// touched by env expansion — only the `env:`-prefixed form expands. This is
+    /// the bug that crash-looped a live deploy: `${username}` in a declarative
+    /// config's resources must pass through to the IAM layer verbatim.
+    #[test]
+    fn expand_leaves_iam_templates_untouched() {
+        for tmpl in [
+            "resources: [debug/scrap/customers/${username}/*]",
+            "home/${access_key_id}/*",
+            "${email}",
+            "${filename}",
+            "${anything_without_env_prefix}",
+        ] {
+            assert_eq!(
+                expand_env_with(tmpl, env_of(&[("username", "SHOULD_NOT_BE_USED")])).unwrap(),
+                tmpl,
+                "bare ${{...}} must pass through unexpanded"
+            );
+        }
+        // Mixed line: only the env: one expands, the IAM one is preserved.
+        let r = expand_env_with(
+            "key: ${env:AK}  path: home/${username}/*",
+            env_of(&[("AK", "realkey")]),
+        )
+        .unwrap();
+        assert_eq!(r, "key: realkey  path: home/${username}/*");
+    }
+
+    #[test]
+    fn expand_double_dollar_is_literal() {
+        let r = expand_env_with("price=$$5 lit=$${env:X}", env_of(&[("X", "no")])).unwrap();
+        assert_eq!(r, "price=$5 lit=${env:X}");
+    }
+
+    #[test]
+    fn expand_bare_dollar_passes_through() {
+        // bcrypt hashes / regex anchors: a `$` not followed by `{` or `$` is
+        // left verbatim. THE bug this whole feature has to not regress.
+        let hash = "$2b$10$abcdEFGHijklMNOpqrstuv";
+        let r = expand_env_with(hash, env_of(&[])).unwrap();
+        assert_eq!(r, hash);
+        assert_eq!(expand_env_with("end$", env_of(&[])).unwrap(), "end$");
+        assert_eq!(expand_env_with("a$b$c", env_of(&[])).unwrap(), "a$b$c");
+    }
+
+    #[test]
+    fn expand_preserves_utf8() {
+        let r = expand_env_with("Kołodziejczyk=${env:X}—€", env_of(&[("X", "Zürich")])).unwrap();
+        assert_eq!(r, "Kołodziejczyk=Zürich—€");
+    }
+
+    #[test]
+    fn expand_multiple_and_adjacent() {
+        let r = expand_env_with(
+            "${env:A}${env:B}-${env:A}",
+            env_of(&[("A", "x"), ("B", "y")]),
+        )
+        .unwrap();
+        assert_eq!(r, "xy-x");
+    }
+
+    #[test]
+    fn expand_unterminated_brace_is_error() {
+        let err = expand_env_with("a=${env:X", env_of(&[("X", "1")])).unwrap_err();
+        assert!(matches!(err, ConfigError::BadEnvRef(_)));
+    }
+
+    #[test]
+    fn expand_empty_or_bad_name_is_error() {
+        // `env:` with empty/invalid name errors; non-env `${...}` does NOT.
+        assert!(matches!(
+            expand_env_with("${env:}", env_of(&[])).unwrap_err(),
+            ConfigError::BadEnvRef(_)
+        ));
+        assert!(matches!(
+            expand_env_with("${env:1BAD}", env_of(&[])).unwrap_err(),
+            ConfigError::BadEnvRef(_)
+        ));
+        // `${}` and `${1BAD}` (no env: prefix) are NOT env refs → passthrough.
+        assert_eq!(expand_env_with("${}", env_of(&[])).unwrap(), "${}");
+        assert_eq!(expand_env_with("${1BAD}", env_of(&[])).unwrap(), "${1BAD}");
+    }
+
+    #[test]
+    fn expand_value_containing_dollar_is_not_reexpanded() {
+        // an expanded value that itself contains `${env:...}` is inserted
+        // literally, NOT recursively expanded (no loops / injection via values).
+        let r = expand_env_with("${env:X}", env_of(&[("X", "${env:Y}")])).unwrap();
+        assert_eq!(r, "${env:Y}");
+    }
+
+    #[test]
+    fn expand_no_dollar_is_identity() {
+        let s = "plain: yaml\n  nested: true\n";
+        assert_eq!(expand_env_with(s, env_of(&[])).unwrap(), s);
+    }
+
+    #[test]
+    fn expand_default_can_contain_colon_and_dashes() {
+        // only the FIRST `:-` splits; defaults may contain `:` / `-` (URLs!).
+        let r = expand_env_with("${env:U:-http://h:9000/a-b}", env_of(&[])).unwrap();
+        assert_eq!(r, "http://h:9000/a-b");
+    }
+
+    /// End-to-end: `from_yaml_file` expands ${VAR} against the real process
+    /// environment before parsing. Serialised because it mutates env vars.
+    #[test]
+    fn from_yaml_file_expands_env() {
+        use std::io::Write;
+        use std::sync::{Mutex, OnceLock};
+        // Serialise env-mutating tests (this is the only one in this module, but
+        // the lock guards against parallel runs touching the same DGP_TEST_* vars).
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("dgp-expand-{}.yaml", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(
+            f,
+            "storage:\n  backends:\n    - name: b1\n      type: s3\n      \
+             endpoint: ${{env:DGP_TEST_ENDPOINT}}\n      region: ${{env:DGP_TEST_REGION:-hel1}}\n      \
+             force_path_style: true\n      access_key_id: ak\n      secret_access_key: sk\n  \
+             default_backend: b1\naccess:\n  authentication: none\n"
+        )
+        .unwrap();
+
+        // Unset → load fails with MissingEnvVar.
+        std::env::remove_var("DGP_TEST_ENDPOINT");
+        std::env::remove_var("DGP_TEST_REGION");
+        let err = Config::from_yaml_file(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::MissingEnvVar(ref v) if v == "DGP_TEST_ENDPOINT"),
+            "expected MissingEnvVar, got {err:?}"
+        );
+
+        // Set → load succeeds and the value is substituted into the backend.
+        std::env::set_var("DGP_TEST_ENDPOINT", "https://hel1.example.com");
+        let cfg = Config::from_yaml_file(path.to_str().unwrap()).unwrap();
+        let has_endpoint = cfg.backends.iter().any(|b| {
+            matches!(&b.backend, BackendConfig::S3 { endpoint: Some(e), .. }
+                if e == "https://hel1.example.com")
+        });
+        assert!(
+            has_endpoint,
+            "expanded endpoint not found in parsed backends"
+        );
+
+        std::env::remove_var("DGP_TEST_ENDPOINT");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Build a Config with the three auth-relevant fields set and

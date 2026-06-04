@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Added — in-process `${env:...}` config expansion
+
+- **Config files now expand `${env:NAME}` / `${env:NAME:-default}` against the
+  environment when loaded**, removing the need for an external `envsubst` step in
+  deployments. Ship a secret-free config with `${env:...}` placeholders and inject
+  the values as env vars; an unset reference (with no default) fails loudly at
+  load instead of silently leaving a hole.
+  - The `env:` prefix is mandatory: it keeps env placeholders distinct from DGP's
+    runtime IAM permission templates (`${username}`, `${access_key_id}`,
+    `${email}`, `${filename}`), which are left untouched for the auth layer.
+  - `$$` is a literal `$` escape (e.g. for a literal `${...}` in a comment).
+  - Applies on the disk-load paths — server startup, `config lint`, and
+    `config apply` — but NOT `config migrate` (templates are preserved) nor the
+    admin API's in-memory doc-apply (no surprise expansion against the server env).
+
 ### Added — Slack notifications connector
 
 - **Object events can now post to Slack.** Setting `event_delivery.format = slack`

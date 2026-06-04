@@ -38,18 +38,13 @@ pub fn migrate(input: &str, output: Option<&str>) -> i32 {
         return EXIT_IO;
     }
 
-    let config = match Config::from_file(input) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: failed to parse {input}: {e}");
-            return EXIT_PARSE;
-        }
-    };
-
-    let yaml = match config.to_canonical_yaml() {
+    // Use migrate_to_string (which does NOT expand ${VAR}) so templates migrate
+    // with their placeholders intact, rather than Config::from_file (which
+    // expands on load and would bake secrets in / fail on unset vars).
+    let yaml = match migrate_to_string(input) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: failed to serialize to YAML: {e}");
+            eprintln!("error: failed to parse {input}: {e}");
             return EXIT_PARSE;
         }
     };
@@ -86,7 +81,17 @@ pub fn migrate(input: &str, output: Option<&str>) -> i32 {
 
 /// Adapter for callers that prefer `Result<(), ConfigError>` over exit codes.
 pub fn migrate_to_string(input: &str) -> Result<String, ConfigError> {
-    Config::from_file(input)?.to_canonical_yaml()
+    // Migrate is a structural transform of a (possibly templated) config, so it
+    // must NOT expand ${VAR} — placeholders are preserved verbatim in the output
+    // (expanding would bake secrets into the migrated file and fail on unset
+    // vars). Read + parse via the non-expanding string parsers, unlike the
+    // server load path (Config::from_file) which DOES expand.
+    let content = std::fs::read_to_string(input).map_err(|e| ConfigError::Io(e.to_string()))?;
+    let cfg = match crate::config::ConfigFormat::from_path(input) {
+        crate::config::ConfigFormat::Yaml => Config::from_yaml_str(&content)?,
+        crate::config::ConfigFormat::Toml => Config::from_toml_str(&content)?,
+    };
+    cfg.to_canonical_yaml()
 }
 
 /// `config schema [--out <path>]`
@@ -172,6 +177,18 @@ pub fn lint(file: &str) -> i32 {
         Err(e) => {
             eprintln!("error: failed to read {file}: {e}");
             return EXIT_IO;
+        }
+    };
+
+    // Expand ${VAR} / ${VAR:-default} exactly as the server does on load
+    // (Config::from_yaml_file), so lint validates the RENDERED config and fails
+    // loudly on an unset variable — catching the deploy-time hole here instead
+    // of at proxy startup.
+    let content = match crate::config::expand_env_vars(&content) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {file}: {e}");
+            return EXIT_PARSE;
         }
     };
 
@@ -480,6 +497,11 @@ pub fn apply(input: &str, opts: AdminClientOpts) -> i32 {
 async fn apply_async(input: &str, opts: AdminClientOpts) -> Result<i32, CliError> {
     let yaml =
         std::fs::read_to_string(input).map_err(|e| CliError::Io(format!("read {input}: {e}")))?;
+    // Expand ${VAR} / ${VAR:-default} against the OPERATOR's environment before
+    // sending — apply-from-disk is symmetric with a server loading the file, so
+    // the same secret-free-template-plus-env workflow works for `config apply`.
+    let yaml = crate::config::expand_env_vars(&yaml)
+        .map_err(|e| CliError::Rejected(format!("{input}: {e}")))?;
     if yaml.trim().is_empty() {
         return Err(CliError::Rejected(
             "refusing to apply an empty YAML body".into(),
