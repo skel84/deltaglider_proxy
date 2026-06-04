@@ -18,6 +18,32 @@
 //! a YAML-authoritative delete removes the user or provider they
 //! reference; that's expected behaviour.
 //!
+//! ## External (OAuth-provisioned) users and the DELETE decision
+//!
+//! A pre-existing DB user absent from the YAML `iam_users` is normally
+//! DELETED — the YAML is the source of truth. There is ONE exception:
+//! a user whose `auth_source == "external"` was auto-provisioned by the
+//! OAuth flow and is never authored in YAML. Deleting such a user on
+//! every reconcile would churn: the next login re-creates them with a
+//! brand-new access key.
+//!
+//! So an external user absent from YAML is deleted-for-reconcile ONLY
+//! when its state is fully RECONSTRUCTABLE from the OAuth flow — i.e.
+//! BOTH (a) it has no direct `permissions`, AND (b) its group set is
+//! EXACTLY the set a matching `group_mapping_rule` would auto-assign it
+//! (the "external baseline"). Such a user can be transparently rebuilt
+//! on the next login, so dropping it is safe and idempotent.
+//!
+//! If the external user carries direct permissions OR extra group
+//! memberships beyond the mapping-rule grant, that state was added
+//! MANUALLY (admin GUI / API) and is NOT reconstructable from the OAuth
+//! flow — the reconciler PRESERVES it (skips the delete). `auth_source
+//! == "local"` users keep the plain "delete if absent from YAML"
+//! behaviour. The OAuth baseline is precomputed by the reconciler
+//! orchestrator (it needs `external_identities` + mapping rules) and
+//! carried into the pure `diff_iam` via `CurrentIam::external_baseline_groups`,
+//! so the diff stays I/O-free.
+//!
 //! ## Naming: name, not id
 //!
 //! YAML references entities by NAME (users.groups = ["admins"],
@@ -36,6 +62,8 @@
 
 use crate::config_db::auth_providers::{AuthProviderConfig, GroupMappingRule};
 use crate::config_db::ConfigDb;
+use crate::iam::external_auth::mapping::evaluate_mappings;
+use crate::iam::external_auth::types::ExternalIdentityInfo;
 use crate::iam::{normalize_permissions, validate_permissions, Group, IamUser, Permission};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -148,11 +176,29 @@ impl DeclarativeIam {
 /// Snapshot of the current DB IAM state at diff time. Built by the
 /// reconciler orchestrator right before `diff_iam`. Keeps the diff
 /// function a pure `fn(yaml, current) -> Result<IamDiff, String>`.
+#[derive(Default)]
 pub struct CurrentIam {
     pub users: Vec<IamUser>,
     pub groups: Vec<Group>,
     pub auth_providers: Vec<AuthProviderConfig>,
     pub mapping_rules: Vec<GroupMappingRule>,
+    /// Precomputed OAuth baseline for `auth_source == "external"` users:
+    /// `user_id -> the group IDs a real login would auto-assign that
+    /// user`. Computed by replaying the EXACT same mapping logic the
+    /// OAuth callback uses — provider-FILTERED [`evaluate_mappings`]
+    /// against an [`ExternalIdentityInfo`] reconstructed from each
+    /// stored identity's `raw_claims` — unioned across the user's
+    /// identities. (It must NOT use the unfiltered preview path, which
+    /// over-grants groups from rules scoped to providers the user never
+    /// logged in through; an over-broad baseline can mark a manually
+    /// granted membership "reconstructable" and silently delete it.)
+    ///
+    /// Built by the reconciler orchestrator (it requires DB access to
+    /// `external_identities`); the pure [`diff_iam`] reads it to decide
+    /// whether an absent external user is reconstructable-from-OAuth and
+    /// therefore safe to delete. Missing entry (non-external user, or an
+    /// external user with no identity) is treated as an empty baseline.
+    pub external_baseline_groups: HashMap<i64, Vec<i64>>,
 }
 
 // ───── Diff output ─────────────────────────────────────────────────────
@@ -413,17 +459,78 @@ pub fn export_as_declarative_inner(
 /// both surfaces funnel through `diff_iam`, so the dry-run can't
 /// lie about what the live apply will actually do.
 pub fn preview_declarative_iam(db: &ConfigDb, yaml: &DeclarativeIam) -> Result<IamDiff, String> {
-    let current = CurrentIam {
+    let current = load_current_iam(db)?;
+    diff_iam(yaml, &current)
+}
+
+/// Load the full `CurrentIam` snapshot from the DB, including the
+/// precomputed OAuth baseline for external users. Shared by the preview
+/// (`preview_declarative_iam`) and live-apply (`reconcile_declarative_iam`)
+/// paths so the two can never disagree on what the diff sees.
+fn load_current_iam(db: &ConfigDb) -> Result<CurrentIam, String> {
+    let mapping_rules = db
+        .load_group_mapping_rules()
+        .map_err(|e| format!("load mapping_rules: {e}"))?;
+    let external_baseline_groups = compute_external_baseline_groups(db, &mapping_rules)?;
+    Ok(CurrentIam {
         users: db.load_users().map_err(|e| format!("load users: {e}"))?,
         groups: db.load_groups().map_err(|e| format!("load groups: {e}"))?,
         auth_providers: db
             .load_auth_providers()
             .map_err(|e| format!("load auth_providers: {e}"))?,
-        mapping_rules: db
-            .load_group_mapping_rules()
-            .map_err(|e| format!("load mapping_rules: {e}"))?,
-    };
-    diff_iam(yaml, &current)
+        mapping_rules,
+        external_baseline_groups,
+    })
+}
+
+/// Compute `user_id -> auto-assigned group IDs` for every external
+/// identity, replaying the EXACT mapping logic a real OAuth login uses:
+/// provider-FILTERED [`evaluate_mappings`] against an
+/// [`ExternalIdentityInfo`] reconstructed from the identity's stored
+/// `raw_claims` (faithfully mirroring the callback path in
+/// `api::admin::external_auth`). A user with multiple identities gets
+/// the UNION of the per-identity group sets, deduped. The result is the
+/// OAuth "baseline" the delete decision compares against in [`diff_iam`].
+///
+/// Using the provider-scoped path (not the unfiltered `preview_email_*`
+/// helper) is load-bearing: an unfiltered preview would include groups
+/// granted only by rules scoped to OTHER providers, over-broadening the
+/// baseline so a manually-added membership could match it and the user
+/// would be deleted — losing the manual grant on next login.
+fn compute_external_baseline_groups(
+    db: &ConfigDb,
+    mapping_rules: &[GroupMappingRule],
+) -> Result<HashMap<i64, Vec<i64>>, String> {
+    let identities = db
+        .list_external_identities()
+        .map_err(|e| format!("load external_identities: {e}"))?;
+    let mut baseline: HashMap<i64, Vec<i64>> = HashMap::new();
+    for ident in &identities {
+        // Reconstruct the identity info exactly as the OAuth callback +
+        // the `migrate`/recompute path do (src/api/admin/external_auth.rs):
+        // raw_claims when present, else an empty object; email/name from
+        // the stored columns; groups left empty (claim-derived groups
+        // live inside raw_claims and are read by claim-based rules).
+        let identity_info = ExternalIdentityInfo {
+            subject: ident.external_sub.clone(),
+            email: ident.email.clone(),
+            email_verified: true,
+            name: ident.display_name.clone(),
+            groups: vec![],
+            raw_claims: ident
+                .raw_claims
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({})),
+        };
+        let groups = evaluate_mappings(mapping_rules, &identity_info, ident.provider_id);
+        let entry = baseline.entry(ident.user_id).or_default();
+        for gid in groups {
+            if !entry.contains(&gid) {
+                entry.push(gid);
+            }
+        }
+    }
+    Ok(baseline)
 }
 
 // ───── Validation ──────────────────────────────────────────────────────
@@ -623,9 +730,26 @@ pub fn diff_iam(yaml: &DeclarativeIam, db: &CurrentIam) -> Result<IamDiff, Strin
         }
     }
     for du in &db.users {
-        if !yaml_users.contains_key(du.name.as_str()) {
-            diff.users_to_delete.push((du.id, du.name.clone()));
+        if yaml_users.contains_key(du.name.as_str()) {
+            continue;
         }
+        // External (OAuth-provisioned) users are never authored in YAML,
+        // so "absent from YAML" alone must NOT delete them. Delete only
+        // when the user is fully reconstructable from the OAuth flow
+        // (no direct perms + groups == the mapping-rule baseline);
+        // otherwise the state was added manually and must survive.
+        // `local` users keep the plain delete-if-absent behaviour.
+        if du.auth_source == "external" {
+            let baseline = db
+                .external_baseline_groups
+                .get(&du.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if !external_user_is_reconstructable(du, baseline) {
+                continue; // preserve manually-granted state
+            }
+        }
+        diff.users_to_delete.push((du.id, du.name.clone()));
     }
 
     // ── Mapping rules: wipe-and-rebuild, modelled as a tri-state ──
@@ -704,6 +828,31 @@ fn user_equal(
     db_group_names.sort_unstable();
     yaml_group_names.sort_unstable();
     db_group_names == yaml_group_names
+}
+
+/// Pure predicate: is this `auth_source == "external"` user's state
+/// fully RECONSTRUCTABLE from the OAuth flow, and therefore safe to
+/// delete during a declarative reconcile when it's absent from YAML?
+///
+/// True iff BOTH:
+///   (a) the user has NO direct `permissions`, AND
+///   (b) its actual group set equals `baseline_group_ids` — the set a
+///       matching `group_mapping_rule` would auto-assign it on login.
+///
+/// Both sides are compared as SETS (order-independent, dedup-safe), so a
+/// user whose groups are exactly the mapping-rule grant (in any order,
+/// with or without accidental duplicates) is reconstructable. Any direct
+/// permission, or any group beyond the baseline, means the state was
+/// added manually and can't be rebuilt from OAuth → preserve (return
+/// false). Caller only invokes this for external users; local users are
+/// handled by the plain delete-if-absent path.
+fn external_user_is_reconstructable(user: &IamUser, baseline_group_ids: &[i64]) -> bool {
+    if !user.permissions.is_empty() {
+        return false;
+    }
+    let actual: HashSet<i64> = user.group_ids.iter().copied().collect();
+    let baseline: HashSet<i64> = baseline_group_ids.iter().copied().collect();
+    actual == baseline
 }
 
 fn permissions_equal(a: &[Permission], b: &[Permission]) -> bool {
@@ -911,16 +1060,7 @@ pub fn reconcile_declarative_iam(
     db: &ConfigDb,
     yaml: &DeclarativeIam,
 ) -> Result<ReconcileStats, String> {
-    let current = CurrentIam {
-        users: db.load_users().map_err(|e| format!("load users: {e}"))?,
-        groups: db.load_groups().map_err(|e| format!("load groups: {e}"))?,
-        auth_providers: db
-            .load_auth_providers()
-            .map_err(|e| format!("load auth_providers: {e}"))?,
-        mapping_rules: db
-            .load_group_mapping_rules()
-            .map_err(|e| format!("load mapping_rules: {e}"))?,
-    };
+    let current = load_current_iam(db)?;
     let diff = diff_iam(yaml, &current)?;
     db.apply_iam_reconcile(&diff, &current)
         .map_err(|e| format!("apply reconcile: {e}"))
@@ -984,12 +1124,7 @@ mod tests {
     }
 
     fn empty_db() -> CurrentIam {
-        CurrentIam {
-            users: vec![],
-            groups: vec![],
-            auth_providers: vec![],
-            mapping_rules: vec![],
-        }
+        CurrentIam::default()
     }
 
     #[test]
@@ -1424,6 +1559,288 @@ mod tests {
         assert!(
             err.contains("alice") && err.contains("bob"),
             "error must cite both conflicting user names, got: {err}"
+        );
+    }
+
+    // ───── External-user delete-preservation (this fix) ───────────────
+
+    fn db_external_user(id: i64, name: &str, ak: &str) -> IamUser {
+        IamUser {
+            auth_source: "external".into(),
+            ..db_user(id, name, ak)
+        }
+    }
+
+    // --- pure helper: external_user_is_reconstructable ---
+
+    #[test]
+    fn reconstructable_external_no_perms_groups_eq_baseline_is_true() {
+        // (i) external, no perms, groups == baseline → deletable.
+        let user = IamUser {
+            group_ids: vec![11, 22],
+            ..db_external_user(1, "oauth-alice", "K1")
+        };
+        assert!(external_user_is_reconstructable(&user, &[11, 22]));
+    }
+
+    #[test]
+    fn reconstructable_external_extra_manual_group_is_false() {
+        // (ii) external, no perms, groups ⊋ baseline → preserve.
+        let user = IamUser {
+            group_ids: vec![11, 22, 33], // 33 added manually
+            ..db_external_user(1, "oauth-alice", "K1")
+        };
+        assert!(!external_user_is_reconstructable(&user, &[11, 22]));
+    }
+
+    #[test]
+    fn reconstructable_external_with_direct_perms_is_false() {
+        // (iii) external WITH direct permissions, groups == baseline → preserve.
+        let user = IamUser {
+            group_ids: vec![11],
+            permissions: vec![perm(&["read"], &["bucket/*"])],
+            ..db_external_user(1, "oauth-alice", "K1")
+        };
+        assert!(!external_user_is_reconstructable(&user, &[11]));
+    }
+
+    #[test]
+    fn reconstructable_external_empty_groups_empty_baseline_is_true() {
+        // (iv) external, empty groups + empty baseline, no perms → deletable.
+        let user = db_external_user(1, "oauth-alice", "K1");
+        assert!(external_user_is_reconstructable(&user, &[]));
+    }
+
+    #[test]
+    fn reconstructable_set_compare_is_order_and_dedup_safe() {
+        // (v) set comparison: order-independent + dedup-safe.
+        let user = IamUser {
+            group_ids: vec![22, 11, 11], // unordered + duplicate
+            ..db_external_user(1, "oauth-alice", "K1")
+        };
+        assert!(external_user_is_reconstructable(&user, &[11, 22, 22]));
+    }
+
+    // --- diff_iam-level: external delete decision ---
+
+    #[test]
+    fn diff_deletes_reconstructable_external_user_absent_from_yaml() {
+        // External user absent from YAML, only the mapping-rule group,
+        // no direct perms → reconstructable → appears in users_to_delete.
+        let yaml = DeclarativeIam::default();
+        let current = CurrentIam {
+            users: vec![IamUser {
+                group_ids: vec![11],
+                ..db_external_user(5, "oauth-bob", "K_OB")
+            }],
+            groups: vec![db_group(11, "readers")],
+            external_baseline_groups: HashMap::from([(5, vec![11])]),
+            ..empty_db()
+        };
+        let diff = diff_iam(&yaml, &current).unwrap();
+        assert_eq!(diff.users_to_delete, vec![(5, "oauth-bob".to_string())]);
+    }
+
+    #[test]
+    fn diff_preserves_external_user_with_extra_group() {
+        // Same external user but with an extra manually-added group
+        // beyond the mapping-rule baseline → NOT in users_to_delete.
+        let yaml = DeclarativeIam::default();
+        let current = CurrentIam {
+            users: vec![IamUser {
+                group_ids: vec![11, 99], // 99 is manual
+                ..db_external_user(5, "oauth-bob", "K_OB")
+            }],
+            groups: vec![db_group(11, "readers"), db_group(99, "secret")],
+            external_baseline_groups: HashMap::from([(5, vec![11])]),
+            ..empty_db()
+        };
+        let diff = diff_iam(&yaml, &current).unwrap();
+        assert!(
+            diff.users_to_delete.is_empty(),
+            "external user with extra group must be preserved, got {:?}",
+            diff.users_to_delete
+        );
+    }
+
+    #[test]
+    fn diff_preserves_external_user_with_direct_perms() {
+        // External user with direct perms, groups == baseline → preserve.
+        let yaml = DeclarativeIam::default();
+        let current = CurrentIam {
+            users: vec![IamUser {
+                group_ids: vec![11],
+                permissions: vec![perm(&["write"], &["bucket/*"])],
+                ..db_external_user(5, "oauth-bob", "K_OB")
+            }],
+            groups: vec![db_group(11, "readers")],
+            external_baseline_groups: HashMap::from([(5, vec![11])]),
+            ..empty_db()
+        };
+        let diff = diff_iam(&yaml, &current).unwrap();
+        assert!(
+            diff.users_to_delete.is_empty(),
+            "external user with direct perms must be preserved, got {:?}",
+            diff.users_to_delete
+        );
+    }
+
+    #[test]
+    fn diff_still_deletes_local_user_absent_from_yaml() {
+        // Regression guard: a LOCAL user absent from YAML is still
+        // deleted regardless of the external-preservation logic.
+        let yaml = DeclarativeIam::default();
+        let current = CurrentIam {
+            users: vec![IamUser {
+                group_ids: vec![11, 99],
+                permissions: vec![perm(&["admin"], &["*"])],
+                ..db_user(7, "local-carol", "K_LC")
+            }],
+            groups: vec![db_group(11, "readers"), db_group(99, "secret")],
+            ..empty_db()
+        };
+        let diff = diff_iam(&yaml, &current).unwrap();
+        assert_eq!(diff.users_to_delete, vec![(7, "local-carol".to_string())]);
+    }
+
+    #[test]
+    fn diff_preserves_external_user_with_missing_baseline_entry() {
+        // External user with groups but NO baseline entry (e.g. no
+        // email on their identity) → baseline treated as empty → groups
+        // ⊋ empty → preserved.
+        let yaml = DeclarativeIam::default();
+        let current = CurrentIam {
+            users: vec![IamUser {
+                group_ids: vec![11],
+                ..db_external_user(5, "oauth-bob", "K_OB")
+            }],
+            groups: vec![db_group(11, "readers")],
+            // no entry for user 5
+            ..empty_db()
+        };
+        let diff = diff_iam(&yaml, &current).unwrap();
+        assert!(
+            diff.users_to_delete.is_empty(),
+            "external user with no baseline + non-empty groups must be preserved"
+        );
+    }
+
+    // ───── Provider-scoped baseline (data-loss regression) ────────────
+
+    #[test]
+    fn baseline_is_provider_filtered_not_unfiltered_preview() {
+        // Drive the REAL computation (compute_external_baseline_groups)
+        // against a multi-provider, provider-SCOPED rule set. This is
+        // the gap the adversarial review found: the baseline must mirror
+        // what an actual login grants (provider-filtered evaluate_mappings),
+        // NOT the unfiltered preview that would over-grant cross-provider
+        // groups and silently delete a manually-added membership.
+        use crate::config_db::auth_providers::{
+            CreateAuthProviderRequest, CreateMappingRuleRequest,
+        };
+        use crate::config_db::ConfigDb;
+
+        let db = ConfigDb::in_memory("test-pass").unwrap();
+
+        // Two providers.
+        let prov_a = db
+            .create_auth_provider(&CreateAuthProviderRequest {
+                name: "okta".into(),
+                provider_type: "oidc".into(),
+                enabled: true,
+                priority: 0,
+                display_name: None,
+                client_id: None,
+                client_secret: None,
+                issuer_url: None,
+                scopes: default_scopes(),
+                extra_config: None,
+            })
+            .unwrap();
+        let prov_b = db
+            .create_auth_provider(&CreateAuthProviderRequest {
+                name: "google".into(),
+                provider_type: "oidc".into(),
+                enabled: true,
+                priority: 0,
+                display_name: None,
+                client_id: None,
+                client_secret: None,
+                issuer_url: None,
+                scopes: default_scopes(),
+                extra_config: None,
+            })
+            .unwrap();
+
+        // Two groups: 'eng' (granted by provider A's rule), 'staff'
+        // (granted by provider B's rule).
+        let grp_eng = db.create_group("eng", "", &[]).unwrap();
+        let grp_staff = db.create_group("staff", "", &[]).unwrap();
+
+        // Rule A scoped to provider A → eng. Rule B scoped to provider B
+        // → staff. BOTH would match the email by domain; only the
+        // provider filter keeps them apart.
+        db.create_group_mapping_rule(&CreateMappingRuleRequest {
+            provider_id: Some(prov_a.id),
+            priority: 10,
+            match_type: "email_domain".into(),
+            match_field: "email".into(),
+            match_value: "corp.example".into(),
+            group_id: grp_eng.id,
+        })
+        .unwrap();
+        db.create_group_mapping_rule(&CreateMappingRuleRequest {
+            provider_id: Some(prov_b.id),
+            priority: 10,
+            match_type: "email_domain".into(),
+            match_field: "email".into(),
+            match_value: "corp.example".into(),
+            group_id: grp_staff.id,
+        })
+        .unwrap();
+
+        // External user with an identity ONLY on provider B.
+        let user = db
+            .create_external_user("oauth-bob", "AKEXTBOB0001", "secret-bob-12")
+            .unwrap();
+        db.create_external_identity(
+            user.id,
+            prov_b.id,
+            "bob-sub-200",
+            Some("bob@corp.example"),
+            Some("Bob"),
+            None,
+        )
+        .unwrap();
+
+        // Manual extra membership in 'eng' (the cross-provider group) —
+        // the kind of grant an admin adds via POST /groups/:id/members.
+        db.add_user_to_group(grp_eng.id, user.id).unwrap();
+
+        let rules = db.load_group_mapping_rules().unwrap();
+        let baseline = compute_external_baseline_groups(&db, &rules).unwrap();
+
+        let got: std::collections::BTreeSet<i64> = baseline
+            .get(&user.id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let expected: std::collections::BTreeSet<i64> = [grp_staff.id].into_iter().collect();
+        assert_eq!(
+            got, expected,
+            "baseline must be the provider-B-scoped grant {{staff}} only — NOT \
+             {{eng,staff}} from the unfiltered preview path"
+        );
+
+        // End-to-end through the helper: actual groups = {eng, staff},
+        // baseline = {staff} → NOT reconstructable → must be PRESERVED.
+        let user_loaded = db.get_user_by_id(user.id).unwrap();
+        let baseline_groups = baseline.get(&user.id).cloned().unwrap_or_default();
+        assert!(
+            !external_user_is_reconstructable(&user_loaded, &baseline_groups),
+            "user with a manual cross-provider group beyond the real-login \
+             baseline must be preserved (not deleted)"
         );
     }
 }
