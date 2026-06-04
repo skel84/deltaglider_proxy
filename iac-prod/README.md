@@ -11,8 +11,29 @@ and committable.**
   (`.gitignore` blocks it).
 - `backup-zip-to-secrets-env.sh` — converts a prod backup zip into a filled
   `secrets.env` (run it yourself; values stay local). See Deploy step 1.
+- `docker-compose.yml` — one-command deploy: an init container renders the
+  `${VAR}`s with envsubst, then runs the proxy. See "Deploy with Docker Compose".
 
-## Deploy
+## Deploy with Docker Compose
+
+```bash
+# 1. Produce secrets.env (see Deploy step 1 below).
+./backup-zip-to-secrets-env.sh prod-backup.zip secrets.env
+
+# 2. Up. The `config-render` init container substitutes ${VAR} -> config.yaml
+#    (failing loudly on any unsubstituted placeholder), then `dgp` starts.
+docker compose up -d
+#    Override the image: DGP_IMAGE_TAG=latest docker compose up -d
+
+# 3. Admin GUI + S3 API on :9000 → https://<host>:9000/_/
+docker compose logs -f dgp
+```
+
+The `dgp-config` volume holds the rendered config AND the encrypted IAM DB
+(`deltaglider_config.db`) — **back it up**. `secrets.env` is read by `env_file:`
+(literal, no shell expansion — safe for the `$`-laden bcrypt bootstrap hash).
+
+## Deploy (manual / other orchestrators)
 ```bash
 # 1. Get secrets into secrets.env (gitignored). Two ways:
 #

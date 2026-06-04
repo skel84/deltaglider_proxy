@@ -1,0 +1,81 @@
+# =============================================================================
+# DeltaGlider Proxy — production deployment (docker compose)
+# =============================================================================
+# Deploys DGP from the IaC pair in this directory:
+#   - deltaglider_proxy.yaml   (config structure, ${VAR} secret placeholders)
+#   - secrets.env              (real secret values — gitignored; see README)
+#
+# DGP does NOT expand ${VAR} itself, so an init container renders the YAML with
+# envsubst into a shared volume BEFORE the proxy starts. The native DGP_* vars
+# (bootstrap hash, listen addr, config path) are passed straight to the proxy.
+#
+# Usage:
+#   1. Produce secrets.env (./backup-zip-to-secrets-env.sh <backup.zip> secrets.env)
+#   2. docker compose up -d
+#   3. https://<host>:9000/_/   (admin GUI) ; S3 API on the same port
+#
+# `env_file: secrets.env` loads ALL keys (DGP_* + the ${VAR} ones) into both
+# containers' environments; the proxy ignores the ${VAR} ones, the renderer uses
+# them. Single source of truth, no duplication.
+# =============================================================================
+
+services:
+  # ── Init: substitute ${VAR} placeholders into a rendered config ────────────
+  config-render:
+    image: alpine:3.20
+    env_file:
+      - secrets.env
+    volumes:
+      - ./deltaglider_proxy.yaml:/in/deltaglider_proxy.yaml:ro
+      - dgp-config:/etc/deltaglider_proxy
+    # gettext provides envsubst. Render, then fail loudly if any ${VAR} slipped
+    # through unsubstituted (DGP would also reject it, but fail early + clearer).
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        apk add --no-cache gettext >/dev/null
+        envsubst < /in/deltaglider_proxy.yaml > /etc/deltaglider_proxy/config.yaml
+        if grep -q '$${' /etc/deltaglider_proxy/config.yaml; then
+          echo "ERROR: unsubstituted \$${...} placeholder left in config.yaml:" >&2
+          grep -n '$${' /etc/deltaglider_proxy/config.yaml >&2
+          exit 1
+        fi
+        echo "rendered /etc/deltaglider_proxy/config.yaml"
+    restart: "no"
+
+  # ── The proxy ──────────────────────────────────────────────────────────────
+  dgp:
+    # Override with DGP_IMAGE_TAG (e.g. a newer release, or `latest`).
+    image: beshultd/deltaglider_proxy:${DGP_IMAGE_TAG:-1.2.0}
+    depends_on:
+      config-render:
+        condition: service_completed_successfully
+    env_file:
+      - secrets.env
+    environment:
+      # DGP_CONFIG (and thus the config-DB dir) + the bootstrap hash come from
+      # secrets.env. DGP_LISTEN_ADDR defaults to 0.0.0.0:9000 in the image but is
+      # also set in secrets.env; either is fine.
+      DGP_CONFIG: /etc/deltaglider_proxy/config.yaml
+    ports:
+      - "9000:9000"
+    volumes:
+      # Holds the rendered config.yaml AND the encrypted IAM DB
+      # (deltaglider_config.db lands in DGP_CONFIG's parent dir) — must persist.
+      - dgp-config:/etc/deltaglider_proxy
+      # Local scratch for delta reconstruction + caches (object data lives in the
+      # S3 backend, not here, but reconstruction buffers to disk).
+      - dgp-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/_/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  dgp-config:    # encrypted IAM DB + rendered config — back this up
+  dgp-data:      # delta/reconstruction scratch + caches
