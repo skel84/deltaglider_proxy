@@ -47,7 +47,7 @@ assert.deepEqual(unknownBucketWarnings('beshu', BUCKETS), []);
 assert.deepEqual(unknownBucketWarnings('beshu/*', BUCKETS), []);
 
 // Template bucket → skipped (can't validate `${...}`).
-assert.deepEqual(unknownBucketWarnings('${username}/scrap/*', BUCKETS), []);
+assert.deepEqual(unknownBucketWarnings('${iam:username}/scrap/*', BUCKETS), []);
 
 // Mixed list: one good, one bad → exactly one warning for the bad one.
 {
@@ -77,7 +77,7 @@ assert.deepEqual(unknownBucketWarnings('ror/lib/*', []), []);
 assert.deepEqual(invalidPatternWarnings('beshu/ror/libs/*'), []);
 assert.deepEqual(invalidPatternWarnings('beshu, beshu/*, *'), []);
 assert.deepEqual(invalidPatternWarnings('beshu/my-bucket.name/*'), []); // hyphens/dots OK
-assert.deepEqual(invalidPatternWarnings('${username}/x/*'), []);        // template OK here
+assert.deepEqual(invalidPatternWarnings('${iam:username}/x/*'), []);     // template OK here
 // Mid-pattern `*` → rejected (only trailing allowed).
 {
   const w = invalidPatternWarnings('beshu/*/thing');

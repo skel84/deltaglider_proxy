@@ -103,7 +103,7 @@ assert.equal(isPrefixScoped('beshu/ror/*, beshu'), false, 'mixed with a bucket �
 assert.equal(isPrefixScoped('beshu/ror/*, beshu/x/*'), true, 'all sub-prefix → suppressed');
 assert.equal(isPrefixScoped('beshu/ror/*, *'), false, 'any global → admin offered');
 // Template bucket: with a prefix → suppressed (privilege-safe); without → offered.
-assert.equal(isPrefixScoped('${username}/x/*'), true, 'templated bucket + prefix → suppressed');
-assert.equal(isPrefixScoped('${username}/*'), false, 'templated bucket, no prefix → offered');
+assert.equal(isPrefixScoped('${iam:username}/x/*'), true, 'templated bucket + prefix → suppressed');
+assert.equal(isPrefixScoped('${iam:username}/*'), false, 'templated bucket, no prefix → offered');
 
 console.log('action chips regression checks passed');

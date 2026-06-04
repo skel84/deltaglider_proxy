@@ -23,7 +23,7 @@ const {
   replaceTrailingCommaSegment,
 } = await import(moduleUrl);
 
-assert.equal(normalizePrefix(' /team//${username}/builds '), 'team/${username}/builds/');
+assert.equal(normalizePrefix(' /team//${iam:username}/builds '), 'team/${iam:username}/builds/');
 assert.equal(normalizePrefix(''), '');
 assert.equal(normalizePrefix('///'), '');
 
