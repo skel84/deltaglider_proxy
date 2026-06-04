@@ -1,0 +1,74 @@
+# =============================================================================
+# DeltaGlider Proxy — example configuration
+# =============================================================================
+# Secret-free and safe to commit. Secrets are either:
+#   (a) native DGP_* env vars read directly by the proxy, or
+#   (b) env: placeholders (see the values below) the proxy expands in-process
+#       at load from the environment.
+# Fill the real values in secrets.env (gitignored).
+#
+# Full reference: https://github.com/beshu-tech/deltaglider_proxy → docs.
+# =============================================================================
+
+storage:
+  # Where object data actually lives. This example uses an S3-compatible
+  # backend (AWS S3, MinIO, Hetzner, Backblaze B2, etc.). For a local
+  # filesystem backend instead, replace `backends:` with `filesystem: /data`.
+  backends:
+    - name: primary
+      type: s3
+      endpoint: ${env:S3_ENDPOINT}                 # e.g. https://s3.eu-central-1.amazonaws.com
+      region: ${env:S3_REGION:-us-east-1}
+      force_path_style: ${env:S3_PATH_STYLE:-false} # true for MinIO and most non-AWS stores
+      access_key_id: ${env:S3_ACCESS_KEY_ID}
+      secret_access_key: ${env:S3_SECRET_ACCESS_KEY}
+  default_backend: primary
+
+  # Optional: per-bucket policy. Here, make one prefix publicly readable.
+  # buckets:
+  #   releases:
+  #     public_prefixes:
+  #       - public/
+
+access:
+  # ── Simplest auth: a single bootstrap SigV4 credential pair ──
+  # Clients sign requests with this key; the admin GUI uses the bootstrap
+  # password (DGP_BOOTSTRAP_PASSWORD_HASH in secrets.env). Good for getting
+  # started; add per-user IAM later from the GUI, or switch to declarative
+  # mode below.
+  access_key_id: ${env:PROXY_ACCESS_KEY_ID}
+  secret_access_key: ${env:PROXY_SECRET_ACCESS_KEY}
+
+  # ── Optional: declarative IAM (YAML is the source of truth) ──
+  # Uncomment to manage users/groups as code. Admin-API IAM mutations then
+  # return 403; the YAML is reconciled into the DB on every `config apply`.
+  # Per-user identity templates use the iam: namespace, e.g. iam:username
+  # (expanded per-request at auth time — distinct from the env: load-time
+  # config expansion). See the engineers group below for an example.
+  #
+  # iam_mode: declarative
+  # iam_users:
+  #   - name: ci-uploader
+  #     access_key_id: ci-uploader
+  #     # secret from env, like the bootstrap pair above:
+  #     secret_access_key: "<use an env placeholder, e.g. USER_CI_UPLOADER_SECRET>"
+  #     enabled: true
+  #     permissions:
+  #       - effect: Allow
+  #         actions: [read, write, list]
+  #         resources: ["releases/builds/*"]
+  # iam_groups:
+  #   - name: engineers
+  #     description: Read everything, write to a personal home prefix
+  #     permissions:
+  #       - effect: Allow
+  #         actions: [read, list]
+  #         resources: ["*"]
+  #       - effect: Allow
+  #         actions: [read, write, delete]
+  #         resources: ["scratch/${iam:username}/*"]
+
+advanced:
+  listen_addr: 0.0.0.0:9000
+  max_object_size: 536870912   # 512 MiB
+  # log_level: info

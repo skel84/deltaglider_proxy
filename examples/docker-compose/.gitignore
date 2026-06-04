@@ -1,0 +1,3 @@
+# Never commit a filled secrets file or rendered config.
+secrets.env
+config.yaml
