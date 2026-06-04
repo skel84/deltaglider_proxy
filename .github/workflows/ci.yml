@@ -56,6 +56,20 @@ jobs:
       - name: Every .rs file must have SPDX-License-Identifier
         run: ./scripts/check-spdx-headers.sh
 
+  verify-no-committed-secrets:
+    name: No committed secrets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Scrub stale workspace (drop .claude leftovers from prior runs)
+        shell: bash
+        run: |
+          rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: No live secrets / secret artifacts in the tracked tree
+        run: ./scripts/check-no-committed-secrets.sh
+
   verify-savings-math-dry:
     name: Savings math DRY guard
     runs-on: ubuntu-latest

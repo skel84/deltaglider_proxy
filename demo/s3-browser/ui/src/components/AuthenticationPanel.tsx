@@ -315,7 +315,12 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
             prefix={<SearchOutlined style={{ color: colors.TEXT_MUTED }} />}
             placeholder="Test email address..."
             value={previewEmail}
-            onChange={e => setPreviewEmail(e.target.value)}
+            onChange={e => {
+              setPreviewEmail(e.target.value);
+              // Clear the previous result so a stale match can't sit next to a
+              // newly-typed email until the operator hits Check again.
+              setPreviewGroups([]);
+            }}
             onPressEnter={handlePreview}
             style={{ flex: 1 }}
           />

@@ -2297,11 +2297,14 @@ pub enum ConfigError {
     #[error("Parse error: {0}")]
     Parse(String),
 
-    #[error("config references ${{{0}}} but that environment variable is not set (and no `:-default` was given)")]
+    #[error("config references ${{env:{0}}} but that environment variable is unset or empty (and no `:-default` was given)")]
     MissingEnvVar(String),
 
     #[error("malformed `${{...}}` reference in config: {0}")]
     BadEnvRef(String),
+
+    #[error("environment variable {0} expands to a value containing a newline or control character; such a value cannot be substituted into the config without breaking its structure — quote it or use a file reference")]
+    UnsafeEnvValue(String),
 }
 
 /// Expand `${env:NAME}` and `${env:NAME:-default}` references in a config file
@@ -2331,6 +2334,12 @@ pub enum ConfigError {
 /// `VAR` must match `[A-Za-z_][A-Za-z0-9_]*`. An unterminated `${` or an empty
 /// `${}` is a [`ConfigError::BadEnvRef`]. Pure except for the env lookup, which
 /// is injected via `lookup` so the whole thing is unit-testable.
+///
+/// **Substituted values are spliced as raw pre-parse text and are NOT YAML/TOML
+/// -escaped.** A value containing a newline or control char is rejected
+/// ([`ConfigError::UnsafeEnvValue`]) because it could restructure the document;
+/// values with YAML indicators (leading `@`, `*`, `:` `, ` etc.) parse as
+/// intended only when the field is quoted in the template (`key: "${env:X}"`).
 pub fn expand_env_vars(input: &str) -> Result<String, ConfigError> {
     expand_env_with(input, |name| std::env::var(name).ok())
 }
@@ -2362,12 +2371,26 @@ pub(crate) fn expand_env_with(
             }
             Some(b'{') => {
                 let start = i + 2;
-                let end = input[start..]
-                    .find('}')
-                    .map(|rel| start + rel)
-                    .ok_or_else(|| {
-                        ConfigError::BadEnvRef(format!("unterminated `${{` near byte {i}"))
-                    })?;
+                // Find the closing `}`, but stop at an intervening `${` — that
+                // means THIS `${` was never closed and we'd otherwise consume a
+                // LATER ref's `}`, producing a confusing "invalid name" error.
+                let scan = &input[start..];
+                let brace = scan.find('}');
+                let next_open = scan.find("${");
+                let end = match (brace, next_open) {
+                    // A `${` appears before the next `}` → this ref is unterminated.
+                    (Some(b), Some(o)) if o < b => {
+                        return Err(ConfigError::BadEnvRef(format!(
+                            "unterminated `${{` near byte {i} (closing `}}` missing before the next `${{`)"
+                        )))
+                    }
+                    (Some(b), _) => start + b,
+                    (None, _) => {
+                        return Err(ConfigError::BadEnvRef(format!(
+                            "unterminated `${{` near byte {i}"
+                        )))
+                    }
+                };
                 let inner = &input[start..end];
                 // Only `${env:NAME...}` is an env reference. Anything else (IAM
                 // permission templates like `${iam:username}`, or any other
@@ -2386,14 +2409,22 @@ pub(crate) fn expand_env_with(
                                 "invalid variable name in `${{env:{spec}}}`"
                             )));
                         }
-                        match lookup(name) {
-                            Some(v) if !v.is_empty() => out.push_str(&v),
-                            // set-but-empty falls through to default.
+                        // Resolve to the env value (non-empty), else the default,
+                        // else error. set-but-empty falls through to the default.
+                        let resolved: String = match lookup(name) {
+                            Some(v) if !v.is_empty() => v,
                             _ => match default {
-                                Some(d) => out.push_str(d),
+                                Some(d) => d.to_string(),
                                 None => return Err(ConfigError::MissingEnvVar(name.to_string())),
                             },
+                        };
+                        // The value is spliced as RAW pre-parse text, so a
+                        // newline/control char would inject YAML/TOML structure.
+                        // Fail loud rather than silently corrupt the document.
+                        if has_unsafe_control_char(&resolved) {
+                            return Err(ConfigError::UnsafeEnvValue(name.to_string()));
                         }
+                        out.push_str(&resolved);
                     }
                 }
                 i = end + 1;
@@ -2418,6 +2449,13 @@ fn is_valid_env_name(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// True if `s` contains a character that, spliced as raw pre-parse text into a
+/// YAML/TOML scalar, could break or restructure the document: any control char
+/// EXCEPT tab (newlines, NUL, etc.). Tab is allowed (legitimate in some values).
+fn has_unsafe_control_char(s: &str) -> bool {
+    s.chars().any(|c| c.is_control() && c != '\t')
 }
 
 /// Write the bootstrap hash file with restrictive permissions (0600).
@@ -2595,6 +2633,55 @@ mod tests {
         // only the FIRST `:-` splits; defaults may contain `:` / `-` (URLs!).
         let r = expand_env_with("${env:U:-http://h:9000/a-b}", env_of(&[])).unwrap();
         assert_eq!(r, "http://h:9000/a-b");
+    }
+
+    #[test]
+    fn expand_rejects_value_with_newline_or_control(/* M6 */) {
+        // A value with a newline would inject YAML structure → UnsafeEnvValue.
+        let err = expand_env_with("k: ${env:X}", env_of(&[("X", "a\n  b: hijack")])).unwrap_err();
+        assert!(matches!(err, ConfigError::UnsafeEnvValue(v) if v == "X"));
+        // NUL too.
+        assert!(matches!(
+            expand_env_with("${env:X}", env_of(&[("X", "a\0b")])).unwrap_err(),
+            ConfigError::UnsafeEnvValue(_)
+        ));
+        // Tab is allowed (legitimate in some values).
+        assert_eq!(
+            expand_env_with("${env:X}", env_of(&[("X", "a\tb")])).unwrap(),
+            "a\tb"
+        );
+        // A control char in the DEFAULT is rejected too.
+        assert!(matches!(
+            expand_env_with("${env:X:-a\nb}", env_of(&[])).unwrap_err(),
+            ConfigError::UnsafeEnvValue(_)
+        ));
+    }
+
+    #[test]
+    fn expand_unterminated_ref_before_next_ref_is_clear_error(/* M10 */) {
+        // `${env:A ${env:B}` — the first ref is unterminated; we must NOT greedily
+        // consume B's `}` and report a bogus "invalid name `A ${env:B`".
+        let err =
+            expand_env_with("${env:A ${env:B}", env_of(&[("A", "1"), ("B", "2")])).unwrap_err();
+        match err {
+            ConfigError::BadEnvRef(msg) => assert!(
+                msg.contains("unterminated"),
+                "expected an 'unterminated' message, got: {msg}"
+            ),
+            other => panic!("expected BadEnvRef(unterminated), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expand_missing_var_message_says_unset_or_empty(/* M9 */) {
+        // set-but-empty with no default → MissingEnvVar, and the message must not
+        // assert the var is "not set" (it IS set, to empty).
+        let err = expand_env_with("${env:X}", env_of(&[("X", "")])).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unset or empty"),
+            "message should cover the empty case, got: {msg}"
+        );
     }
 
     /// End-to-end: `from_yaml_file` expands ${VAR} against the real process

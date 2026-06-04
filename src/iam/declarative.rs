@@ -865,6 +865,12 @@ fn user_equal(
 /// false). Caller only invokes this for external users; local users are
 /// handled by the plain delete-if-absent path.
 fn external_user_is_reconstructable(user: &IamUser, baseline_group_ids: &[i64]) -> bool {
+    // A disabled external user is an admin soft-ban: re-provisioning on next
+    // login would resurrect them as ENABLED, silently undoing the ban. The
+    // `enabled` flag is not reconstructable from the OAuth flow → preserve.
+    if !user.enabled {
+        return false;
+    }
     if !user.permissions.is_empty() {
         return false;
     }
@@ -1627,6 +1633,22 @@ mod tests {
         // (iv) external, empty groups + empty baseline, no perms → deletable.
         let user = db_external_user(1, "oauth-alice", "K1");
         assert!(external_user_is_reconstructable(&user, &[]));
+    }
+
+    #[test]
+    fn reconstructable_disabled_external_user_is_false() {
+        // M5: a DISABLED external user (admin soft-ban) is NOT reconstructable
+        // even when groups==baseline + no perms — re-provisioning would
+        // resurrect them as enabled, undoing the ban.
+        let user = IamUser {
+            enabled: false,
+            group_ids: vec![11, 22],
+            ..db_external_user(1, "oauth-banned", "K1")
+        };
+        assert!(
+            !external_user_is_reconstructable(&user, &[11, 22]),
+            "disabled external user must be preserved (not churned/re-enabled)"
+        );
     }
 
     #[test]

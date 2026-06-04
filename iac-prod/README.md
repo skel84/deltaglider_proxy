@@ -67,11 +67,18 @@ hash). The `dgp-config` volume holds the encrypted IAM DB — **back it up**.
 
 ## Deploy (manual / other orchestrators / CI)
 
+`secrets.env` is a docker-compose **env_file** (`KEY=value`, values taken
+literally — NOT a shell script). Don't `source` it; load it without shell
+execution, e.g. with `env`:
+
 ```bash
-set -a && . ./secrets.env && set +a            # load secrets into the env
-deltaglider_proxy config lint deltaglider_proxy.yaml   # validates the EXPANDED
-                                                       # config; fails on a missing var
-DGP_CONFIG=$PWD/deltaglider_proxy.yaml deltaglider_proxy
+# Run the proxy with secrets.env loaded as literal env (no shell evaluation):
+env $(grep -vE '^\s*#|^\s*$' secrets.env | xargs -d '\n') \
+  DGP_CONFIG=$PWD/deltaglider_proxy.yaml deltaglider_proxy
+
+# Or just validate (config lint expands the SAME ${env:...} from the environment):
+env $(grep -vE '^\s*#|^\s*$' secrets.env | xargs -d '\n') \
+  deltaglider_proxy config lint deltaglider_proxy.yaml
 ```
 
 No `envsubst` / render step — `config lint` and the server both expand

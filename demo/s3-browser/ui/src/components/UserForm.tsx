@@ -11,7 +11,12 @@ import FormLabel from './FormLabel';
 import { useColors } from '../ThemeContext';
 import PermissionEditor from './PermissionEditor';
 import PermissionSummarySection from './PermissionSummarySection';
-import { permissionsToRows, rowsToPermissions, type PermissionRow } from './permissionRows';
+import {
+  freshPermissionRowId,
+  permissionsToRows,
+  rowsToPermissions,
+  type PermissionRow,
+} from './permissionRows';
 import CredentialsBanner from './CredentialsBanner';
 import { generateId, generateSecret } from '../credentialGeneration';
 
@@ -52,7 +57,7 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
   const [permissions, setPermissions] = useState<PermissionRow[]>(() =>
     user
       ? permissionsToRows(user.permissions)
-      : [{ effect: 'Allow', actions: ['*'], resources: '*' }],
+      : [{ _uiId: freshPermissionRowId(), effect: 'Allow', actions: ['*'], resources: '*' }],
   );
   const [saving, setSavingState] = useState(false);
   const [deleting, setDeletingState] = useState(false);

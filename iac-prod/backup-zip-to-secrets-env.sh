@@ -40,9 +40,20 @@ IAM="$TMP/iam.json"
 
 # Helper: emit KEY=VALUE, pulling VALUE from a jq filter against a file.
 # Logs the key name only (never the value).
+#
+# The output is a docker-compose `env_file` (KEY=value, value taken LITERALLY —
+# no shell quoting). It is NOT meant to be `source`d by a shell. We reject any
+# value containing a newline or other control char: such a value can't live on a
+# single env-file line and (if the file were ever sourced) a `$(...)`/backtick
+# would be inert here only because the value is literal — a control char is the
+# one thing that breaks the literal contract, so fail loudly instead.
 emit() {  # emit <ENV_KEY> <file> <jq-filter>
   local key="$1" file="$2" filter="$3" val
   val="$(jq -r "$filter // empty" "$file")"
+  if printf '%s' "$val" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    warn "  ✗ $key: value contains a control character / newline — refusing to write"
+    exit 1
+  fi
   printf '%s=%s\n' "$key" "$val" >> "$OUT"
   if [[ -n "$val" ]]; then echo "  ✓ $key"; else echo "  ⚠ $key (empty in backup)"; fi
 }
@@ -100,12 +111,16 @@ while IFS=$'\t' read -r uname; do
   var="$(user_var "$uname")"
   [[ -n "$var" ]] || { echo "  · skip '$uname' (OAuth-provisioned or not in IaC)"; continue; }
   val="$(jq -r --arg n "$uname" '.users[] | select(.name==$n) | .secret_access_key // empty' "$IAM")"
+  if printf '%s' "$val" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    warn "  ✗ $var: value contains a control character / newline — refusing to write"
+    exit 1
+  fi
   printf '%s=%s\n' "$var" "$val" >> "$OUT"
   if [[ -n "$val" ]]; then echo "  ✓ $var"; else echo "  ⚠ $var (empty)"; fi
 done < <(jq -r '.users[].name' "$IAM")
 
 echo
-echo "Done → $OUT (chmod 600). Review it, then:"
-echo "  set -a && . ./$OUT && set +a"
-echo "  envsubst < deltaglider_proxy.yaml > config.yaml"
-echo "  deltaglider_proxy config lint config.yaml"
+echo "Done → $OUT (chmod 600, docker-compose env_file format)."
+echo "Deploy:  docker compose up -d"
+echo "  (the proxy reads secrets.env via env_file and expands \${env:...} in the"
+echo "   YAML itself — no envsubst / shell sourcing needed)."
