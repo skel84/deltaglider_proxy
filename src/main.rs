@@ -607,7 +607,7 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         move || sessions.cleanup_expired()
     });
     let shared_config = config.clone().into_shared();
-    let (config_db, config_db_mismatch) = init_config_db(&admin_password_hash, &iam_state);
+    let (config_db, config_db_mismatch) = init_config_db(&admin_password_hash, &iam_state, &config);
 
     // --- App state ---
     let usage_scanner = Arc::new(UsageScanner::new());

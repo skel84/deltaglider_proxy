@@ -64,6 +64,84 @@ async fn list_groups(admin: &reqwest::Client, endpoint: &str) -> Vec<serde_json:
 }
 
 // ═══════════════════════════════════════════════════
+// 0. COLD START: a fresh deploy with iam_mode: declarative reconciles the
+//    YAML's IAM into the DB AT STARTUP — no human, no `config apply`. This is
+//    the IaC contract: `docker compose up` and the users just exist.
+// ═══════════════════════════════════════════════════
+
+#[tokio::test]
+async fn declarative_iam_is_reconciled_at_startup_no_apply() {
+    // Boot a brand-new server (fresh DB) whose config already declares an IAM
+    // user with a known key/secret + a scoped permission. No apply is made.
+    let server = TestServer::builder()
+        .extra_yaml_root(
+            "iam_mode: declarative\n\
+             iam_users:\n\
+             \x20 - name: iac-user\n\
+             \x20   access_key_id: iac-user-key\n\
+             \x20   secret_access_key: iac-user-secret-123\n\
+             \x20   enabled: true\n\
+             \x20   permissions:\n\
+             \x20     - effect: Allow\n\
+             \x20       actions: [read, write, list]\n\
+             \x20       resources: [\"bucket/*\"]\n\
+             iam_groups:\n\
+             \x20 - name: readers\n\
+             \x20   description: read-only\n\
+             \x20   permissions:\n\
+             \x20     - effect: Allow\n\
+             \x20       actions: [read, list]\n\
+             \x20       resources: [\"bucket/*\"]\n",
+        )
+        .build()
+        .await;
+    let endpoint = server.endpoint();
+
+    // The declarative user must authenticate IMMEDIATELY — proving the DB was
+    // populated at startup (a fresh DB with no apply would otherwise reject it).
+    let s3 = server
+        .s3_client_with_creds("iac-user-key", "iac-user-secret-123")
+        .await;
+    // ensure the bucket exists, then list as the reconciled user.
+    let _ = s3.create_bucket().bucket("bucket").send().await;
+    let listed = s3.list_objects_v2().bucket("bucket").send().await;
+    assert!(
+        listed.is_ok(),
+        "declarative iac-user must authenticate + list at startup (no apply), got: {:?}",
+        listed.err()
+    );
+
+    // And the admin API must report the user + group as present (reconciled),
+    // without any apply having been called.
+    let admin = admin_http_client(&endpoint).await;
+    let users = admin
+        .get(format!("{endpoint}/_/api/admin/users"))
+        .send()
+        .await
+        .expect("list users")
+        .json::<serde_json::Value>()
+        .await
+        .expect("users JSON");
+    let names: Vec<String> = users
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|u| u["name"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        names.iter().any(|n| n == "iac-user"),
+        "iac-user must be in the DB after startup reconcile; got {names:?}"
+    );
+    let groups = list_groups(&admin, &endpoint).await;
+    assert!(
+        groups.iter().any(|g| g["name"] == "readers"),
+        "readers group must be reconciled at startup"
+    );
+}
+
+// ═══════════════════════════════════════════════════
 // 1. gui → declarative with IAM content creates users + groups
 // ═══════════════════════════════════════════════════
 

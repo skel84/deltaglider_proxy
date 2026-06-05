@@ -653,6 +653,47 @@ pub fn build_s3_router(
         .with_state(state.clone())
 }
 
+/// What the startup declarative-IAM reconcile should do, decided purely from
+/// the YAML-empty flag and the previewed diff. Keeps the destructive-change and
+/// empty-wipe policy testable without spawning a process.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StartupReconcileAction {
+    /// YAML has no IAM — skip (an empty declarative reconcile would wipe the DB).
+    SkipEmpty,
+    /// The diff would delete existing DB rows — refuse (must be applied attended).
+    RefuseDestructive {
+        users: usize,
+        groups: usize,
+        providers: usize,
+    },
+    /// Safe to reconcile (fresh deploy or additive/idempotent change).
+    Reconcile,
+}
+
+/// Pure policy for the unattended startup reconcile. `yaml_empty` is
+/// `DeclarativeIam::is_empty()`; the counts are the previewed diff's delete
+/// vectors. A startup boot must never silently DELETE DB users/groups/providers
+/// (that's an attended `config apply` decision), and must never reconcile an
+/// empty YAML (which would wipe the DB).
+pub fn startup_declarative_action(
+    yaml_empty: bool,
+    delete_users: usize,
+    delete_groups: usize,
+    delete_providers: usize,
+) -> StartupReconcileAction {
+    if yaml_empty {
+        return StartupReconcileAction::SkipEmpty;
+    }
+    if delete_users > 0 || delete_groups > 0 || delete_providers > 0 {
+        return StartupReconcileAction::RefuseDestructive {
+            users: delete_users,
+            groups: delete_groups,
+            providers: delete_providers,
+        };
+    }
+    StartupReconcileAction::Reconcile
+}
+
 /// Initialize the encrypted IAM config database. If it contains existing users,
 /// switch to IAM mode immediately.
 ///
@@ -661,6 +702,7 @@ pub fn build_s3_router(
 pub fn init_config_db(
     admin_password_hash: &str,
     iam_state: &SharedIamState,
+    config: &Config,
 ) -> (
     Option<Arc<tokio::sync::Mutex<deltaglider_proxy::config_db::ConfigDb>>>,
     bool,
@@ -688,6 +730,95 @@ pub fn init_config_db(
                     warn!("Failed to reconcile lifecycle runtime state on boot: {err}");
                 }
             }
+            // Declarative IAM: the YAML is the source of truth, so reconcile it
+            // into the DB AT STARTUP (not just on a `config apply`). Without this
+            // a fresh declarative deployment comes up with an empty DB and needs
+            // a human to push the config — defeating the whole point of IaC. This
+            // mirrors the admin `config apply` reconcile path; it's idempotent
+            // (re-running on an already-matching DB is a no-op diff), so it's safe
+            // on every boot. Two guards make the UNATTENDED boot safe:
+            //   1. A startup reconcile that would DELETE existing users/groups/
+            //      providers is REFUSED — destructive declarative changes (e.g. a
+            //      gui→declarative flip that omits GUI-added users) must go through
+            //      an attended `config apply`, never silently on a pod restart.
+            //   2. A reconcile ERROR in declarative mode is FATAL: the running IAM
+            //      would not match the declared intent (everything-403 on a fresh
+            //      deploy, or a silent split with Git), so refuse to start and let
+            //      the orchestrator surface a crash-loop instead.
+            if matches!(
+                config.iam_mode,
+                deltaglider_proxy::config_sections::IamMode::Declarative
+            ) {
+                let yaml = deltaglider_proxy::iam::snapshot_from_access(
+                    &config.iam_users,
+                    &config.iam_groups,
+                    &config.auth_providers,
+                    &config.group_mapping_rules,
+                );
+                // Preview the diff (no writes), then apply the pure policy.
+                let diff = match deltaglider_proxy::iam::preview_declarative_iam(&db, &yaml) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        error!(
+                            "FATAL: could not compute the declarative IAM diff at startup: {e}. \
+                             Refusing to start. Fix the config DB / YAML and restart."
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                match startup_declarative_action(
+                    yaml.is_empty(),
+                    // Count only LOCAL (authored-state) user deletes — a
+                    // reconstructable OAuth-provisioned external user being
+                    // culled is benign + by-design (login rebuilds it) and must
+                    // not refuse-to-start / crash-loop a declarative+OAuth deploy.
+                    diff.local_user_delete_count(),
+                    diff.groups_to_delete.len(),
+                    diff.providers_to_delete.len(),
+                ) {
+                    StartupReconcileAction::SkipEmpty => warn!(
+                        "iam_mode: declarative but the config has no iam_users/iam_groups — \
+                         not reconciling (an empty declarative IAM would wipe the DB). Add \
+                         access.iam_users to the config."
+                    ),
+                    StartupReconcileAction::RefuseDestructive {
+                        users,
+                        groups,
+                        providers,
+                    } => {
+                        error!(
+                            "FATAL: startup declarative IAM reconcile would DELETE {users} user(s), \
+                             {groups} group(s), {providers} provider(s) present in the config DB but \
+                             absent from the YAML. Destructive declarative changes must be applied \
+                             attended via `config apply`, not silently on a restart. If this is \
+                             intentional (e.g. a first gui→declarative migration), run \
+                             `deltaglider_proxy config apply <file>` once."
+                        );
+                        std::process::exit(1);
+                    }
+                    StartupReconcileAction::Reconcile => {
+                        match deltaglider_proxy::iam::reconcile_declarative_iam(&db, &yaml) {
+                            Ok(stats) => info!(
+                                "Declarative IAM reconciled at startup: {} user(s), {} group(s) \
+                                 ({} created, {} updated)",
+                                yaml.users.len(),
+                                yaml.groups.len(),
+                                stats.users_created.len(),
+                                stats.users_updated.len(),
+                            ),
+                            Err(e) => {
+                                error!(
+                                    "FATAL: declarative IAM reconcile failed at startup: {e}. \
+                                     Refusing to start in declarative mode with an IAM set that \
+                                     does not match the YAML. Fix the config and restart."
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+            }
+
             // If DB has existing users, switch to IAM mode
             if let Ok(users) = db.load_users() {
                 if !users.is_empty() {
@@ -946,6 +1077,48 @@ pub async fn shutdown_signal() {
 mod tests {
     use super::*;
     use deltaglider_proxy::config::Config;
+
+    // ── startup_declarative_action policy (IaC cold-start guards) ──────────
+
+    #[test]
+    fn startup_action_empty_yaml_skips() {
+        assert_eq!(
+            startup_declarative_action(true, 0, 0, 0),
+            StartupReconcileAction::SkipEmpty
+        );
+        // Even if the diff somehow shows deletes, empty wins (never wipe).
+        assert_eq!(
+            startup_declarative_action(true, 5, 0, 0),
+            StartupReconcileAction::SkipEmpty
+        );
+    }
+
+    #[test]
+    fn startup_action_refuses_any_destructive_delete() {
+        // The dangerous case: a non-empty YAML whose diff deletes DB rows
+        // (e.g. an unattended gui→declarative flip omitting GUI-added users).
+        assert!(matches!(
+            startup_declarative_action(false, 1, 0, 0),
+            StartupReconcileAction::RefuseDestructive { users: 1, .. }
+        ));
+        assert!(matches!(
+            startup_declarative_action(false, 0, 2, 0),
+            StartupReconcileAction::RefuseDestructive { groups: 2, .. }
+        ));
+        assert!(matches!(
+            startup_declarative_action(false, 0, 0, 3),
+            StartupReconcileAction::RefuseDestructive { providers: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn startup_action_reconciles_additive_or_idempotent() {
+        // Fresh deploy / additive / no-op (no deletes) → proceed.
+        assert_eq!(
+            startup_declarative_action(false, 0, 0, 0),
+            StartupReconcileAction::Reconcile
+        );
+    }
 
     /// A Config with a full SigV4 credential pair must produce
     /// `IamState::Legacy`. This is the default path for deployments

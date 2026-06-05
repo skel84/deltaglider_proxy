@@ -419,6 +419,10 @@ pub struct TestServerBuilder {
     /// to be true — set automatically when this is used). Intended for
     /// tests that exercise YAML-only features like replication rules.
     extra_storage_yaml: Option<String>,
+    /// Raw YAML appended at the document ROOT (flat shape). Used to seed a full
+    /// `iam_mode: declarative` + `iam_users` / `iam_groups` block so the proxy
+    /// reconciles it AT STARTUP — exercising the cold-start IaC path.
+    extra_root_yaml: Option<String>,
     /// Extra process environment variables for this test proxy.
     extra_env: Vec<(String, String)>,
 }
@@ -440,6 +444,7 @@ impl Default for TestServerBuilder {
             config_sync_object_key: None,
             bootstrap_password: None,
             extra_storage_yaml: None,
+            extra_root_yaml: None,
             extra_env: Vec::new(),
         }
     }
@@ -547,6 +552,17 @@ impl TestServerBuilder {
     /// rejection path in `download_if_newer`.
     pub fn bootstrap_password(mut self, password: &str) -> Self {
         self.bootstrap_password = Some(password.to_string());
+        self
+    }
+
+    /// Append a raw YAML fragment at the document ROOT (flat shape) — e.g. a
+    /// full `iam_mode: declarative` + `iam_users:` block. The proxy reconciles
+    /// declarative IAM at startup, so this exercises the cold-start IaC path
+    /// (a fresh DB populated from YAML with no `config apply`). Implies
+    /// `yaml_config()`.
+    pub fn extra_yaml_root(mut self, yaml: &str) -> Self {
+        self.extra_root_yaml = Some(yaml.to_string());
+        self.yaml_config = true;
         self
     }
 
@@ -774,6 +790,9 @@ impl TestServerBuilder {
             if let Some(ref yaml) = self.extra_storage_yaml {
                 config.push_str(yaml);
             }
+            if let Some(ref yaml) = self.extra_root_yaml {
+                config.push_str(yaml);
+            }
             (config, None)
         } else {
             let data_dir = TempDir::new().expect("Failed to create temp dir");
@@ -788,6 +807,9 @@ impl TestServerBuilder {
             // etc). Emitted at root because the generated config is
             // the flat shape where `replication:` is a root key.
             if let Some(ref yaml) = self.extra_storage_yaml {
+                config.push_str(yaml);
+            }
+            if let Some(ref yaml) = self.extra_root_yaml {
                 config.push_str(yaml);
             }
             (config, Some(data_dir))

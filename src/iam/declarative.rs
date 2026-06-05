@@ -228,6 +228,13 @@ pub struct IamDiff {
     pub users_to_update: Vec<(i64, DeclarativeUser)>,
     pub users_to_delete: Vec<(i64, String)>,
 
+    /// The subset of `users_to_delete` that are OAuth-provisioned (`external`)
+    /// users being culled because they're fully reconstructable from the OAuth
+    /// flow (login rebuilds them). These deletes are BENIGN + by-design, so the
+    /// unattended-startup destructive-change guard must NOT count them — only
+    /// `local` (authored-state) deletes are dangerous to apply on a restart.
+    pub external_user_deletes: Vec<i64>,
+
     /// Mapping rules are wipe-and-rebuild (no stable per-row identity;
     /// any field change is a delete+insert). The enum captures the
     /// three non-overlapping states so the reconcile can't conflate
@@ -275,6 +282,18 @@ impl IamDiff {
             && self.users_to_update.is_empty()
             && self.users_to_delete.is_empty()
             && self.mapping_rules.is_noop()
+    }
+
+    /// Count of `local` (authored-state) user deletes — `users_to_delete` minus
+    /// the reconstructable-external culls in `external_user_deletes`. The
+    /// unattended-startup guard refuses on THIS count, not the raw total: an
+    /// OAuth-provisioned external user (never in YAML) being culled is benign
+    /// and by-design (login rebuilds it), so it must not crash-loop a restart.
+    pub fn local_user_delete_count(&self) -> usize {
+        self.users_to_delete
+            .iter()
+            .filter(|(id, _)| !self.external_user_deletes.contains(id))
+            .count()
     }
 
     /// Human-readable one-liner summarising what this diff would do
@@ -766,6 +785,9 @@ pub fn diff_iam(yaml: &DeclarativeIam, db: &CurrentIam) -> Result<IamDiff, Strin
             if !external_user_is_reconstructable(du, baseline) {
                 continue; // preserve manually-granted state
             }
+            // Reconstructable external cull: record it so the startup guard can
+            // exclude it (login rebuilds these; deleting them is by-design).
+            diff.external_user_deletes.push(du.id);
         }
         diff.users_to_delete.push((du.id, du.name.clone()));
     }
@@ -1679,6 +1701,27 @@ mod tests {
         };
         let diff = diff_iam(&yaml, &current).unwrap();
         assert_eq!(diff.users_to_delete, vec![(5, "oauth-bob".to_string())]);
+        // The cull is recorded as an EXTERNAL delete, so the unattended-startup
+        // guard treats it as benign: local_user_delete_count() must be 0 (else a
+        // declarative+OAuth deploy crash-loops on restart once anyone logs in).
+        assert_eq!(diff.external_user_deletes, vec![5]);
+        assert_eq!(
+            diff.local_user_delete_count(),
+            0,
+            "a reconstructable-external cull must NOT count as a destructive local delete"
+        );
+    }
+
+    #[test]
+    fn local_user_delete_count_counts_only_non_external() {
+        // Mixed: a local delete (id 7) + an external cull (id 5). Only the local
+        // one is "destructive" for the startup refuse-to-start decision.
+        let diff = IamDiff {
+            users_to_delete: vec![(7, "alice".into()), (5, "oauth-bob".into())],
+            external_user_deletes: vec![5],
+            ..IamDiff::default()
+        };
+        assert_eq!(diff.local_user_delete_count(), 1);
     }
 
     #[test]
