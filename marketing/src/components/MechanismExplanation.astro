@@ -5,18 +5,19 @@
 
 <section class="mechanism fade-up delay-1">
   <span class="section-eyebrow">The proof</span>
-  <h2>Why xdelta3 works on ZIP files</h2>
+  <h2>Yes — it even shrinks already-compressed archives</h2>
 
   <p class="mechanism-lede">
-    Skeptical question: xdelta3 should fail on compressed input.
+    The obvious objection: diffing should fail on ZIPs and JARs —
+    they're already compressed.
   </p>
 
   <p>
-    It would, on random-compressed data. Versioned archives aren't
-    random — they're repetition machines. Same JAR signatures in the
-    same order, same <code>manifest.mf</code>, same icons, same bundled
-    CSS. The compression boundary moves but the underlying byte runs
-    repeat.
+    It would, on random data. But versioned archives aren't random.
+    Version to version, the same JAR signatures land in the same order,
+    the same <code>manifest.mf</code>, the same icons, the same bundled
+    CSS. The bytes repeat — so the delta against the previous version
+    is tiny.
   </p>
 
   <div class="mechanism-stat">

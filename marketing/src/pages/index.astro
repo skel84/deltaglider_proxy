@@ -12,6 +12,7 @@ import WorkloadFitTable from '../components/WorkloadFitTable.astro';
 import ComparisonTable from '../components/ComparisonTable.astro';
 import ScreenshotGallery from '../components/ScreenshotGallery.astro';
 import HeroSlideshow from '../components/HeroSlideshow.tsx';
+import HowItWorks from '../components/HowItWorks.astro';
 import {
   organizationSchema,
   webSiteSchema,
@@ -65,6 +66,9 @@ import {
       </div>
     </div>
   </section>
+
+  {/* ============================ HOW IT WORKS ========================= */}
+  <HowItWorks />
 
   {/* ============================ TESTIMONIALS ========================= */}
   <section class="section section-alt">
@@ -136,11 +140,12 @@ import {
       <h2>How it fits in your stack</h2>
 
       <p>
-        DeltaGlider is an S3-compatible proxy. Your apps speak SigV4 to
-        it. It speaks SigV4 to your bucket. On PUT, it stores either an
-        xdelta3 delta against the deltaspace reference or a passthrough
-        copy, whichever is smaller. On GET, it reconstructs byte-for-
-        byte and streams. The client sees ordinary S3.
+        DeltaGlider sits between your apps and your bucket, speaking the
+        same S3 API to both. On upload, it stores whichever is smaller:
+        a delta against the previous version, or the file as-is. On
+        download, it rebuilds the exact original bytes and streams them
+        back. Your apps never know the difference — they just see
+        ordinary S3.
       </p>
     </div>
   </section>
@@ -149,7 +154,13 @@ import {
   <section class="section">
     <div class="shell">
       <span class="section-eyebrow">Beyond compression</span>
-      <h2>The operator surface</h2>
+      <h2>A full S3 control plane, not just a compressor</h2>
+
+      <p>
+        Because every request already flows through the proxy, it can do
+        more than dedupe bytes — it's where you run IAM, replication,
+        encryption, lifecycle, and audit:
+      </p>
 
       <ul class="feature-list">
         <li>
@@ -199,7 +210,7 @@ import {
   <section class="section section-alt">
     <div class="shell">
       <span class="section-eyebrow">Support</span>
-      <h2>Accountability</h2>
+      <h2>The people who wrote it answer your tickets</h2>
 
       <p>
         Beshu Tech's 10 senior engineers wrote DeltaGlider; they're the
@@ -216,7 +227,7 @@ import {
   <section class="section">
     <div class="shell">
       <span class="section-eyebrow">May 2026</span>
-      <h2>Correctness x-ray</h2>
+      <h2>We hunted our own bugs — and published them</h2>
 
       <p>
         A focused audit by five specialised investigators (concurrency,
