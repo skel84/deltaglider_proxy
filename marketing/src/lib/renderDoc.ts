@@ -18,6 +18,7 @@ import rehypeRaw from 'rehype-raw';
 import rehypeStringify from 'rehype-stringify';
 import { visit } from 'unist-util-visit';
 import { rewriteDocLink, rewriteAssetSrc } from './docs';
+import { highlightCode } from './highlight';
 export { extractTitle, extractSummary } from './docText';
 
 /** GitHub-style heading slug: lower, strip punctuation, spaces→dashes. */
@@ -41,9 +42,24 @@ function textOf(node: any): string {
  * `fromPath` is the docs/product path of the doc being rendered, needed to
  * resolve relative `../` inter-doc links correctly.
  */
+/** Read the `language-xxx` class off a hast <code> node, or '' if none. */
+function fenceLang(codeNode: any): string {
+  const cls = codeNode?.properties?.className;
+  const classes = Array.isArray(cls) ? cls : cls ? [cls] : [];
+  const m = classes.find((c: string) => typeof c === 'string' && c.startsWith('language-'));
+  return m ? m.slice('language-'.length) : '';
+}
+
 function rehypeDocRewrites(fromPath: string) {
-  return (tree: any) => {
+  // Async transformer: the link/image/heading rewrites are sync, but code-fence
+  // syntax highlighting (shiki) is async, so we collect fence nodes during the
+  // sync visit and resolve them afterwards, replacing each <pre> with shiki's
+  // pre-highlighted HTML (carried as a `raw` node that rehype-stringify emits
+  // verbatim).
+  return async (tree: any) => {
     const usedHeadingIds = new Set<string>();
+    const fences: { node: any; code: string; lang: string }[] = [];
+
     visit(tree, 'element', (node: any) => {
       // Inter-doc links → friendly URLs.
       if (node.tagName === 'a' && typeof node.properties?.href === 'string') {
@@ -66,20 +82,80 @@ function rehypeDocRewrites(fromPath: string) {
           node.properties = { ...node.properties, id: unique };
         }
       }
-      // ```mermaid fences: remark-rehype emits <pre><code class="language-mermaid">.
-      // Turn it into <pre class="mermaid"> so mermaid.run() picks it up.
+      // Code fences (<pre><code class="language-…">).
       if (node.tagName === 'pre' && node.children?.length === 1) {
         const code = node.children[0];
-        const cls = code?.properties?.className;
-        const classes = Array.isArray(cls) ? cls : cls ? [cls] : [];
-        if (code?.tagName === 'code' && classes.includes('language-mermaid')) {
+        if (code?.tagName !== 'code') return;
+        const lang = fenceLang(code);
+        // ```mermaid → <pre class="mermaid"> for client-side rendering.
+        if (lang === 'mermaid') {
           node.tagName = 'pre';
           node.properties = { className: ['mermaid'] };
           node.children = [{ type: 'text', value: textOf(code) }];
+          return;
         }
+        // Everything else: queue for shiki highlighting.
+        fences.push({ node, code: textOf(code), lang });
       }
     });
+
+    if (fences.length) {
+      await Promise.all(
+        fences.map(async (f) => {
+          const shikiHtml = await highlightCode(f.code, f.lang);
+          // Replace the <pre><code> node in-place with shiki's output. We hang a
+          // `raw` child off a now-empty wrapper and let rehype-stringify
+          // (allowDangerousHtml) emit it verbatim. Wrapping in a fragment-like
+          // <div> would add a box; instead we morph the node into a raw passthrough.
+          f.node.tagName = 'div';
+          f.node.properties = { className: ['shiki-wrap'], 'data-lang': f.lang || 'text' };
+          f.node.children = [{ type: 'raw', value: shikiHtml }];
+        }),
+      );
+    }
   };
+}
+
+export interface TocEntry {
+  depth: 2 | 3;
+  id: string;
+  text: string;
+}
+
+/**
+ * Build a table-of-contents from rendered doc HTML. Reads h2/h3 (they already
+ * carry stable ids from rehypeDocRewrites) in document order. Server-side only
+ * — runs once per page at build time. h1 (the doc title) and h4+ (too granular
+ * for a right rail) are skipped.
+ */
+export function extractToc(html: string): TocEntry[] {
+  const out: TocEntry[] = [];
+  const re = /<h([23])\b([^>]*)>([\s\S]*?)<\/h\1>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const depth = Number(m[1]) as 2 | 3;
+    const idMatch = /\bid=["']([^"']+)["']/.exec(m[2]);
+    if (!idMatch) continue;
+    const text = stripTags(m[3]).trim();
+    if (text) out.push({ depth, id: idMatch[1], text });
+  }
+  return out;
+}
+
+/** Strip inline tags + decode the entities that appear in heading text,
+ *  including numeric (&#38;) and hex (&#x26;) forms that the markdown pipeline
+ *  emits for characters like &. */
+function stripTags(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, '')
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ');
 }
 
 /** Render one doc's markdown to HTML, with doc-aware rewrites applied.

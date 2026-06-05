@@ -1,4 +1,4 @@
-# Lifecycle Rules
+# Lifecycle rules
 
 Lifecycle expiration for engine-visible objects: delete old objects, or
 transition/archive them to another bucket/prefix.

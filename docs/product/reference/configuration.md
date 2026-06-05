@@ -1,4 +1,4 @@
-# Configuration Reference
+# Configuration
 
 DeltaGlider Proxy is configured via a **YAML** file and/or environment variables (`DGP_*` prefix). Environment variables always take precedence over file contents.
 

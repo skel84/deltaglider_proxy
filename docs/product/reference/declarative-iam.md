@@ -1,4 +1,4 @@
-# Declarative IAM (`iam_mode: declarative`)
+# Declarative IAM
 
 *GitOps-shaped IAM: YAML is the source of truth; the encrypted config DB is reconciled from YAML on every apply.*
 

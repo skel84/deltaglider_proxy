@@ -1,4 +1,4 @@
-# Authentication & Access Control
+# Authentication and access
 
 DeltaGlider Proxy supports multiple authentication methods: **SigV4** (standard S3 auth), **OAuth/OIDC** (Google, Okta, Azure AD), and **public prefixes** (anonymous read access). These can be combined — OAuth users get IAM permissions via group mapping, while specific folders are optionally published for unauthenticated download.
 

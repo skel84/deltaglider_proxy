@@ -2,11 +2,16 @@
 // /docs/[...slug] — one static page per product doc, rendered from the shared
 // docs/product/*.md content. Friendly slugs (numeric prefixes stripped) come
 // from the manifest via docs.ts; markdown is rendered with the same remark-gfm
-// pipeline the product uses, plus doc-aware link/image/heading/mermaid rewrites.
+// pipeline the product uses, plus doc-aware link/image/heading/mermaid rewrites
+// + shiki syntax highlighting. Reading affordances (breadcrumb, on-page TOC
+// scroll-spy, code copy buttons, prev/next pager) layer on top — all
+// server-rendered except scroll-spy + copy, which are progressive enhancement.
 import DocsLayout from '../../layouts/DocsLayout.astro';
-import { DOCS, docsByGroup } from '../../lib/docs';
+import { DOCS, docsByGroup, adjacentDocs, metaForPath } from '../../lib/docs';
 import { docContent } from '../../lib/docContent';
-import { renderDoc, extractSummary } from '../../lib/renderDoc';
+import { renderDoc, extractSummary, extractToc } from '../../lib/renderDoc';
+
+const GH_BLOB = 'https://github.com/beshu-tech/deltaglider_proxy/blob/main/docs/product';
 
 export async function getStaticPaths() {
   const paths = [];
@@ -44,12 +49,29 @@ let activeSlug: string;
 let html: string | null = null;
 let groupDocs: { url: string; title: string }[] = [];
 
+// Doc-only reading affordances (server-rendered).
+let toc: { depth: 2 | 3; id: string; text: string }[] = [];
+let docTitle = '';
+let groupId = '';
+let editUrl = '';
+let prev: { url: string; title: string } | null = null;
+let next: { url: string; title: string } | null = null;
+
 if (props.kind === 'doc') {
   const markdown = docContent(props.path) ?? '';
   title = `${props.title} — DeltaGlider Proxy`;
   description = extractSummary(markdown);
   activeSlug = props.slug;
   html = await renderDoc(markdown, props.path);
+
+  toc = extractToc(html);
+  docTitle = props.title;
+  const meta = metaForPath(props.path);
+  groupId = meta?.group ?? '';
+  editUrl = `${GH_BLOB}/${props.path}.md`;
+  const adj = adjacentDocs(props.slug);
+  prev = adj.prev ? { url: adj.prev.url, title: adj.prev.title } : null;
+  next = adj.next ? { url: adj.next.url, title: adj.next.title } : null;
 } else {
   const group = docsByGroup().find((g) => g.group.id === props.groupId)!;
   title = `${props.groupId} — DeltaGlider Proxy docs`;
@@ -57,11 +79,50 @@ if (props.kind === 'doc') {
   activeSlug = '';
   groupDocs = group.docs.filter((d) => d.slug !== '').map((d) => ({ url: d.url, title: d.title }));
 }
+
+const showToc = props.kind === 'doc' && toc.length >= 2;
 ---
 
-<DocsLayout title={title} description={description} activeSlug={activeSlug}>
+<DocsLayout title={title} description={description} activeSlug={activeSlug} hasToc={showToc}>
   {props.kind === 'doc' ? (
-    <div class="docs-prose" set:html={html} />
+    <>
+      <nav class="docs-breadcrumb" aria-label="Breadcrumb">
+        <ol>
+          <li><a href="/docs">Docs</a></li>
+          {groupId && (
+            <li><span class="docs-crumb-sep" aria-hidden="true">/</span><span>{groupId}</span></li>
+          )}
+          <li><span class="docs-crumb-sep" aria-hidden="true">/</span><span aria-current="page">{docTitle}</span></li>
+        </ol>
+        <a class="docs-edit-link" href={editUrl} target="_blank" rel="noopener">
+          Edit on GitHub
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M6.5 3.5H3.5v9h9v-3M9 3.5h3.5V7M12 4 7 9" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </a>
+      </nav>
+
+      {groupId && <p class="docs-kicker">{groupId}</p>}
+
+      <div class="docs-prose" set:html={html} />
+
+      {(prev || next) && (
+        <nav class="docs-pager" aria-label="Document navigation">
+          {prev ? (
+            <a class="docs-pager-card docs-pager-prev" href={prev.url} rel="prev">
+              <span class="docs-pager-eyebrow">← Previous</span>
+              <span class="docs-pager-title">{prev.title}</span>
+            </a>
+          ) : <span class="docs-pager-spacer" aria-hidden="true"></span>}
+          {next ? (
+            <a class="docs-pager-card docs-pager-next" href={next.url} rel="next">
+              <span class="docs-pager-eyebrow">Next →</span>
+              <span class="docs-pager-title">{next.title}</span>
+            </a>
+          ) : <span class="docs-pager-spacer" aria-hidden="true"></span>}
+        </nav>
+      )}
+    </>
   ) : (
     <div class="docs-prose">
       <h1>{props.groupId}</h1>
@@ -71,6 +132,21 @@ if (props.kind === 'doc') {
         ))}
       </ul>
     </div>
+  )}
+
+  {showToc && (
+    <aside class="docs-toc" slot="toc" aria-label="On this page">
+      <p class="docs-toc-eyebrow">On this page</p>
+      <nav>
+        <ul>
+          {toc.map((h) => (
+            <li class={h.depth === 3 ? 'docs-toc-sub' : undefined}>
+              <a href={`#${h.id}`} data-toc-link={h.id}>{h.text}</a>
+            </li>
+          ))}
+        </ul>
+      </nav>
+    </aside>
   )}
 </DocsLayout>
 
@@ -84,6 +160,103 @@ if (props.kind === 'doc') {
       const dark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
       mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default' });
       await mermaid.run({ querySelector: 'pre.mermaid' });
+    }
+  </script>
+)}
+
+{props.kind === 'doc' && (
+  <script>
+    // ── Copy-to-clipboard on every code block ─────────────────────────────
+    // Skip mermaid (it's a diagram, not copyable source).
+    const blocks = document.querySelectorAll<HTMLElement>('.docs-prose pre:not(.mermaid)');
+    blocks.forEach((pre) => {
+      pre.classList.add('has-copy');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'docs-copy-btn';
+      btn.setAttribute('aria-label', 'Copy code to clipboard');
+      btn.innerHTML = '<span class="docs-copy-label">Copy</span>';
+      const label = () => btn.querySelector('.docs-copy-label') as HTMLElement;
+      let resetTimer = 0;
+
+      btn.addEventListener('click', async () => {
+        const code = pre.querySelector('code');
+        const text = (code ?? pre).textContent ?? '';
+        try {
+          await navigator.clipboard.writeText(text);
+          btn.classList.add('is-copied');
+          label().textContent = 'Copied ✓';
+        } catch {
+          label().textContent = 'Press ⌘C';
+        }
+        window.clearTimeout(resetTimer);
+        resetTimer = window.setTimeout(() => {
+          btn.classList.remove('is-copied');
+          label().textContent = 'Copy';
+        }, 1500);
+      });
+
+      pre.appendChild(btn);
+    });
+  </script>
+)}
+
+{showToc && (
+  <script>
+    // ── TOC scroll-spy ────────────────────────────────────────────────────
+    // Highlight the heading whose section is currently in view; smooth-scroll
+    // on click (reduced-motion aware). Progressive enhancement: the TOC links
+    // are plain anchors that work without any of this.
+    const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('.docs-toc a[data-toc-link]'));
+    if (links.length) {
+      const byId = new Map(links.map((a) => [a.dataset.tocLink as string, a]));
+      const headings = links
+        .map((a) => document.getElementById(a.dataset.tocLink as string))
+        .filter((el): el is HTMLElement => !!el);
+
+      let current: HTMLAnchorElement | null = null;
+      const setActive = (id: string | null) => {
+        const nextEl = id ? byId.get(id) ?? null : null;
+        if (nextEl === current) return;
+        current?.classList.remove('is-active');
+        nextEl?.classList.add('is-active');
+        if (nextEl) nextEl.setAttribute('aria-current', 'location');
+        current?.removeAttribute('aria-current');
+        current = nextEl;
+      };
+
+      const visible = new Set<string>();
+      const observer = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            if (e.isIntersecting) visible.add(e.target.id);
+            else visible.delete(e.target.id);
+          }
+          let pick: string | null = null;
+          for (const h of headings) {
+            if (visible.has(h.id)) { pick = h.id; break; }
+          }
+          if (!pick) {
+            const scrolled = headings.filter((h) => h.getBoundingClientRect().top < 120);
+            if (scrolled.length) pick = scrolled[scrolled.length - 1].id;
+          }
+          setActive(pick);
+        },
+        { rootMargin: '-72px 0px -66% 0px', threshold: 0 }
+      );
+      headings.forEach((h) => observer.observe(h));
+
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      links.forEach((a) => {
+        a.addEventListener('click', (ev) => {
+          const target = document.getElementById(a.dataset.tocLink as string);
+          if (!target) return;
+          ev.preventDefault();
+          setActive(target.id);
+          target.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+          history.replaceState(null, '', `#${target.id}`);
+        });
+      });
     }
   </script>
 )}

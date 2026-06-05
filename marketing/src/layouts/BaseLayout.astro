@@ -68,6 +68,8 @@ const ogImageUrl = new URL(ogImage, Astro.site).toString();
     <meta name="generator" content={Astro.generator} />
 
     <slot name="json-ld" />
+    {/* Page-scoped head extras (e.g. docs-only display fonts). */}
+    <slot name="head" />
   </head>
   <body>
     <header class="site-header">

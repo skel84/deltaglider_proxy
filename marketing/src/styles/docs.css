@@ -1,18 +1,72 @@
-/* docs.css — layout + prose styling for /docs pages. Uses the site's existing
-   custom properties (brand teal, dark surfaces) so docs feel native to the
-   marketing site rather than a bolted-on doc theme. */
+/* ════════════════════════════════════════════════════════════════════════
+   docs.css — "Technical Logbook" reading experience for /docs.
 
+   Display: Schibsted Grotesk (commissioned newspaper grotesque — engineered
+   editorial voice). Labels/eyebrows/§/# markers: Spline Sans Mono (a softer
+   mono than the code face, so the "logbook label" voice reads distinct from
+   actual code). Code: JetBrains Mono via shiki, brand-tuned theme.
+
+   Cyan (--brand) is a SIGNAL — active nav, link hover, code rail, the datum
+   marks — never decoration. Every body run / table cell / code line resolves
+   to a light ink; nothing inherits the near-black --ink-900 body colour onto a
+   dark surface (a regression we explicitly guard against below).
+   ════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --doc-display: 'Schibsted Grotesk', var(--font-sans);
+  --doc-label: 'Spline Sans Mono', var(--font-mono);
+
+  --doc-grid-line: rgba(148, 163, 184, 0.05);
+  --doc-grid-size: 30px;
+  --doc-glow: rgba(34, 211, 238, 0.07);
+  --doc-glow-accent: rgba(217, 70, 239, 0.04);
+
+  --doc-rule: var(--rule);
+  --doc-callout-bg: rgba(34, 211, 238, 0.06);
+  --doc-measure: 70ch;
+  --doc-code-bg: #070a12;
+}
+
+/* ── Layout shell ──────────────────────────────────────────────────────── */
 .docs-shell {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: 250px minmax(0, 1fr);
   gap: 48px;
   max-width: var(--shell);
   margin: 0 auto;
-  padding: 48px 24px 96px;
+  padding: 44px 24px 96px;
   align-items: start;
+  position: relative;
+  isolation: isolate;
+}
+/* 3-column (sidebar | content | TOC) on docs that carry a TOC. */
+.docs-shell.has-toc {
+  grid-template-columns: 250px minmax(0, 1fr) 210px;
+  max-width: 1240px;
 }
 
-/* ── Sidebar ─────────────────────────────────────────────────────────── */
+/* Blueprint atmosphere: a fixed graph-paper grid + two soft radial glows,
+   painted behind the docs so it never scroll-jitters or repaints the text. */
+.docs-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(60% 50% at 78% 6%, var(--doc-glow), transparent 70%),
+    radial-gradient(45% 45% at 6% 94%, var(--doc-glow-accent), transparent 70%),
+    linear-gradient(var(--doc-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--doc-grid-line) 1px, transparent 1px);
+  background-size:
+    100% 100%, 100% 100%,
+    var(--doc-grid-size) var(--doc-grid-size),
+    var(--doc-grid-size) var(--doc-grid-size);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
+          mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
+}
+
+/* ── Left sidebar: logbook index ───────────────────────────────────────── */
 .docs-sidebar {
   position: sticky;
   top: 24px;
@@ -22,26 +76,35 @@
   font-size: 0.875rem;
   padding-right: 8px;
 }
-
 .docs-nav-home {
   display: block;
+  font-family: var(--doc-display);
   font-weight: 700;
-  font-size: 0.95rem;
+  font-size: 0.98rem;
   color: var(--ink-strong);
   text-decoration: none;
-  margin-bottom: 20px;
+  margin-bottom: 22px;
   letter-spacing: -0.01em;
 }
 .docs-nav-home.is-active { color: var(--brand); }
 
 .docs-nav-group { margin-bottom: 22px; }
 .docs-nav-group-title {
-  font-size: 0.72rem;
-  font-weight: 700;
+  font-family: var(--doc-label);
+  font-size: 0.68rem;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.12em;
   color: var(--ink-mute);
-  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.docs-nav-group-title::before {
+  content: "›";
+  color: var(--brand);
+  font-weight: 700;
 }
 .docs-nav-group ul { list-style: none; margin: 0; padding: 0; }
 .docs-nav-group li { margin: 0; }
@@ -63,96 +126,378 @@
   font-weight: 600;
 }
 
-/* ── Content column ──────────────────────────────────────────────────── */
 .docs-content { min-width: 0; }
 
-.docs-landing-head h1 { margin: 0 0 8px; font-size: 2.2rem; letter-spacing: -0.02em; }
-.docs-landing-head p { color: var(--ink-soft); max-width: var(--measure); margin: 0 0 40px; }
-.docs-landing-group { margin-bottom: 36px; }
-.docs-landing-group h2 { margin: 0 0 4px; font-size: 1.3rem; }
-.docs-landing-tagline { color: var(--ink-mute); font-size: 0.9rem; margin: 0 0 14px; }
-.docs-landing-list {
-  list-style: none; margin: 0; padding: 0;
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px;
+/* ── Breadcrumb + doc header ───────────────────────────────────────────── */
+.docs-breadcrumb {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  font-family: var(--doc-label);
+  font-size: 0.74rem;
+  line-height: 1.4;
 }
-.docs-landing-list a {
-  display: block; padding: 12px 16px;
-  background: var(--bg-card); border: 1px solid var(--rule); border-radius: 10px;
-  color: var(--ink-strong); text-decoration: none; font-weight: 600; font-size: 0.95rem;
-  transition: border-color 0.12s, transform 0.12s;
+.docs-breadcrumb ol {
+  list-style: none; display: flex; flex-wrap: wrap; align-items: center;
+  gap: 6px; margin: 0; padding: 0; min-width: 0;
 }
-.docs-landing-list a:hover { border-color: var(--brand); transform: translateY(-1px); }
+.docs-breadcrumb li { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.docs-breadcrumb a { color: var(--ink-mute); text-decoration: none; transition: color 0.12s; }
+.docs-breadcrumb a:hover { color: var(--brand); }
+.docs-breadcrumb span[aria-current='page'] {
+  color: var(--ink-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch;
+}
+.docs-crumb-sep { color: var(--brand); opacity: 0.6; }
+.docs-edit-link {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  color: var(--ink-mute); text-decoration: none;
+  padding: 3px 10px; border: 1px solid var(--rule); border-radius: 999px;
+  transition: color 0.12s, border-color 0.12s;
+}
+.docs-edit-link:hover { color: var(--brand); border-color: var(--brand); }
+.docs-edit-link svg { display: block; }
 
-/* ── Prose ───────────────────────────────────────────────────────────── */
+.docs-kicker {
+  font-family: var(--doc-label);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--brand);
+  margin: 0 0 6px;
+}
+.docs-kicker + .docs-prose > h1:first-child { margin-top: 0; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   PROSE — long-form reading at ~70ch
+   ════════════════════════════════════════════════════════════════════════ */
 .docs-prose {
   max-width: var(--measure-wide);
-  line-height: 1.7;
-  color: var(--ink);
+  line-height: 1.72;
+  color: var(--ink-700);
+  text-rendering: optimizeLegibility;
 }
 .docs-prose > :first-child { margin-top: 0; }
-.docs-prose h1 { font-size: 2.1rem; letter-spacing: -0.02em; margin: 0 0 16px; scroll-margin-top: 24px; }
+.docs-prose p, .docs-prose ul, .docs-prose ol { max-width: var(--doc-measure); }
+.docs-prose p { margin: 0 0 18px; color: var(--ink-700); }
+
+/* Headings (display face) */
+.docs-prose h1, .docs-prose h2, .docs-prose h3, .docs-prose h4 {
+  font-family: var(--doc-display);
+  color: var(--ink-strong);
+  position: relative;
+  scroll-margin-top: 28px;
+}
+.docs-prose h1 {
+  font-size: clamp(2.1rem, 4.2vw, 2.7rem);
+  font-weight: 700; line-height: 1.08; letter-spacing: -0.025em;
+  margin: 0 0 12px;
+}
 .docs-prose h2 {
-  font-size: 1.5rem; margin: 40px 0 14px; padding-top: 8px;
-  border-top: 1px solid var(--rule); scroll-margin-top: 24px;
+  font-size: clamp(1.5rem, 2.6vw, 1.75rem);
+  font-weight: 700; line-height: 1.18; letter-spacing: -0.018em;
+  margin: 52px 0 16px; padding-top: 22px;
+  border-top: 1px solid var(--doc-rule);
 }
-.docs-prose h3 { font-size: 1.2rem; margin: 28px 0 10px; scroll-margin-top: 24px; }
-.docs-prose h4 { font-size: 1.02rem; margin: 22px 0 8px; scroll-margin-top: 24px; }
-.docs-prose p { margin: 0 0 16px; }
-.docs-prose a { color: var(--brand); text-decoration: underline; text-underline-offset: 2px; }
-.docs-prose a:hover { color: var(--brand-dark); }
-.docs-prose ul, .docs-prose ol { margin: 0 0 16px; padding-left: 24px; }
-.docs-prose li { margin: 4px 0; }
-.docs-prose img {
-  max-width: 100%; height: auto; border-radius: 10px;
-  border: 1px solid var(--rule); margin: 16px 0; display: block;
+.docs-prose h2::before {
+  content: "§";
+  font-family: var(--doc-label);
+  font-size: 0.62em; font-weight: 600;
+  color: var(--brand);
+  position: absolute; top: 22px; left: -1.4em; opacity: 0.5;
 }
-.docs-prose blockquote {
-  margin: 16px 0; padding: 8px 18px;
-  border-left: 3px solid var(--brand); background: var(--bg-soft);
-  color: var(--ink-soft); border-radius: 0 8px 8px 0;
+.docs-prose h3 {
+  font-size: 1.22rem; font-weight: 600; letter-spacing: -0.012em;
+  margin: 34px 0 10px;
 }
-/* Inline code: the body text colour is near-black navy (--ink-900), which is
-   invisible on the dark --bg-alt chip — give inline code a legible light/teal
-   tint instead of inheriting body ink. */
+.docs-prose h4 {
+  font-size: 1.02rem; font-weight: 600; margin: 26px 0 8px; color: var(--ink-800);
+}
+.docs-prose h2:hover::after, .docs-prose h3:hover::after {
+  content: "#";
+  font-family: var(--doc-label);
+  font-weight: 600; color: var(--brand);
+  margin-left: 0.4em; opacity: 0.7;
+}
+
+/* Links */
+.docs-prose a {
+  color: var(--ink-strong);
+  text-decoration: underline; text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em; text-decoration-color: var(--rule-strong);
+  transition: color 0.14s ease, text-decoration-color 0.14s ease;
+}
+.docs-prose a:hover { color: var(--brand-dark); text-decoration-color: var(--brand); }
+
+/* Lists — squared cyan tick + zero-padded ordered counters */
+.docs-prose ul { list-style: none; padding-left: 1.4em; margin: 0 0 18px; }
+.docs-prose ul > li { position: relative; margin: 7px 0; color: var(--ink-700); }
+.docs-prose ul > li::before {
+  content: ""; position: absolute; left: -1.15em; top: 0.62em;
+  width: 6px; height: 6px; border-radius: 1px;
+  background: var(--brand); transform: rotate(45deg); opacity: 0.9;
+}
+.docs-prose ol { list-style: none; counter-reset: doc-ol; padding-left: 1.9em; margin: 0 0 18px; }
+.docs-prose ol > li { position: relative; margin: 7px 0; color: var(--ink-700); counter-increment: doc-ol; }
+.docs-prose ol > li::before {
+  content: counter(doc-ol, decimal-leading-zero);
+  position: absolute; left: -1.9em; top: 0.05em;
+  font-family: var(--doc-label); font-size: 0.78em; font-weight: 600;
+  color: var(--brand); opacity: 0.85;
+}
+.docs-prose li > ul, .docs-prose li > ol { margin: 6px 0; }
+
+/* ── Code — always light on dark; guards the inherited-dark-ink regression ─ */
 .docs-prose code {
-  font-family: var(--font-mono); font-size: 0.875em;
-  background: var(--bg-alt); color: var(--brand-dark);
-  padding: 2px 6px; border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--bg-alt);
+  color: var(--brand-dark);
+  padding: 0.12em 0.42em;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
   white-space: nowrap;
 }
+/* Code-fence container. shiki emits its own <pre class="shiki"> with inline
+   token colours inside .shiki-wrap; we style the chrome (frame, rail, copy
+   button room) but NEVER set a colour on shiki spans. */
 .docs-prose pre {
-  background: var(--bg-alt); border: 1px solid var(--rule); border-radius: 10px;
-  padding: 16px 18px; overflow-x: auto; margin: 0 0 18px; font-size: 0.85rem; line-height: 1.5;
-  color: var(--ink-strong);
+  font-family: var(--font-mono);
+  background: var(--doc-code-bg);
+  color: var(--ink-700);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin: 0 0 20px;
+  overflow-x: auto;
+  font-size: 0.86rem;
+  line-height: 1.6;
+  box-shadow: var(--shadow-md);
+  position: relative;
 }
-/* Code inside a fenced block must be display:block with intrinsic width so a
-   long line establishes the pre's scrollWidth and overflow-x:auto produces a
-   scrollbar — as inline (the UA default) the long line is clipped, not
-   scrollable. Reset the inline-code colour/nowrap/chip styling here. */
+/* thin cyan signal rail down the left edge of every code block */
+.docs-prose pre::before {
+  content: "";
+  position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: linear-gradient(var(--brand), transparent);
+  border-radius: 10px 0 0 10px; opacity: 0.5;
+}
 .docs-prose pre code {
   display: block; min-width: max-content;
-  background: none; color: inherit; white-space: pre;
-  padding: 0; font-size: inherit;
+  background: none; border: none; color: inherit;
+  white-space: pre; padding: 0; font-size: inherit;
 }
+/* shiki wrapper sits flush; its inner <pre> carries the frame instead. */
+.docs-prose .shiki-wrap { margin: 0 0 20px; position: relative; }
+.docs-prose .shiki-wrap pre.shiki { margin: 0; }
+/* a quiet language tag in the corner of highlighted blocks — fades out on
+   hover so the Copy button can take the corner without colliding with it. */
+.docs-prose .shiki-wrap[data-lang]:not([data-lang="text"])::after {
+  content: attr(data-lang);
+  position: absolute; top: 11px; right: 14px;
+  font-family: var(--doc-label); font-size: 0.62rem; font-weight: 600;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-mute); opacity: 0.65; pointer-events: none;
+  transition: opacity 0.14s;
+}
+.docs-prose .shiki-wrap:hover::after { opacity: 0; }
 .docs-prose pre.mermaid {
-  background: var(--bg-card); text-align: center; border-style: dashed;
+  background: var(--bg-card); text-align: center; border-style: dashed; color: var(--ink-700);
 }
-.docs-prose table {
-  width: 100%; border-collapse: collapse; margin: 0 0 18px; font-size: 0.9rem;
-  display: block; overflow-x: auto;
-}
-.docs-prose th, .docs-prose td {
-  border: 1px solid var(--rule); padding: 8px 12px; text-align: left;
-}
-.docs-prose th { background: var(--bg-soft); font-weight: 700; }
-.docs-prose hr { border: none; border-top: 1px solid var(--rule); margin: 32px 0; }
 
-/* ── Responsive: sidebar collapses above the content on narrow screens ── */
+/* ── Blockquote → engineered callout ───────────────────────────────────── */
+.docs-prose blockquote {
+  position: relative; margin: 22px 0; padding: 16px 20px 16px 46px;
+  background: var(--doc-callout-bg);
+  border: 1px solid var(--rule); border-left: 2px solid var(--brand);
+  border-radius: 0 10px 10px 0; color: var(--ink-700);
+  max-width: var(--measure-wide);
+}
+.docs-prose blockquote::before {
+  content: "i"; position: absolute; left: 16px; top: 16px;
+  width: 18px; height: 18px; display: grid; place-items: center;
+  font-family: var(--doc-label); font-size: 0.7rem; font-weight: 700; font-style: normal;
+  color: var(--bg); background: var(--brand); border-radius: 50%; line-height: 1;
+}
+.docs-prose blockquote p { margin: 0.3rem 0; color: var(--ink-700); }
+.docs-prose blockquote p:first-child { margin-top: 0; }
+.docs-prose blockquote p:last-child  { margin-bottom: 0; }
+
+/* ── Tables — engineered, hairline rows only ───────────────────────────── */
+.docs-prose table {
+  width: 100%; border-collapse: collapse; margin: 0 0 22px;
+  font-size: 0.9rem; display: block; overflow-x: auto;
+  border: 1px solid var(--rule); border-radius: 10px;
+}
+.docs-prose thead th {
+  font-family: var(--doc-label); font-size: 0.7rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--ink-soft); background: var(--bg-soft);
+  text-align: left; padding: 11px 14px;
+  border-bottom: 1px solid var(--rule-strong); white-space: nowrap;
+}
+.docs-prose tbody td {
+  padding: 11px 14px; text-align: left; vertical-align: top;
+  color: var(--ink-700); border-bottom: 1px solid var(--doc-grid-line);
+}
+.docs-prose tbody tr:last-child td { border-bottom: none; }
+.docs-prose tbody tr:hover td { background: rgba(34, 211, 238, 0.03); }
+
+/* ── Horizontal rule → surveyor's divider ──────────────────────────────── */
+.docs-prose hr {
+  border: none; height: 1px; margin: 44px 0;
+  background: linear-gradient(90deg, transparent, var(--rule-strong) 18%, var(--rule-strong) 82%, transparent);
+  position: relative; overflow: visible;
+}
+.docs-prose hr::after {
+  content: "◇"; position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%); font-size: 0.7rem;
+  color: var(--brand); background: var(--bg); padding: 0 10px; opacity: 0.6;
+}
+
+/* ── Images ────────────────────────────────────────────────────────────── */
+.docs-prose img {
+  max-width: 100%; height: auto; display: block; margin: 20px 0;
+  border: 1px solid var(--rule); border-radius: 10px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Right-rail TOC (scroll-spy)
+   ════════════════════════════════════════════════════════════════════════ */
+.docs-toc {
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100vh - 48px); overflow-y: auto;
+  font-size: 0.82rem; border-left: 1px solid var(--rule); padding-left: 16px;
+}
+.docs-toc-eyebrow {
+  font-family: var(--doc-label); font-size: 0.66rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-mute);
+  margin: 0 0 12px;
+}
+.docs-toc nav ul { list-style: none; margin: 0; padding: 0; }
+.docs-toc nav li { margin: 0; }
+.docs-toc a {
+  display: block; padding: 4px 0 4px 12px; margin-left: -17px;
+  border-left: 2px solid transparent; color: var(--ink-mute);
+  text-decoration: none; line-height: 1.35;
+  transition: color 0.12s, border-color 0.12s;
+}
+.docs-toc a:hover { color: var(--ink-strong); }
+.docs-toc a.is-active { color: var(--brand); border-left-color: var(--brand); font-weight: 600; }
+.docs-toc-sub a { padding-left: 26px; font-size: 0.95em; }
+
+/* ── Copy-to-clipboard buttons ─────────────────────────────────────────── */
+.docs-prose pre.has-copy { position: relative; }
+.docs-copy-btn {
+  position: absolute; top: 8px; right: 8px;
+  display: inline-flex; align-items: center;
+  font-family: var(--doc-label); font-size: 0.68rem; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--ink-mute); background: var(--doc-code-bg);
+  border: 1px solid var(--rule); border-radius: 6px; padding: 4px 9px;
+  cursor: pointer; opacity: 0; transform: translateY(-2px);
+  transition: opacity 0.14s, transform 0.14s, color 0.12s, border-color 0.12s, background 0.12s;
+}
+.docs-prose pre.has-copy:hover .docs-copy-btn,
+.docs-copy-btn:focus-visible { opacity: 1; transform: translateY(0); }
+.docs-copy-btn:hover { color: var(--ink-strong); border-color: var(--ink-mute); }
+.docs-copy-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.docs-copy-btn.is-copied { color: var(--brand); border-color: var(--brand); background: var(--bg-alt); }
+
+/* ── Prev / Next pager ─────────────────────────────────────────────────── */
+.docs-pager {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  margin-top: 56px; padding-top: 28px; border-top: 1px solid var(--rule);
+}
+.docs-pager-spacer { display: block; }
+.docs-pager-card {
+  display: flex; flex-direction: column; gap: 4px; padding: 14px 18px;
+  border: 1px solid var(--rule); border-radius: 12px; background: var(--bg-card);
+  text-decoration: none; min-width: 0;
+  transition: border-color 0.14s, transform 0.14s, background 0.14s;
+}
+.docs-pager-card:hover { border-color: var(--brand); transform: translateY(-2px); }
+.docs-pager-next { text-align: right; }
+.docs-pager-eyebrow {
+  font-family: var(--doc-label); font-size: 0.7rem; font-weight: 600;
+  letter-spacing: 0.04em; color: var(--brand);
+}
+.docs-pager-title {
+  font-size: 0.98rem; font-weight: 600; color: var(--ink-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--doc-display); letter-spacing: -0.01em;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Landing (docs index)
+   ════════════════════════════════════════════════════════════════════════ */
+.docs-landing-head h1 {
+  font-family: var(--doc-display);
+  font-size: clamp(2.2rem, 4.4vw, 2.9rem);
+  font-weight: 700; letter-spacing: -0.025em; margin: 0 0 10px;
+}
+.docs-landing-head p { color: var(--ink-soft); max-width: var(--measure); margin: 0 0 40px; }
+.docs-landing-group { margin-bottom: 38px; }
+.docs-landing-group h2 {
+  font-family: var(--doc-display); font-weight: 700; letter-spacing: -0.015em;
+  font-size: 1.35rem; margin: 0 0 4px;
+}
+.docs-landing-tagline {
+  font-family: var(--doc-label); font-size: 0.72rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--ink-mute); margin: 0 0 14px;
+}
+.docs-landing-list {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px;
+}
+.docs-landing-list a {
+  display: block; padding: 13px 16px;
+  background: var(--bg-card); border: 1px solid var(--rule); border-radius: 10px;
+  color: var(--ink-strong); text-decoration: none; font-weight: 600; font-size: 0.95rem;
+  font-family: var(--doc-display); letter-spacing: -0.01em;
+  position: relative;
+  transition: border-color 0.14s, transform 0.14s;
+}
+.docs-landing-list a::after {
+  content: "→"; position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+  color: var(--brand); opacity: 0; transition: opacity 0.14s, transform 0.14s;
+  font-family: var(--font-mono);
+}
+.docs-landing-list a:hover { border-color: var(--brand); transform: translateY(-1px); }
+.docs-landing-list a:hover::after { opacity: 1; transform: translateY(-50%) translateX(2px); }
+
+/* ════════════════════════════════════════════════════════════════════════
+   Responsive
+   ════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 1100px) {
+  .docs-shell.has-toc { grid-template-columns: 250px minmax(0, 1fr); max-width: var(--shell); }
+  .docs-toc { display: none; }
+}
+@media (max-width: 960px) {
+  .docs-prose h2::before { display: none; }
+}
 @media (max-width: 860px) {
-  .docs-shell { grid-template-columns: 1fr; gap: 24px; padding: 24px 16px 64px; }
+  .docs-shell, .docs-shell.has-toc {
+    grid-template-columns: 1fr; gap: 24px; padding: 24px 16px 64px; max-width: var(--shell);
+  }
   .docs-sidebar {
     position: static; max-height: none; overflow: visible;
     border-bottom: 1px solid var(--rule); padding-bottom: 16px;
   }
   .docs-nav-group { margin-bottom: 14px; }
+  .docs-shell::before { --doc-grid-size: 24px; }
+  .docs-pager { grid-template-columns: 1fr; }
+  .docs-pager-next { text-align: left; }
+  .docs-pager-spacer { display: none; }
+  .docs-breadcrumb { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .docs-prose a, .docs-nav-group a, .docs-toc a { transition: none; }
+  .docs-copy-btn { transform: none; transition: opacity 0.14s, color 0.12s, border-color 0.12s; }
+  .docs-pager-card { transition: border-color 0.14s; }
+  .docs-pager-card:hover, .docs-prose pre.has-copy:hover .docs-copy-btn, .docs-copy-btn:focus-visible { transform: none; }
+  html { scroll-behavior: auto; }
 }

@@ -1,4 +1,4 @@
-# Bucket replication (event-driven)
+# Bucket replication
 
 *Engine-routed source → destination object copy, transparent to
 per-backend encryption and delta compression. Replication is

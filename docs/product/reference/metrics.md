@@ -1,4 +1,4 @@
-# Metrics reference
+# Metrics
 
 *Every Prometheus metric the proxy exposes, with labels, types, and bucket boundaries.*
 

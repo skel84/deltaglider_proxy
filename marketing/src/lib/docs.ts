@@ -116,3 +116,26 @@ export function rewriteDocLink(href: string, fromPath: string): string | null {
 export function rewriteAssetSrc(src: string): string {
   return src.replace(/^\/_\/screenshots\//, '/screenshots/');
 }
+
+/**
+ * The docs in *sidebar reading order* — group order (DOC_GROUPS) first, then
+ * `order` within each group. This is the order a reader walks the docs, so it's
+ * the spine for the prev/next pager. Excludes the README landing ('').
+ */
+export function docsInReadingOrder(): DocMeta[] {
+  return docsByGroup().flatMap((g) => g.docs).filter((d) => d.slug !== '');
+}
+
+/**
+ * Previous/next doc around a given slug, in reading order. Either side is null
+ * at the ends of the spine (first doc has no prev, last has no next).
+ */
+export function adjacentDocs(slug: string): { prev: DocMeta | null; next: DocMeta | null } {
+  const spine = docsInReadingOrder();
+  const i = spine.findIndex((d) => d.slug === slug);
+  if (i === -1) return { prev: null, next: null };
+  return {
+    prev: i > 0 ? spine[i - 1] : null,
+    next: i < spine.length - 1 ? spine[i + 1] : null,
+  };
+}

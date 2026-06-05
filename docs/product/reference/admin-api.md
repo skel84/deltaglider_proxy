@@ -1,4 +1,4 @@
-# Admin API reference
+# Admin API
 
 *Every endpoint under `/_/api/admin/*`, grouped by purpose.*
 
