@@ -23,33 +23,33 @@ const defaultInputs = (overrides: Partial<CalculatorInputs> = {}): CalculatorInp
 });
 
 describe('calculate', () => {
-  it('starter bracket at 50 TB source × 10× = 5 TB stored → Starter ($5k)', () => {
-    // 50 TB × 2 regions produces enough savings to clear the $5k Starter
-    // floor. (At 5 TB source, savings ~$2.8k < $5k → negativeNet, which
-    // is the correct behaviour but not what we test for here.)
+  it('starter bracket at 50 TB source × 10× = 5 TB stored → Starter ($2.5k)', () => {
+    // 50 TB × 2 regions produces enough savings to clear the $2.5k Starter
+    // floor. (At 5 TB source, savings ~$2.8k vs $2.5k → ok now, the floor is
+    // lower than before.)
     const result = calculate(defaultInputs({ sourceTb: 50 }));
     expect(result.kind).toBe('ok');
     if (result.kind === 'ok') {
       expect(result.bracket.id).toBe('starter');
-      expect(result.bracket.priceUsd).toBe(5_000);
+      expect(result.bracket.priceUsd).toBe(2_500);
     }
   });
 
-  it('growth bracket at 300 TB source × 10× = 30 TB stored → Growth ($15k)', () => {
+  it('growth bracket at 300 TB source × 10× = 30 TB stored → Growth ($7.5k)', () => {
     const result = calculate(defaultInputs({ sourceTb: 300 }));
     expect(result.kind).toBe('ok');
     if (result.kind === 'ok') {
       expect(result.bracket.id).toBe('growth');
-      expect(result.bracket.priceUsd).toBe(15_000);
+      expect(result.bracket.priceUsd).toBe(7_500);
     }
   });
 
-  it('scale bracket at 1500 TB source × 10× = 150 TB stored → Scale ($30k)', () => {
+  it('scale bracket at 1500 TB source × 10× = 150 TB stored → Scale ($15k)', () => {
     const result = calculate(defaultInputs({ sourceTb: 1500 }));
     expect(result.kind).toBe('ok');
     if (result.kind === 'ok') {
       expect(result.bracket.id).toBe('scale');
-      expect(result.bracket.priceUsd).toBe(30_000);
+      expect(result.bracket.priceUsd).toBe(15_000);
     }
   });
 
@@ -74,7 +74,7 @@ describe('calculate', () => {
 
   it('negativeNet when support cost exceeds savings (e.g. low compression + small footprint)', () => {
     // 2 TB × 2× compression × 1 region × $0.001/GB → ~$2.45k savings/yr
-    // vs Starter $5k → negative.
+    // vs Starter $2.5k → still negative (just barely).
     const result = calculate({
       sourceTb: 2,
       regions: 1,
@@ -84,8 +84,8 @@ describe('calculate', () => {
     });
     expect(result.kind).toBe('negativeNet');
     if (result.kind === 'negativeNet') {
-      expect(result.supportCost).toBe(5_000);
-      expect(result.savings).toBeLessThan(5_000);
+      expect(result.supportCost).toBe(2_500);
+      expect(result.savings).toBeLessThan(2_500);
     }
   });
 
@@ -124,7 +124,7 @@ describe('calculate', () => {
 
       // Bracket pick + savings
       expect(result.bracket.id).toBe('growth');
-      expect(result.netSavings).toBeCloseTo(result.savings - 15_000, 1);
+      expect(result.netSavings).toBeCloseTo(result.savings - 7_500, 1);
     }
   });
 
@@ -165,9 +165,9 @@ describe('calculate', () => {
   });
 
   it('regions = 1 should not multiply egress (no replicas)', () => {
-    // 50 TB / 10× = 5 TB stored → Starter ($5k). Single-region savings
+    // 50 TB / 10× = 5 TB stored → Starter ($2.5k). Single-region savings
     // at 50 TB × $0.023 × 1024 × 12 = $14.1k today vs $1.4k post = $12.7k
-    // savings, which clears the $5k floor.
+    // savings, which clears the $2.5k floor.
     const result = calculate(defaultInputs({ sourceTb: 50, regions: 1 }));
     expect(result.kind).toBe('ok');
     if (result.kind === 'ok') {
@@ -224,7 +224,7 @@ describe('buildMarkdown', () => {
     expect(md).toContain('# DeltaGlider savings estimate');
     expect(md).toContain('300 TB');    // source footprint in inputs
     expect(md).toContain('Growth');    // bracket name
-    expect(md).toContain('$15k/year'); // bracket priceLabel
+    expect(md).toContain('$7.5k/year'); // bracket priceLabel
     expect(md).toContain('| Line |');  // breakdown table header
   });
 
