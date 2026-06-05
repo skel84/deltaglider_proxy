@@ -172,7 +172,7 @@ const showToc = props.kind === 'doc' && toc.length >= 2;
       // default viewBox is often 2–3× larger than the graph, which renders the
       // diagram as a tiny island in a huge empty box. (Same fix the in-product
       // docs viewer applies.)
-      document.querySelectorAll('pre.mermaid svg').forEach((svg) => {
+      document.querySelectorAll<SVGSVGElement>('pre.mermaid svg').forEach((svg) => {
         try {
           const bbox = svg.getBBox();
           const pad = 8;
