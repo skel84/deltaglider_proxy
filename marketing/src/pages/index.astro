@@ -11,6 +11,7 @@ import MechanismExplanation from '../components/MechanismExplanation.astro';
 import WorkloadFitTable from '../components/WorkloadFitTable.astro';
 import ComparisonTable from '../components/ComparisonTable.astro';
 import ScreenshotGallery from '../components/ScreenshotGallery.astro';
+import HeroSlideshow from '../components/HeroSlideshow.tsx';
 import {
   organizationSchema,
   webSiteSchema,
@@ -30,34 +31,37 @@ import {
 
   {/* ============================== HERO ============================== */}
   <section class="hero">
-    <div class="shell">
-      <span class="hero-eyebrow">
-        <span class="hero-eyebrow-dot"></span>
-        Open source · GPL-3.0
-      </span>
+    <div class="shell hero-grid">
+      <div class="hero-copy">
+        <span class="hero-eyebrow">
+          <span class="hero-eyebrow-dot"></span>
+          Open source · GPL-3.0
+        </span>
 
-      <h1>Storage compression for S3, behind the same S3 API.</h1>
+        <h1>Cut S3 storage&nbsp;10&times;.<br />Change&nbsp;nothing.</h1>
 
-      <p class="hero-lede">
-        Versioned binaries — CI artifacts, plugin catalogs, builds,
-        backups, ML model lineages — stored as xdelta3 deltas on the
-        bucket. Apps unchanged. Stored bytes typically drop 10× to 100×
-        on the right workload shape.
-      </p>
+        <p class="hero-lede">
+          A drop-in S3 proxy that stores versioned binaries — artifacts,
+          builds, backups, models — as deltas. Same API. Same buckets.
+          <strong>Up to 10&times;–100&times; fewer bytes stored.</strong>
+        </p>
 
-      <p class="hero-credentials">
-        Built by <a href="https://beshu.tech">Beshu Tech</a> —
-        <strong>10 senior engineers, since 2017</strong>. Same team
-        behind <a href="https://readonlyrest.com">ReadonlyREST</a>
-        (Elasticsearch security, flagship) and Anaphora (dashboard-to-
-        PDF reporting). In production at banks, nuclear research
-        institutions, EU institutions, and 2× of the S&P 500 top 5.
-      </p>
+        <div class="hero-ctas">
+          <a href="/pricing" class="btn btn-brand">See what you'd save&nbsp;&rarr;</a>
+          <a href="/trial" class="btn">Start free trial</a>
+          <a href="https://github.com/beshu-tech/deltaglider_proxy" class="btn btn-ghost">GitHub</a>
+        </div>
 
-      <div class="hero-ctas">
-        <a href="/pricing" class="btn btn-brand">See what it'd save you →</a>
-        <a href="https://github.com/beshu-tech/deltaglider_proxy" class="btn">GitHub</a>
-        <a href="/trial" class="btn">30-day trial</a>
+        <p class="hero-trust">
+          <strong>In production</strong> at banks, nuclear research &amp; EU
+          institutions, and 2&times; of the S&amp;P&nbsp;500 top&nbsp;5 —
+          built by the <a href="https://readonlyrest.com">ReadonlyREST</a>
+          team since 2017.
+        </p>
+      </div>
+
+      <div class="hero-visual">
+        <HeroSlideshow client:visible />
       </div>
     </div>
   </section>
