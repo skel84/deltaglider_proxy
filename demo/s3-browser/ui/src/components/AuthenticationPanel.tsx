@@ -60,6 +60,12 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
   // IAM mode for the source-of-truth banner (cached react-query read).
   const { data: cfg } = useAdminConfig();
   const iamMode = cfg?.iam_mode;
+  // Declarative IAM: providers + mapping rules are declared in YAML and the
+  // admin API 403s every mutation. Render the config surfaces read-only (no
+  // New Provider / Add Rule / Save Rules / provider Save+Delete). Non-mutating
+  // diagnostics stay live: Test Connection, mapping Preview, and Sync Groups
+  // (re-derives memberships from the declared rules — it doesn't edit them).
+  const readOnly = iamMode === 'declarative';
 
   // Provider master-detail selection (form state lives in ProviderForm, keyed).
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
@@ -162,9 +168,11 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
       <div style={{ display: 'flex', gap: 16, marginBottom: 24 }}>
         {/* Left: provider list */}
         <div style={{ width: 220, flexShrink: 0 }}>
-          <Button icon={<PlusOutlined />} block size="small" onClick={() => { setCreating(true); setSelectedProviderId(null); }} style={{ marginBottom: 8 }}>
-            New Provider
-          </Button>
+          {!readOnly && (
+            <Button icon={<PlusOutlined />} block size="small" onClick={() => { setCreating(true); setSelectedProviderId(null); }} style={{ marginBottom: 8 }}>
+              New Provider
+            </Button>
+          )}
           {providers.map(p => (
             <div
               key={p.id}
@@ -206,13 +214,16 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
               key={selectedProvider.id}
               provider={selectedProvider}
               callbackUrl={callbackUrl}
+              readOnly={readOnly}
               onSaved={() => { /* stays on the edit view; cache invalidation refreshes data */ }}
               onDeleted={() => setSelectedProviderId(null)}
               onTest={handleTest}
             />
           ) : (
             <div style={{ color: colors.TEXT_MUTED, fontSize: 13, padding: 20 }}>
-              Select a provider or create a new one to configure external authentication.
+              {readOnly
+                ? 'Select a provider to view its configuration. Providers are declared in your YAML config.'
+                : 'Select a provider or create a new one to configure external authentication.'}
             </div>
           )}
         </div>
@@ -223,33 +234,39 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
       {/* Allowed Users & Group Assignment */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <SectionHeader icon={<SafetyOutlined />} title="Allowed Users & Group Assignment" />
-        <Button
-          size="small"
-          icon={<PlusOutlined />}
-          onClick={async () => {
-            if (groups.length === 0) { message.warning('Create a group first'); return; }
-            try {
-              // Flush any pending local edits before creating + refetching.
-              // Otherwise the refetch overwrites in-memory rule edits with the
-              // server snapshot and silently drops the operator's unsaved edits.
-              await flushPendingRules();
-              await createRuleMutation.mutateAsync({
-                // New rules start empty — the placeholder shows the syntax hint.
-                match_type: 'email_glob',
-                match_value: '',
-                group_id: groups[0].id,
-              });
-            } catch (e) {
-              message.error(e instanceof Error ? e.message : 'Failed');
-            }
-          }}
-        >
-          Add Rule
-        </Button>
+        {!readOnly && (
+          <Button
+            size="small"
+            icon={<PlusOutlined />}
+            onClick={async () => {
+              if (groups.length === 0) { message.warning('Create a group first'); return; }
+              try {
+                // Flush any pending local edits before creating + refetching.
+                // Otherwise the refetch overwrites in-memory rule edits with the
+                // server snapshot and silently drops the operator's unsaved edits.
+                await flushPendingRules();
+                await createRuleMutation.mutateAsync({
+                  // New rules start empty — the placeholder shows the syntax hint.
+                  match_type: 'email_glob',
+                  match_value: '',
+                  group_id: groups[0].id,
+                });
+              } catch (e) {
+                message.error(e instanceof Error ? e.message : 'Failed');
+              }
+            }}
+          >
+            Add Rule
+          </Button>
+        )}
       </div>
 
       {mergedRules.length === 0 ? (
-        <Text type="secondary" style={{ fontSize: 12 }}>No rules configured. Add allowed email patterns (e.g. *@company.com) and assign them to groups.</Text>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {readOnly
+            ? 'No mapping rules. Declare them under access.group_mapping_rules in your YAML config.'
+            : 'No rules configured. Add allowed email patterns (e.g. *@company.com) and assign them to groups.'}
+        </Text>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
           {mergedRules.map((rule) => (
@@ -259,7 +276,7 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
               providers={providers}
               groups={groups}
               colors={colors}
-              disabled={rulesSaving}
+              disabled={rulesSaving || readOnly}
               onUpdate={(req) => {
                 // Local edit only — no API call. Save button appears below.
                 // Key the pending edit by the row's stable id, NOT the array
@@ -282,7 +299,7 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
         </div>
       )}
 
-      {rulesDirty && (
+      {rulesDirty && !readOnly && (
         <Button
           type="primary"
           loading={rulesSaving}
@@ -385,6 +402,9 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
 interface ProviderFormProps {
   provider: AuthProvider | null; // null = create mode
   callbackUrl: string;
+  /** Declarative IAM: disable inputs, hide Save/Delete. Test Connection and
+   *  the Copy-callback-URL affordance stay live (non-mutating). */
+  readOnly?: boolean;
   onSaved: () => void;
   onDeleted?: () => void;
   onTest: (
@@ -394,7 +414,7 @@ interface ProviderFormProps {
   ) => void;
 }
 
-function ProviderForm({ provider, callbackUrl, onSaved, onDeleted, onTest }: ProviderFormProps) {
+function ProviderForm({ provider, callbackUrl, readOnly = false, onSaved, onDeleted, onTest }: ProviderFormProps) {
   const colors = useColors();
   const label = useFormLabelStyle();
   const isEdit = provider !== null;
@@ -466,27 +486,31 @@ function ProviderForm({ provider, callbackUrl, onSaved, onDeleted, onTest }: Pro
   return (
     <div style={{ background: colors.BG_CARD, border: `1px solid ${colors.BORDER}`, borderRadius: 10, padding: 20 }}>
       <div style={label}>Display Name</div>
-      <Input value={formDisplayName} onChange={e => setFormDisplayName(e.target.value)} placeholder="Google Workspace" style={{ marginBottom: 12 }} />
+      <Input value={formDisplayName} onChange={e => setFormDisplayName(e.target.value)} placeholder="Google Workspace" disabled={readOnly} style={{ marginBottom: 12 }} />
 
       <div style={label}>Provider Name (unique identifier)</div>
-      <Input value={formName} onChange={e => setFormName(e.target.value)} placeholder="google-corp" style={{ marginBottom: 12 }} />
+      <Input value={formName} onChange={e => setFormName(e.target.value)} placeholder="google-corp" disabled={readOnly} style={{ marginBottom: 12 }} />
 
       <div style={label}>Issuer URL</div>
-      <Input value={formIssuerUrl} onChange={e => setFormIssuerUrl(e.target.value)} placeholder="https://accounts.google.com" style={{ marginBottom: 12 }} />
+      <Input value={formIssuerUrl} onChange={e => setFormIssuerUrl(e.target.value)} placeholder="https://accounts.google.com" disabled={readOnly} style={{ marginBottom: 12 }} />
 
       <div style={label}>Client ID</div>
-      <Input value={formClientId} onChange={e => setFormClientId(e.target.value)} placeholder="123456.apps.googleusercontent.com" style={{ marginBottom: 12 }} />
+      <Input value={formClientId} onChange={e => setFormClientId(e.target.value)} placeholder="123456.apps.googleusercontent.com" disabled={readOnly} style={{ marginBottom: 12 }} />
 
-      <div style={label}>Client Secret</div>
-      <Input.Password
-        value={formClientSecret}
-        onChange={e => setFormClientSecret(e.target.value)}
-        placeholder={isEdit ? '(leave blank to keep existing)' : 'Client secret'}
-        style={{ marginBottom: 12 }}
-      />
+      {!readOnly && (
+        <>
+          <div style={label}>Client Secret</div>
+          <Input.Password
+            value={formClientSecret}
+            onChange={e => setFormClientSecret(e.target.value)}
+            placeholder={isEdit ? '(leave blank to keep existing)' : 'Client secret'}
+            style={{ marginBottom: 12 }}
+          />
+        </>
+      )}
 
       <div style={label}>Scopes</div>
-      <Input value={formScopes} onChange={e => setFormScopes(e.target.value)} style={{ marginBottom: 12 }} />
+      <Input value={formScopes} onChange={e => setFormScopes(e.target.value)} disabled={readOnly} style={{ marginBottom: 12 }} />
 
       {/* Callback URL */}
       <div style={label}>Callback URL (register this with your provider)</div>
@@ -505,7 +529,7 @@ function ProviderForm({ provider, callbackUrl, onSaved, onDeleted, onTest }: Pro
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <Switch checked={formEnabled} onChange={setFormEnabled} size="small" />
+          <Switch checked={formEnabled} onChange={setFormEnabled} size="small" disabled={readOnly} />
           <Text style={{ fontSize: 13 }}>Enabled</Text>
         </div>
       </div>
@@ -524,20 +548,22 @@ function ProviderForm({ provider, callbackUrl, onSaved, onDeleted, onTest }: Pro
       )}
 
       <div style={{ display: 'flex', gap: 8 }}>
-        <Button
-          type="primary"
-          onClick={handleSave}
-          loading={saving}
-          disabled={!formName || !formClientId || !formIssuerUrl}
-        >
-          {isEdit ? 'Save' : 'Create'}
-        </Button>
+        {!readOnly && (
+          <Button
+            type="primary"
+            onClick={handleSave}
+            loading={saving}
+            disabled={!formName || !formClientId || !formIssuerUrl}
+          >
+            {isEdit ? 'Save' : 'Create'}
+          </Button>
+        )}
         {isEdit && (
           <Button onClick={() => onTest(provider.id, setTestResult, setTesting)} loading={testing}>
             Test Connection
           </Button>
         )}
-        {isEdit && (
+        {isEdit && !readOnly && (
           <Button danger onClick={handleDelete}>Delete</Button>
         )}
       </div>

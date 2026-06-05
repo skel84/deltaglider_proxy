@@ -35,6 +35,10 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
   // Query — refetch is automatic if the mode flips elsewhere in the app.
   const { data: cfg } = useAdminConfig();
   const iamMode = cfg?.iam_mode;
+  // Declarative IAM: YAML is the source of truth and every admin-API IAM
+  // mutation returns 403. Render the whole panel read-only so operators browse
+  // the reconciled state instead of filling out forms that 403 on save.
+  const readOnly = iamMode === 'declarative';
 
   // Users list. Query handles loading/error/refetch automatically;
   // mutations on this resource invalidate this key (see queries/users.ts)
@@ -136,6 +140,7 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
         <UserForm
           key={selectedUser.id}
           user={selectedUser}
+          readOnly={readOnly}
           onSaved={handleSaved}
           onDeleted={handleDeleted}
           onSavingChange={onSavingChange}
@@ -149,12 +154,15 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
                 <TeamOutlined style={{ fontSize: 40, marginBottom: 12, color: colors.TEXT_MUTED }} />
                 <div><Text type="secondary" style={{ fontSize: 15, fontWeight: 500 }}>Multi-User Access Control</Text></div>
                 <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
-                  Create your first IAM user to enable per-user credentials and permissions.
-                  Your current login credentials will be preserved as an admin account automatically.
+                  {readOnly
+                    ? 'No IAM users in your YAML config. Add them under access.iam_users and apply.'
+                    : 'Create your first IAM user to enable per-user credentials and permissions. Your current login credentials will be preserved as an admin account automatically.'}
                 </Text>
               </>
             ) : (
-              <Text type="secondary" style={{ fontSize: 14 }}>Select a user to edit, or create a new one</Text>
+              <Text type="secondary" style={{ fontSize: 14 }}>
+                {readOnly ? 'Select a user to view' : 'Select a user to edit, or create a new one'}
+              </Text>
             )}
           </div>
         </div>
@@ -178,6 +186,7 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
       rowPadding="12px 16px"
       rowClassName="user-list-item"
       onCreate={handleCreate}
+      readOnly={readOnly}
       search={search}
       onSearchChange={setSearch}
       loading={loading}
@@ -185,12 +194,20 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
       listEmptyState={(
         <div style={{ padding: 20, textAlign: 'center' }}>
           <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>No IAM users yet</Text>
-          <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 12 }}>
-            Your current credentials will be migrated automatically as an admin user.
-          </Text>
-          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={handleCreate}>
-            Set Up IAM
-          </Button>
+          {readOnly ? (
+            <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+              Add users under access.iam_users in your YAML config and apply.
+            </Text>
+          ) : (
+            <>
+              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 12 }}>
+                Your current credentials will be migrated automatically as an admin user.
+              </Text>
+              <Button type="primary" size="small" icon={<PlusOutlined />} onClick={handleCreate}>
+                Set Up IAM
+              </Button>
+            </>
+          )}
         </div>
       )}
       renderRowBody={user => {
@@ -216,36 +233,40 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
                   textTransform: 'uppercase', flexShrink: 0,
                 }}>SSO</span>
               )}
-              <Button
-                type="text"
-                size="small"
-                icon={<CopyOutlined />}
-                title="Duplicate user with fresh credentials"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void handleClone(user);
-                }}
-                style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0, flexShrink: 0 }}
-                onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
-              />
-              <Button
-                type="text"
-                danger
-                size="small"
-                icon={<DeleteOutlined />}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (!window.confirm(`Delete "${user.name}"? This cannot be undone.`)) return;
-                  deleteMutation.mutate(user.id, {
-                    onSuccess: handleDeleted,
-                    onError: (err) => console.error('Delete user failed:', err),
-                  });
-                }}
-                style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0, flexShrink: 0 }}
-                onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
-              />
+              {!readOnly && (
+                <>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<CopyOutlined />}
+                    title="Duplicate user with fresh credentials"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleClone(user);
+                    }}
+                    style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0, flexShrink: 0 }}
+                    onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
+                    onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
+                  />
+                  <Button
+                    type="text"
+                    danger
+                    size="small"
+                    icon={<DeleteOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!window.confirm(`Delete "${user.name}"? This cannot be undone.`)) return;
+                      deleteMutation.mutate(user.id, {
+                        onSuccess: handleDeleted,
+                        onError: (err) => console.error('Delete user failed:', err),
+                      });
+                    }}
+                    style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0, flexShrink: 0 }}
+                    onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
+                    onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
+                  />
+                </>
+              )}
             </div>
             {/* Row 2: permission summary (hidden for SSO users with group-only access) */}
             {summary && (

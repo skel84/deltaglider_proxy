@@ -39,6 +39,12 @@ interface MasterDetailPanelProps<T> {
   rowClassName?: string;
 
   onCreate: () => void;
+  /**
+   * Read-only mode (declarative IAM): hides the "New" toolbar button. Per-row
+   * action buttons live in the consumer's `renderRowBody`, so the consumer is
+   * responsible for hiding those too — this flag only governs the shared shell.
+   */
+  readOnly?: boolean;
   search: string;
   onSearchChange: (value: string) => void;
 
@@ -63,6 +69,7 @@ export default function MasterDetailPanel<T>({
   rowPadding,
   rowClassName,
   onCreate,
+  readOnly = false,
   search,
   onSearchChange,
   loading,
@@ -90,9 +97,11 @@ export default function MasterDetailPanel<T>({
           <div style={{ padding: '16px 16px 12px', borderBottom: `1px solid ${colors.BORDER}` }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
               <Text strong style={{ fontSize: 14 }}>{title}</Text>
-              <Button type="primary" size="small" icon={<PlusOutlined />} onClick={onCreate}>
-                New
-              </Button>
+              {!readOnly && (
+                <Button type="primary" size="small" icon={<PlusOutlined />} onClick={onCreate}>
+                  New
+                </Button>
+              )}
             </div>
             <Input
               prefix={<SearchOutlined style={{ color: colors.TEXT_MUTED }} />}

@@ -47,6 +47,7 @@ import {
   StorageOverview,
   AdvancedOverview,
 } from './sectionOverviews';
+import { useAdminConfig } from '../queries/config';
 import { useNavigation } from '../NavigationContext';
 import { buildViewUrl } from '../urlState';
 import TabHeader from './TabHeader';
@@ -142,6 +143,11 @@ interface AdminPageProps {
 export default function AdminPage({ onBack, onSessionExpired, subPath, accountMenu, canAdmin = false }: AdminPageProps) {
   const colors = useColors();
   const { navigate } = useNavigation();
+  // Declarative IAM: the IAM-writing backup-restore modes (full / iam-only /
+  // preserve-bootstrap) would 403 server-side, so the restore modal offers only
+  // Config Only. Read the mode from the shared config query (cached).
+  const { data: adminCfg } = useAdminConfig();
+  const iamDeclarative = adminCfg?.iam_mode === 'declarative';
   // Hook up the `● ` tab-title prefix + beforeunload guard for any
   // section with unsaved edits. Mounting at AdminPage is the single
   // sensible home; moving higher would fire the guard on non-admin
@@ -900,47 +906,64 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
           >
             Config Only
           </Button>,
-          <Button
-            key="preserve-bootstrap"
-            type="primary"
-            onClick={() => restoreFile && runBackupImport(restoreFile, 'preserve-bootstrap')}
-          >
-            Everything Except Admin Password
-          </Button>,
-          <Button
-            key="full"
-            danger
-            onClick={() => restoreFile && runBackupImport(restoreFile, 'full')}
-          >
-            Full Restore
-          </Button>,
-          <Button
-            key="iam"
-            onClick={() => restoreFile && runBackupImport(restoreFile, 'iam-only')}
-          >
-            IAM Only
-          </Button>,
+          // The IAM-writing modes 403 in declarative mode (YAML owns IAM), so
+          // only Config Only is offered there.
+          ...(iamDeclarative ? [] : [
+            <Button
+              key="preserve-bootstrap"
+              type="primary"
+              onClick={() => restoreFile && runBackupImport(restoreFile, 'preserve-bootstrap')}
+            >
+              Everything Except Admin Password
+            </Button>,
+            <Button
+              key="full"
+              danger
+              onClick={() => restoreFile && runBackupImport(restoreFile, 'full')}
+            >
+              Full Restore
+            </Button>,
+            <Button
+              key="iam"
+              onClick={() => restoreFile && runBackupImport(restoreFile, 'iam-only')}
+            >
+              IAM Only
+            </Button>,
+          ]),
         ]}
       >
         <Space direction="vertical" size={10}>
           <Text>
             Choose what to restore from <Text code>{restoreFile?.name}</Text>.
           </Text>
-          <Alert
-            type="info"
-            showIcon
-            message="Everything Except Admin Password restores config, backends, bucket policies, users, groups, OIDC providers, and secrets, while keeping this instance's local admin password."
-          />
-          <Alert
-            type="info"
-            showIcon
-            message="IAM Only skips config and backend changes; use it only when you want users/groups/OIDC without restoring storage settings."
-          />
-          <Alert
-            type="warning"
-            showIcon
-            message="Full Restore also attempts to restore the backup bootstrap password hash and will fail if it differs from this instance's encrypted config DB key."
-          />
+          {iamDeclarative && (
+            <Alert
+              type="warning"
+              showIcon
+              message="IAM is managed by YAML (declarative mode). Only Config Only is available — restore users, groups, and OIDC providers by editing access.iam_* in your YAML config and applying."
+            />
+          )}
+          {!iamDeclarative && (
+            <Alert
+              type="info"
+              showIcon
+              message="Everything Except Admin Password restores config, backends, bucket policies, users, groups, OIDC providers, and secrets, while keeping this instance's local admin password."
+            />
+          )}
+          {!iamDeclarative && (
+            <Alert
+              type="info"
+              showIcon
+              message="IAM Only skips config and backend changes; use it only when you want users/groups/OIDC without restoring storage settings."
+            />
+          )}
+          {!iamDeclarative && (
+            <Alert
+              type="warning"
+              showIcon
+              message="Full Restore also attempts to restore the backup bootstrap password hash and will fail if it differs from this instance's encrypted config DB key."
+            />
+          )}
         </Space>
       </Modal>
 

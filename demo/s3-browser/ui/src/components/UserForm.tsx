@@ -31,6 +31,12 @@ const FALLBACK_PRESETS: Record<string, PermissionRow[]> = {
 
 interface UserFormProps {
   user: IamUser | null; // null = create mode
+  /**
+   * Declarative IAM: render the form as a disabled, view-only snapshot of the
+   * reconciled YAML state. All inputs are disabled and the Save/Delete action
+   * row is hidden (the admin API would 403 anyway).
+   */
+  readOnly?: boolean;
   onSaved: () => void;
   onDeleted?: () => void;
   onCancel?: () => void;
@@ -42,7 +48,7 @@ interface UserFormProps {
   onNavigateToGroup?: (groupId: number) => void;
 }
 
-export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated, onSavingChange, onNavigateToGroup }: UserFormProps) {
+export default function UserForm({ user, readOnly = false, onSaved, onDeleted, onCancel, onCreated, onSavingChange, onNavigateToGroup }: UserFormProps) {
   const isEdit = user !== null;
   const { inputRadius } = useCardStyles();
   const colors = useColors();
@@ -152,7 +158,7 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
       <div style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <Title level={5} style={{ margin: 0, fontFamily: 'var(--font-ui)' }}>
-            {isEdit ? `Edit: ${user?.name}` : 'Create New User'}
+            {isEdit ? `${readOnly ? 'View' : 'Edit'}: ${user?.name}` : 'Create New User'}
           </Title>
           {isEdit && (
             <>
@@ -203,7 +209,7 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
 
       <div style={{ marginBottom: 16 }}>
         <FormLabel text="Name" />
-        <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. ci-bot" style={{ ...inputRadius }} />
+        <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. ci-bot" disabled={readOnly} style={{ ...inputRadius }} />
       </div>
 
       <div style={{ marginBottom: 16 }}>
@@ -213,59 +219,80 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
             value={accessKeyId}
             onChange={e => setAccessKeyId(e.target.value)}
             placeholder={isEdit ? user?.access_key_id : 'e.g. user@company.com'}
+            disabled={readOnly}
             style={{ ...inputRadius, fontFamily: 'var(--font-mono)' }}
           />
-          {!isEdit && (
+          {!isEdit && !readOnly && (
             <Button icon={<ThunderboltOutlined />} onClick={() => setAccessKeyId(generateId())} title="Generate random key" />
           )}
         </Space.Compact>
       </div>
 
-      <div style={{ marginBottom: 16 }}>
-        <FormLabel text="Secret Access Key" hint={isEdit ? '(leave empty to keep current)' : '(auto-generated if empty)'} />
-        <Space.Compact style={{ width: '100%' }}>
-          <Input.Password
-            value={secretKey}
-            onChange={e => setSecretKey(e.target.value)}
-            placeholder={isEdit ? 'Enter new secret or leave empty' : 'e.g. mysecretkey or leave empty'}
-            style={{ ...inputRadius, fontFamily: 'var(--font-mono)' }}
-          />
-          <Button icon={<ThunderboltOutlined />} onClick={() => setSecretKey(generateSecret())} title="Generate random secret" />
-        </Space.Compact>
-      </div>
+      {!readOnly && (
+        <div style={{ marginBottom: 16 }}>
+          <FormLabel text="Secret Access Key" hint={isEdit ? '(leave empty to keep current)' : '(auto-generated if empty)'} />
+          <Space.Compact style={{ width: '100%' }}>
+            <Input.Password
+              value={secretKey}
+              onChange={e => setSecretKey(e.target.value)}
+              placeholder={isEdit ? 'Enter new secret or leave empty' : 'e.g. mysecretkey or leave empty'}
+              style={{ ...inputRadius, fontFamily: 'var(--font-mono)' }}
+            />
+            <Button icon={<ThunderboltOutlined />} onClick={() => setSecretKey(generateSecret())} title="Generate random secret" />
+          </Space.Compact>
+        </div>
+      )}
 
       <div style={{ marginBottom: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
         <FormLabel text="Enabled" />
-        <Switch checked={enabled} onChange={setEnabled} size="small" />
+        <Switch checked={enabled} onChange={setEnabled} size="small" disabled={readOnly} />
       </div>
 
       <Divider style={{ margin: '20px 0 12px' }}>Permissions</Divider>
 
-      {/* Presets as compact pill buttons */}
-      <div style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        {(cannedPolicies.length > 0 ? cannedPolicies : Object.entries(FALLBACK_PRESETS).map(([name, perms]) => ({
-          name,
-          description: '',
-          permissions: perms.map(p => ({ id: 0, effect: p.effect, actions: p.actions, resources: p.resources.split(',').map(s => s.trim()).filter(Boolean) })),
-        }))).map(policy => {
-          return (
-              <Tag
-                key={policy.name}
-                color="blue"
-                style={{ cursor: 'pointer', borderRadius: 10, fontSize: 12, padding: '2px 10px', margin: 0, userSelect: 'none' }}
-                onClick={() => {
-                  const hasExisting = permissions.some(r => r.actions.length > 0 || r.resources.trim() !== '');
-                  if (hasExisting && !window.confirm('Replace existing permissions?')) return;
-                  setPermissions(permissionsToRows(policy.permissions));
-                }}
-              >
-                {policy.name}
-              </Tag>
-            );
-          })}
-      </div>
+      {/* Presets as compact pill buttons (hidden in read-only — nothing to apply). */}
+      {!readOnly && (
+        <div style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {(cannedPolicies.length > 0 ? cannedPolicies : Object.entries(FALLBACK_PRESETS).map(([name, perms]) => ({
+            name,
+            description: '',
+            permissions: perms.map(p => ({ id: 0, effect: p.effect, actions: p.actions, resources: p.resources.split(',').map(s => s.trim()).filter(Boolean) })),
+          }))).map(policy => {
+            return (
+                <Tag
+                  key={policy.name}
+                  color="blue"
+                  style={{ cursor: 'pointer', borderRadius: 10, fontSize: 12, padding: '2px 10px', margin: 0, userSelect: 'none' }}
+                  onClick={() => {
+                    const hasExisting = permissions.some(r => r.actions.length > 0 || r.resources.trim() !== '');
+                    if (hasExisting && !window.confirm('Replace existing permissions?')) return;
+                    setPermissions(permissionsToRows(policy.permissions));
+                  }}
+                >
+                  {policy.name}
+                </Tag>
+              );
+            })}
+        </div>
+      )}
 
-      <PermissionEditor permissions={permissions} onChange={setPermissions} />
+      {/* Native <fieldset disabled> disables every descendant form control; the
+          pointer-events guard also neutralises AntD's non-form clickable spans
+          (Segmented, Tag, the "Clear all"/"Add Rule" buttons) so the whole
+          editor is a true read-only snapshot without threading `disabled`
+          through PermissionEditor's deep control tree. */}
+      <fieldset
+        disabled={readOnly}
+        style={{
+          border: 'none',
+          margin: 0,
+          padding: 0,
+          minInlineSize: 'auto',
+          ...(readOnly ? { pointerEvents: 'none' as const, opacity: 0.85 } : {}),
+        }}
+      >
+        <PermissionEditor permissions={permissions} onChange={setPermissions} />
+      </fieldset>
 
       {isEdit && user && (
         <PermissionSummarySection
@@ -276,25 +303,29 @@ export default function UserForm({ user, onSaved, onDeleted, onCancel, onCreated
         />
       )}
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          {isEdit && (
-            <Button danger loading={deleting} disabled={deleting} onClick={async () => {
-              if (!window.confirm(`Delete "${user?.name}"? This cannot be undone.`)) return;
-              await handleDelete();
-            }}>Delete User</Button>
+      {/* Action row is hidden in read-only mode — the admin API would 403 and
+          the IamSourceBanner already explains the YAML-apply workflow. */}
+      {!readOnly && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            {isEdit && (
+              <Button danger loading={deleting} disabled={deleting} onClick={async () => {
+                if (!window.confirm(`Delete "${user?.name}"? This cannot be undone.`)) return;
+                await handleDelete();
+              }}>Delete User</Button>
+            )}
+            {!isEdit && onCancel && <Button onClick={onCancel}>Cancel</Button>}
+          </div>
+          {hasKeyChanges ? (
+            <Button type="primary" loading={saving} onClick={async () => {
+              if (!window.confirm('Update credentials? The new secret will be shown once — make sure to save it.')) return;
+              await handleSave();
+            }}>{isEdit ? 'Save' : 'Create User'}</Button>
+          ) : (
+            <Button type="primary" onClick={handleSave} loading={saving}>{isEdit ? 'Save' : 'Create User'}</Button>
           )}
-          {!isEdit && onCancel && <Button onClick={onCancel}>Cancel</Button>}
         </div>
-        {hasKeyChanges ? (
-          <Button type="primary" loading={saving} onClick={async () => {
-            if (!window.confirm('Update credentials? The new secret will be shown once — make sure to save it.')) return;
-            await handleSave();
-          }}>{isEdit ? 'Save' : 'Create User'}</Button>
-        ) : (
-          <Button type="primary" onClick={handleSave} loading={saving}>{isEdit ? 'Save' : 'Create User'}</Button>
-        )}
-      </div>
+      )}
     </div>
   );
 }

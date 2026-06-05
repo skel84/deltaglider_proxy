@@ -32,6 +32,9 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
   // IAM mode for the source-of-truth banner (cached react-query read).
   const { data: cfg } = useAdminConfig();
   const iamMode = cfg?.iam_mode;
+  // Declarative IAM: YAML owns group state; admin-API mutations 403. Render
+  // read-only (no New / clone / delete / save) — same as UsersPanel.
+  const readOnly = iamMode === 'declarative';
 
   // Groups + users are read from the shared query cache; the form's mutations
   // (create/update/delete/clone + membership add/remove) invalidate these keys
@@ -132,6 +135,7 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
       key={selectedGroup.id}
       group={selectedGroup}
       users={users}
+      readOnly={readOnly}
       onSaved={handleSaved}
       onDeleted={handleDeleted}
       onSavingChange={onSavingChange}
@@ -144,11 +148,15 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
             <FolderOutlined style={{ fontSize: 40, marginBottom: 12, color: colors.TEXT_MUTED }} />
             <div><Text type="secondary" style={{ fontSize: 15, fontWeight: 500 }}>Permission Groups</Text></div>
             <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
-              Create groups to share permissions across multiple users. Users inherit all permissions from their groups.
+              {readOnly
+                ? 'No groups in your YAML config. Add them under access.iam_groups and apply.'
+                : 'Create groups to share permissions across multiple users. Users inherit all permissions from their groups.'}
             </Text>
           </>
         ) : (
-          <Text type="secondary" style={{ fontSize: 14 }}>Select a group to edit, or create a new one</Text>
+          <Text type="secondary" style={{ fontSize: 14 }}>
+            {readOnly ? 'Select a group to view' : 'Select a group to edit, or create a new one'}
+          </Text>
         )}
       </div>
     </div>
@@ -166,6 +174,7 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
       onSelect={handleSelect}
       rowPadding="10px 16px"
       onCreate={handleCreate}
+      readOnly={readOnly}
       search={search}
       onSearchChange={setSearch}
       loading={loading}
@@ -173,12 +182,20 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
       listEmptyState={(
         <div style={{ padding: 20, textAlign: 'center' }}>
           <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>No groups yet</Text>
-          <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 12 }}>
-            Create groups to share permissions across multiple users.
-          </Text>
-          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={handleCreate}>
-            Create Group
-          </Button>
+          {readOnly ? (
+            <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+              Add groups under access.iam_groups in your YAML config and apply.
+            </Text>
+          ) : (
+            <>
+              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 12 }}>
+                Create groups to share permissions across multiple users.
+              </Text>
+              <Button type="primary" size="small" icon={<PlusOutlined />} onClick={handleCreate}>
+                Create Group
+              </Button>
+            </>
+          )}
         </div>
       )}
       renderRowBody={group => (
@@ -188,36 +205,40 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
             <Text strong style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
               {group.name}
             </Text>
-            <Button
-              type="text"
-              size="small"
-              icon={<CopyOutlined />}
-              title="Duplicate group"
-              onClick={(e) => {
-                e.stopPropagation();
-                void handleClone(group);
-              }}
-              style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0 }}
-              onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
-              onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
-            />
-            <Button
-              type="text"
-              danger
-              size="small"
-              icon={<DeleteOutlined />}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!window.confirm(`Delete group "${group.name}"? This cannot be undone.`)) return;
-                deleteMutation.mutate(group.id, {
-                  onSuccess: handleDeleted,
-                  onError: (err) => console.error('Delete group failed:', err),
-                });
-              }}
-              style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0 }}
-              onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
-              onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
-            />
+            {!readOnly && (
+              <>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<CopyOutlined />}
+                  title="Duplicate group"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleClone(group);
+                  }}
+                  style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0 }}
+                  onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
+                  onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
+                />
+                <Button
+                  type="text"
+                  danger
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!window.confirm(`Delete group "${group.name}"? This cannot be undone.`)) return;
+                    deleteMutation.mutate(group.id, {
+                      onSuccess: handleDeleted,
+                      onError: (err) => console.error('Delete group failed:', err),
+                    });
+                  }}
+                  style={{ opacity: 0.5, padding: '2px 4px', minWidth: 0 }}
+                  onMouseEnter={e => { e.currentTarget.style.opacity = '1'; }}
+                  onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; }}
+                />
+              </>
+            )}
           </div>
           <div style={{ marginLeft: 22, marginTop: 2 }}>
             <Text type="secondary" style={{ fontSize: 11 }}>
@@ -238,6 +259,8 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
 interface GroupFormProps {
   group: IamGroup | null;
   users: IamUser[];
+  /** Declarative IAM: disable all inputs, hide the Save/Delete row. */
+  readOnly?: boolean;
   /** Invoked on successful save. The `createdId` is supplied only on
    *  create (not edit) so the parent can select the new row. */
   onSaved: (createdId?: number) => void;
@@ -246,7 +269,7 @@ interface GroupFormProps {
   onSavingChange?: (saving: boolean) => void;
 }
 
-function GroupForm({ group, users, onSaved, onDeleted, onCancel, onSavingChange }: GroupFormProps) {
+function GroupForm({ group, users, readOnly = false, onSaved, onDeleted, onCancel, onSavingChange }: GroupFormProps) {
   const isEdit = group !== null;
   const { inputRadius } = useCardStyles();
 
@@ -353,24 +376,37 @@ function GroupForm({ group, users, onSaved, onDeleted, onCancel, onSavingChange 
   return (
     <div style={{ padding: '24px 28px', maxWidth: 600, overflow: 'auto', height: '100%' }}>
       <Title level={5} style={{ margin: '0 0 20px', fontFamily: 'var(--font-ui)' }}>
-        {isEdit ? `Edit: ${group?.name}` : 'Create New Group'}
+        {isEdit ? `${readOnly ? 'View' : 'Edit'}: ${group?.name}` : 'Create New Group'}
       </Title>
 
       {error && <Alert type="error" message={error} showIcon closable onClose={() => setError('')} style={{ marginBottom: 16, borderRadius: 8 }} />}
 
       <div style={{ marginBottom: 16 }}>
         <FormLabel text="Name" />
-        <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. developers" style={{ ...inputRadius }} />
+        <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. developers" disabled={readOnly} style={{ ...inputRadius }} />
       </div>
 
       <div style={{ marginBottom: 16 }}>
         <FormLabel text="Description" />
-        <Input value={description} onChange={e => setDescription(e.target.value)} placeholder="e.g. Development team access" style={{ ...inputRadius }} />
+        <Input value={description} onChange={e => setDescription(e.target.value)} placeholder="e.g. Development team access" disabled={readOnly} style={{ ...inputRadius }} />
       </div>
 
       <Divider style={{ margin: '16px 0 12px' }}>Permissions</Divider>
 
-      <PermissionEditor permissions={permissions} onChange={setPermissions} />
+      {/* See UserForm: fieldset+pointer-events make the deep editor read-only
+          without threading `disabled` through every inner control. */}
+      <fieldset
+        disabled={readOnly}
+        style={{
+          border: 'none',
+          margin: 0,
+          padding: 0,
+          minInlineSize: 'auto',
+          ...(readOnly ? { pointerEvents: 'none' as const, opacity: 0.85 } : {}),
+        }}
+      >
+        <PermissionEditor permissions={permissions} onChange={setPermissions} />
+      </fieldset>
 
       <Divider style={{ margin: '16px 0 12px' }}>Members</Divider>
 
@@ -389,11 +425,11 @@ function GroupForm({ group, users, onSaved, onDeleted, onCancel, onSavingChange 
                 gap: 10,
                 padding: '6px 4px',
                 borderRadius: 6,
-                cursor: 'pointer',
+                cursor: readOnly ? 'default' : 'pointer',
               }}
-              onClick={() => toggleMember(user.id)}
+              onClick={() => { if (!readOnly) toggleMember(user.id); }}
             >
-              <Checkbox checked={memberIds.has(user.id)} />
+              <Checkbox checked={memberIds.has(user.id)} disabled={readOnly} />
               <div style={{ flex: 1 }}>
                 <Text style={{ fontSize: 13 }}>{user.name}</Text>
                 <Text type="secondary" style={{ fontSize: 11, marginLeft: 8, fontFamily: 'var(--font-mono)' }}>
@@ -408,18 +444,20 @@ function GroupForm({ group, users, onSaved, onDeleted, onCancel, onSavingChange 
         </div>
       )}
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          {isEdit && (
-            <Button danger loading={deleting} disabled={deleting} onClick={async () => {
-              if (!window.confirm(`Delete group "${group?.name}"? This cannot be undone.`)) return;
-              await handleDelete();
-            }}>Delete Group</Button>
-          )}
-          {!isEdit && onCancel && <Button onClick={onCancel}>Cancel</Button>}
+      {!readOnly && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            {isEdit && (
+              <Button danger loading={deleting} disabled={deleting} onClick={async () => {
+                if (!window.confirm(`Delete group "${group?.name}"? This cannot be undone.`)) return;
+                await handleDelete();
+              }}>Delete Group</Button>
+            )}
+            {!isEdit && onCancel && <Button onClick={onCancel}>Cancel</Button>}
+          </div>
+          <Button type="primary" onClick={handleSave} loading={saving}>{isEdit ? 'Save' : 'Create Group'}</Button>
         </div>
-        <Button type="primary" onClick={handleSave} loading={saving}>{isEdit ? 'Save' : 'Create Group'}</Button>
-      </div>
+      )}
     </div>
   );
 }
