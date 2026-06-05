@@ -114,8 +114,8 @@ export function AccessOverview({ onNavigateAdmin, onSessionExpired }: OverviewPr
       value: iamMode,
       hint:
         config.iam_mode === 'declarative'
-          ? 'YAML is the source of truth; admin mutations return 403.'
-          : 'DB is the source of truth; YAML seeds on an empty DB.',
+          ? 'Your YAML config is the source of truth; user panels are read-only.'
+          : 'The GUI is the source of truth; YAML only seeds a brand-new database.',
       tone: declarativeMode ? 'warning' : 'normal',
     },
     {
@@ -145,9 +145,9 @@ export function AccessOverview({ onNavigateAdmin, onSessionExpired }: OverviewPr
     'configuration/access',
     {
       'configuration/access/credentials':
-        'Legacy SigV4 key pair, authentication mode selector, and the GUI ↔ Declarative IAM-mode toggle. Sets the context for everything else in Access.',
+        'The single fallback access key pair, the authentication mode, and the toggle between managing users in the GUI or in YAML. Sets the context for everything else in Access.',
       'configuration/access/users':
-        'IAM users with fine-grained S3 permissions via ABAC policies. Each user gets their own access key + secret for SigV4.',
+        'Individual users with fine-grained S3 permissions. Each user gets their own access key and secret.',
       'configuration/access/groups':
         'Assemble users into groups with shared permission policies. Members inherit the union of their groups\' permissions.',
       'configuration/access/ext-auth':

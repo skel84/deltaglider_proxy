@@ -109,7 +109,7 @@ export default function AccountMenu({
   const configLabel = configSection
     ? `${configSection.charAt(0).toUpperCase()}${configSection.slice(1)} section YAML`
     : 'Section YAML';
-  const settingsHelp = 'Runtime configuration only; excludes the encrypted IAM DB and full backup bundles.';
+  const settingsHelp = 'Just your settings — does not include users/groups or full backup bundles.';
   const iamHelp = 'Full IAM (users, groups, providers, rules). Export includes LIVE secrets — handle like a password file.';
   const confirmLogout = () => {
     if (window.confirm('Sign out? This will clear your credentials and return to the login screen.')) {

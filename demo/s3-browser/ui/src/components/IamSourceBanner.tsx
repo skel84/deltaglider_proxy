@@ -57,7 +57,7 @@ export default function IamSourceBanner({ iamMode, resource }: Props) {
     : `${capitalise(resource)} live in the encrypted database`;
 
   const summary = isDeclarative
-    ? `Admin-API ${resource} mutations return 403. Change ${resource} by editing access.iam_* in YAML and applying — the reconciler diffs YAML against the DB and applies creates/updates/deletes atomically.`
+    ? `This panel is read-only. To add, change, or remove ${resource}, edit your YAML config and apply it — DeltaGlider updates everything for you to match.`
     : `YAML exports do not include ${resource}. Take a Full Backup when you need everything in one file.`;
 
   return (

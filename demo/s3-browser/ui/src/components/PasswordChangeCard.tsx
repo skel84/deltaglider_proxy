@@ -39,7 +39,7 @@ export default function PasswordChangeCard() {
             The bootstrap password is a single infrastructure secret that serves three purposes:
           </Text>
           <ul style={{ margin: '8px 0', paddingLeft: 20 }}>
-            <li><strong>Encrypts the IAM database</strong> — user credentials are stored in an encrypted SQLCipher database, keyed by this password.</li>
+            <li><strong>Encrypts the user database</strong> — all user credentials are stored encrypted, locked with this password.</li>
             <li><strong>Signs admin session cookies</strong> — authenticates your browser session for this settings panel.</li>
             <li><strong>Gates admin access</strong> — before IAM users exist, this password is required to access settings.</li>
           </ul>

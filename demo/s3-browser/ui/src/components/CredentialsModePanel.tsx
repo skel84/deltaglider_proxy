@@ -129,23 +129,21 @@ export default function CredentialsModePanel({ onSessionExpired }: Props) {
         content: (
           <div style={{ fontSize: 13, lineHeight: 1.6 }}>
             <p>
-              In <code>declarative</code> mode the YAML config is the
-              source of truth for users, groups, and OAuth providers.
-              The admin API returns <b>403</b> for every IAM mutation
-              route — you can no longer create or edit users through
-              this GUI.
+              In <code>declarative</code> mode your YAML config becomes
+              the source of truth for users, groups, and OAuth providers.
+              The Users, Groups, and External authentication panels turn
+              read-only — you manage everyone by editing your YAML config
+              instead of clicking around this GUI.
             </p>
             <p style={{ marginTop: 8 }}>
-              The reconciler that sync-diffs the encrypted IAM database
-              to your YAML lands in Phase 3c.3. Until then,{' '}
-              <b>declarative mode is effectively a lockout</b> — the
-              DB stays as it was, but the GUI and admin API cannot
-              edit it.
+              Each time you apply your config, DeltaGlider updates the
+              user database to match it exactly — adding, changing, and
+              removing users, groups, and providers as needed.
             </p>
             <p style={{ marginTop: 8 }}>
-              Flip back to <code>gui</code> any time to restore mutation
-              access. This is a local form change only — nothing
-              persists until you click Apply.
+              Switch back to <code>gui</code> any time to edit users in
+              the GUI again. This is just a form change for now — nothing
+              takes effect until you click Apply.
             </p>
           </div>
         ),
@@ -213,10 +211,11 @@ export default function CredentialsModePanel({ onSessionExpired }: Props) {
               <div>
                 <div style={{ fontWeight: 600 }}>GUI-managed (default)</div>
                 <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.5 }}>
-                  The admin GUI and admin API write directly to the
-                  encrypted IAM database. Runtime changes to YAML
+                  You manage users right here in the admin GUI. Users you
+                  list under
                   <code style={{ margin: '0 4px' }}>access.users</code>
-                  are ignored. Recommended for solo and GUI-first setups.
+                  in YAML are ignored. Recommended for solo and GUI-first
+                  setups.
                 </Text>
               </div>
             </Radio>
@@ -224,11 +223,10 @@ export default function CredentialsModePanel({ onSessionExpired }: Props) {
               <div>
                 <div style={{ fontWeight: 600 }}>Declarative (YAML-authoritative)</div>
                 <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.5 }}>
-                  Your YAML document is the source of truth. Admin API
-                  IAM mutation routes return 403. Recommended for GitOps
-                  teams. <b>Heads up:</b> the reconciler that sync-diffs
-                  DB ↔ YAML lands in Phase 3c.3 — today this is an
-                  effective lockout until you flip back.
+                  Your YAML config is the source of truth. The user
+                  management panels turn read-only, and every time you
+                  apply your config DeltaGlider updates users, groups,
+                  and providers to match it. Recommended for GitOps teams.
                 </Text>
               </div>
             </Radio>

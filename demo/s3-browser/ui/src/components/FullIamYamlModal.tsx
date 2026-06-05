@@ -251,10 +251,10 @@ export function FullIamYamlModal({ open, mode, onClose, onApplied }: Props) {
         <Space direction="vertical" size="small" style={{ width: '100%' }}>
           <Paragraph type="secondary" style={{ marginBottom: 8 }}>
             Paste a full IAM YAML document (the output of <Text strong>Export
-            full IAM</Text>). Validate runs a server-side dry run and shows
-            exactly what would change. Apply reconciles the entire IAM set by
-            NAME in a single transaction — users / groups / providers / rules
-            absent from the YAML are <Text strong>deleted</Text>.
+            full IAM</Text>). Validate previews exactly what would change without
+            touching anything. Apply makes everyone match this document, all at
+            once — any users, groups, providers, or rules <Text strong>not</Text>{' '}
+            in the YAML are <Text strong>deleted</Text>.
           </Paragraph>
 
           <Input.TextArea

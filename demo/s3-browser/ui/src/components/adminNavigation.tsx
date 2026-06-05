@@ -103,7 +103,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
         label: 'Event outbox',
         icon: <DatabaseOutlined />,
         description:
-          'Durable object mutation events, delivery state, retry backoff, and failed webhook rows from the encrypted config DB.',
+          'A durable queue of object-change events: what was delivered, what is retrying, and any deliveries that failed.',
       },
     ],
   },
@@ -192,7 +192,7 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
             section: 'storage',
             dirtyKey: 'configuration/storage/replication',
             description:
-              'Object data replication between buckets and prefixes. Rules are storage config; runtime state lives in the encrypted config DB.',
+              'Copy objects automatically between buckets and prefixes. You define the rules here; DeltaGlider tracks each rule’s progress for you.',
           },
           {
             path: 'configuration/storage/lifecycle',

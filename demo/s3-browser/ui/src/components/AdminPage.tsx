@@ -961,7 +961,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
             <Alert
               type="warning"
               showIcon
-              message="Full Restore also attempts to restore the backup bootstrap password hash and will fail if it differs from this instance's encrypted config DB key."
+              message="Full Restore also tries to restore the backup's admin password and will fail if it doesn't match the admin password this instance was set up with."
             />
           )}
         </Space>

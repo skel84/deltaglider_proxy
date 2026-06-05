@@ -324,7 +324,7 @@ export default function EventOutboxPanel({ onSessionExpired }: Props) {
             delivery {deliveryActive ? 'active' : deliveryEnabled ? 'waiting' : 'off'}
           </Tag>
         </Space>
-        <Text type="secondary" style={{ fontSize: 12 }} title="Rows are stored in the encrypted config DB. Delivered rows are pruned by retention/count limits; pending and failed rows are kept because they are real queue state.">
+        <Text type="secondary" style={{ fontSize: 12 }} title="Events are stored safely until they're delivered. Delivered events are eventually cleaned up; pending and failed events are kept so they can still be retried.">
           Durable queue for S3 object changes
         </Text>
       </div>

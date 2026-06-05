@@ -744,7 +744,7 @@ export function ConfigDbSyncPanel({ onSessionExpired }: PanelProps) {
           <SectionHeader
             icon={<SyncOutlined />}
             title="Config DB sync"
-            description="For multi-instance deployments. Replicates the encrypted IAM database through an S3 bucket so every proxy instance shares the same users, groups, OAuth providers, and mapping rules."
+            description="For running more than one proxy instance. Shares the user database through an S3 bucket so every instance has the same users, groups, OAuth providers, and mapping rules."
           />
           <SyncStatusPill
             enabled={enabled}
@@ -761,7 +761,7 @@ export function ConfigDbSyncPanel({ onSessionExpired }: PanelProps) {
             </>
           }
           yamlPath="advanced.config_sync_bucket"
-          helpText="S3 bucket name on the default backend. All instances must point at the same bucket. Sync uses periodic full replacement — the newest ETag wins."
+          helpText="S3 bucket on the default backend where the user database is shared between instances. Every instance must point at the same bucket. Instances sync periodically — the most recently saved copy wins."
           examples={['dgp-iam-state', 'prod-dgp-config']}
           onExampleClick={(v) =>
             setValue({ ...value, config_sync_bucket: String(v) })
