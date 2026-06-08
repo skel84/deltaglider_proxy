@@ -59,6 +59,41 @@ fn prune_replay_cache(cache: &ReplayCache, replay_window: Duration, max_entries:
     }
 }
 
+/// What to do when a duplicate signature is seen within the replay window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayVerdict {
+    /// First time this signature has been seen (or the window expired) — let it through.
+    Fresh,
+    /// A duplicate of an idempotent read (GET/HEAD). Boto3 emits byte-identical
+    /// SigV4 signatures for the same request within one signing second (1s
+    /// timestamp granularity), and SDK auto-retries of an idempotent read are
+    /// safe by definition — replaying a GET/HEAD just re-reads the same bytes.
+    /// Allow the request to proceed; do NOT 400 and do NOT count it as a failure.
+    AllowIdempotentReplay,
+    /// A duplicate of a mutating method (PUT/POST/DELETE/…) within the window.
+    /// Replaying these has real side effects (double-write, double-delete), so
+    /// reject. This is the actual replay-attack surface the guard protects.
+    Reject,
+}
+
+/// Pure replay decision. `is_duplicate` is whether this signature was already
+/// present in the cache within the live window; `method` is the HTTP method.
+///
+/// The split is deliberate: a captured idempotent read replayed within the
+/// short window is harmless (it returns the same data), whereas a replayed
+/// mutation is not. Keeping this pure lets the full truth table be unit-tested
+/// without the HTTP/SigV4 stack (see the codebase testability conventions).
+pub fn replay_decision(method: &axum::http::Method, is_duplicate: bool) -> ReplayVerdict {
+    use axum::http::Method;
+    if !is_duplicate {
+        return ReplayVerdict::Fresh;
+    }
+    match *method {
+        Method::GET | Method::HEAD => ReplayVerdict::AllowIdempotentReplay,
+        _ => ReplayVerdict::Reject,
+    }
+}
+
 /// Request extension carrying the SigV4-signed payload hash from
 /// `x-amz-content-sha256`. Inserted by the SigV4 middleware after
 /// signature verification succeeds. Downstream handlers (specifically
@@ -632,6 +667,27 @@ pub async fn sigv4_auth_middleware(
         }
     };
 
+    // Replay rejection is NOT a credential failure: the signature is
+    // cryptographically valid, the request is just a duplicate within the
+    // window. We record it for observability (metrics + a distinct audit
+    // action) but deliberately do NOT feed the per-IP brute-force lockout —
+    // otherwise a retry-happy client holding a valid key could self-DoS its
+    // own production key. See beshu-tech/deltaglider_proxy#24.
+    let record_replay_rejection = {
+        let metrics = metrics.clone();
+        let audit_ip = audit_ip.clone();
+        let audit_ua = audit_ua.clone();
+        move || {
+            if let Some(m) = &metrics {
+                m.auth_failures_total.with_label_values(&["replay"]).inc();
+            }
+            info!(
+                "AUDIT | action=replay_rejected | user= | target=replay | ip={} | ua={} | bucket= | path=",
+                audit_ip, audit_ua
+            );
+        }
+    };
+
     // If config DB mismatch is active, reject ALL S3 requests.
     // The proxy must not serve data without authentication.
     if request
@@ -858,19 +914,19 @@ pub async fn sigv4_auth_middleware(
     // Skip replay detection for:
     // - Presigned URLs: designed to be reused (same signature for entire expiry window)
     //
-    // GET/HEAD requests USED to skip the cache (clients legitimately
-    // retry; rapid HEAD probes can share a signature within the same
-    // second). That left a captured signed GET replayable for the
-    // full `DGP_CLOCK_SKEW_SECONDS` window (default 300s) — the
-    // security review flagged this as the largest GET-side exfil
-    // amplifier. Now GET/HEAD share the same replay cache as
-    // mutating methods; the 2-second default window still tolerates
-    // typical retry shapes and operators can stretch
-    // `DGP_REPLAY_WINDOW_SECS` if their clients cluster more tightly.
+    // Method matters here. A replayed *mutation* (PUT/POST/DELETE) has real
+    // side effects, so it is rejected. A replayed *idempotent read* (GET/HEAD)
+    // is harmless — it re-reads the same bytes — and is the one pattern boto3
+    // produces unavoidably: SigV4 timestamps have 1-second granularity, so the
+    // SDK emits byte-identical signatures for the same request issued twice (or
+    // auto-retried) within one signing second. We keep GET/HEAD in the cache
+    // (so a captured signature can't be replayed for the full clock-skew window
+    // as it once could) but let same-window duplicates *pass through* instead
+    // of 400-ing. See `replay_decision` and beshu-tech/deltaglider_proxy#24.
     let is_presigned = has_presigned_query_params(request.uri().query().unwrap_or(""));
     if let Some(ref cache) = replay_cache {
         if is_presigned {
-            // No replay detection for presigned URLs
+            // No replay detection for presigned URLs (designed to be reused).
         } else {
             // Cap replay cache size to prevent memory exhaustion under attack.
             // First drop expired entries, then enforce a hard oldest-first cap.
@@ -888,12 +944,17 @@ pub async fn sigv4_auth_middleware(
 
             let sig = &params.signature;
 
-            let mut rejected = false;
+            // Atomic check-and-insert under the per-key shard lock: decide
+            // whether this signature is a live duplicate. Only RESET the
+            // timestamp once the window has expired — never on a duplicate hit,
+            // so the window is measured from first-seen and a tight retry loop
+            // can't keep an idempotent read's slot alive indefinitely.
+            let mut is_duplicate = false;
             cache
                 .entry(sig.clone())
                 .and_modify(|first_seen: &mut Instant| {
                     if first_seen.elapsed() < replay_window {
-                        rejected = true;
+                        is_duplicate = true;
                     } else {
                         // Window expired — reset so the slot can be reused.
                         *first_seen = Instant::now();
@@ -901,18 +962,35 @@ pub async fn sigv4_auth_middleware(
                 })
                 .or_insert_with(Instant::now);
 
-            if rejected {
-                warn!(
-                    "SigV4: replay detected — {} {} sig={}… (duplicate within {:?})",
-                    request.method(),
-                    request.uri().path(),
-                    &params.signature[..params.signature.len().min(12)],
-                    replay_window
-                );
-                record_auth_failure("replay");
-                return Err(
-                    S3Error::InvalidArgument("Request replay detected".to_string()).into_response(),
-                );
+            match replay_decision(request.method(), is_duplicate) {
+                ReplayVerdict::Fresh => {}
+                ReplayVerdict::AllowIdempotentReplay => {
+                    // Boto3 same-second signature on an idempotent read. Safe to
+                    // serve; log at debug only (not a security event) and do not
+                    // touch the lockout.
+                    debug!(
+                        "SigV4: idempotent-read replay tolerated — {} {} sig={}… (duplicate within {:?})",
+                        request.method(),
+                        request.uri().path(),
+                        &params.signature[..params.signature.len().min(12)],
+                        replay_window
+                    );
+                }
+                ReplayVerdict::Reject => {
+                    warn!(
+                        "SigV4: replay detected — {} {} sig={}… (duplicate within {:?})",
+                        request.method(),
+                        request.uri().path(),
+                        &params.signature[..params.signature.len().min(12)],
+                        replay_window
+                    );
+                    // Distinct from a credential failure: observability only, no lockout.
+                    record_replay_rejection();
+                    return Err(
+                        S3Error::InvalidArgument("Request replay detected".to_string())
+                            .into_response(),
+                    );
+                }
             }
         } // else (not presigned)
     }
@@ -1285,6 +1363,62 @@ mod tests {
         assert!(!cache.contains_key("expired"));
         assert!(cache.contains_key("fresh-1"));
         assert!(cache.contains_key("fresh-2"));
+    }
+
+    // ── replay_decision truth table (beshu-tech/deltaglider_proxy#24) ──
+    //
+    // A non-duplicate of ANY method is always Fresh. A duplicate of an
+    // idempotent read (GET/HEAD) is tolerated; a duplicate of any mutating
+    // method is rejected. This is the whole product decision — keep it pure.
+
+    #[test]
+    fn replay_first_sighting_is_fresh_for_every_method() {
+        use axum::http::Method;
+        for m in [
+            Method::GET,
+            Method::HEAD,
+            Method::PUT,
+            Method::POST,
+            Method::DELETE,
+            Method::PATCH,
+        ] {
+            assert_eq!(
+                replay_decision(&m, false),
+                ReplayVerdict::Fresh,
+                "first sighting of {m} should be Fresh"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_duplicate_idempotent_reads_are_tolerated() {
+        use axum::http::Method;
+        assert_eq!(
+            replay_decision(&Method::GET, true),
+            ReplayVerdict::AllowIdempotentReplay
+        );
+        assert_eq!(
+            replay_decision(&Method::HEAD, true),
+            ReplayVerdict::AllowIdempotentReplay
+        );
+    }
+
+    #[test]
+    fn replay_duplicate_mutations_are_rejected() {
+        use axum::http::Method;
+        for m in [
+            Method::PUT,
+            Method::POST,
+            Method::DELETE,
+            Method::PATCH,
+            Method::OPTIONS,
+        ] {
+            assert_eq!(
+                replay_decision(&m, true),
+                ReplayVerdict::Reject,
+                "duplicate {m} must be rejected"
+            );
+        }
     }
 
     // ── AWS-parity regression tests for anonymous LIST authz ──

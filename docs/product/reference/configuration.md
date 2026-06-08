@@ -551,7 +551,14 @@ SigV4 clock skew tolerance.
 
 ### `replay_window_secs`
 
-SigV4 replay detection window. Presigned URLs and idempotent methods (GET/HEAD) are exempt.
+SigV4 replay detection window. A request whose signature was already seen within this many seconds is treated as a replay.
+
+- **Mutating methods (PUT/POST/DELETE/…)** are rejected with `400 Request replay detected`.
+- **Idempotent reads (GET/HEAD)** are *tolerated*: a duplicate within the window is served normally rather than rejected. This is deliberate — boto3/botocore emit **byte-identical SigV4 signatures** for the same request issued (or auto-retried) within one signing second, because SigV4 timestamps have 1-second granularity. A replayed read just re-reads the same bytes, so there is no double-effect to guard against. The signature still stays in the cache, so a captured read signature can't be replayed past the window.
+- **Presigned URLs** are exempt entirely (they are designed to be reused for their whole expiry).
+- A replay rejection is **not** an authentication failure — the signature is valid — so it is audited as `replay_rejected` and does **not** count toward the per-IP brute-force lockout.
+
+Set `DGP_REPLAY_WINDOW_SECS=0` to disable replay rejection entirely (the window never matches). Useful in CI, or as an escape hatch if a client clusters mutations tighter than the default tolerates.
 
 | | |
 |---|---|
