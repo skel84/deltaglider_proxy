@@ -67,6 +67,9 @@ export default function FilePreview({ open, object, onClose }: FilePreviewProps)
     }
 
     return () => { cancelled = true; };
+    // `mode` and `tooLarge` are pure derivations of `object` (recomputed each
+    // render), so they're redundant given `object` — but listed explicitly to
+    // keep exhaustive-deps happy and to make the effect's read set self-evident.
   }, [open, object, mode, tooLarge]);
 
   const handleDownload = async () => {

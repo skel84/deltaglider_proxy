@@ -49,6 +49,11 @@ export default function ConnectPage({ onConnect, showError }: Props) {
   const [recoveryPassword, setRecoveryPassword] = useState('');
   const [recoveryLoading, setRecoveryLoading] = useState(false);
   const [recoveryError, setRecoveryError] = useState('');
+  // Seeded from sessionStorage once on mount and intentionally NOT refetched when
+  // `showRecovery` later flips true: a successful recovery survives a page refresh
+  // (whoami() still reports config_db_mismatch until the operator updates the server
+  // config), so the user keeps seeing the hash they need to copy. We must not clear it
+  // when re-entering the wizard or that recovered hash would be lost.
   const [recoveredHash, setRecoveredHash] = useState<{ hash: string; base64: string } | null>(() => {
     try {
       const saved = sessionStorage.getItem('dg-recovered-hash');
@@ -78,10 +83,14 @@ export default function ConnectPage({ onConnect, showError }: Props) {
     return { ok: true };
   }, []);
 
-  // Detect auth mode on mount — auto-connect in open mode, show recovery wizard if mismatch
+  // Detect auth mode on mount — auto-connect in open mode, show recovery wizard if mismatch.
+  // `cancelled` guards against setState after unmount / dep change while whoami() or
+  // runOpenModeConnect() are still pending (same pattern as DocsPage's Mermaid effect).
   useEffect(() => {
+    let cancelled = false;
     whoami()
       .then(async (info) => {
+        if (cancelled) return;
         setAuthMode(info.mode as 'bootstrap' | 'iam' | 'open');
         setExternalProviders(info.external_providers || []);
         if (info.config_db_mismatch) {
@@ -103,6 +112,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
             return;
           }
           const r = await runOpenModeConnect();
+          if (cancelled) return;
           if (!r.ok) {
             setDetecting(false);
             setError(r.error);
@@ -113,7 +123,12 @@ export default function ConnectPage({ onConnect, showError }: Props) {
         }
         setDetecting(false);
       })
-      .catch(() => setDetecting(false));
+      .catch(() => {
+        if (!cancelled) setDetecting(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [onConnect, runOpenModeConnect]);
 
   const handleConnect = async () => {

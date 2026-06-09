@@ -179,16 +179,11 @@ function HeroInner({
     };
     // We deliberately depend on the *targets*, not the motion values.
     // The animation re-runs when underlying totals change (e.g. cost
-    // preset switch updates dollars only, not the bar).
-  }, [
-    targetPercent,
-    targetDollars,
-    targetSavedWidth,
-    liveScanning,
-    percentMV,
-    dollarMV,
-    savedWidthMV,
-  ]);
+    // preset switch updates dollars only, not the bar). The motion
+    // values are stable refs from useMotionValue — touching them in the
+    // body doesn't (and shouldn't) re-trigger this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetPercent, targetDollars, targetSavedWidth, liveScanning]);
 
   // ─── Derived display values ──────────────────────────────────────
   const compressionRatio =

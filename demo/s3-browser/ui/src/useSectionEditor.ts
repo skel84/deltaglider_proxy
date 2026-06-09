@@ -33,7 +33,7 @@
  * `pick` is the optional filter. Provide it for subset editing;
  * leave it off for whole-section editing.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { message } from 'antd';
 import { useQueryClient } from '@tanstack/react-query';
 import type { SectionApplyResponse, SectionName } from './adminApi';
@@ -133,6 +133,21 @@ export function useSectionEditor<Wire, Local = Wire>(
   const { value, isDirty, setValue, discard, markApplied, resetWith } =
     useDirtySection<Local>(dirtyKey, initial);
 
+  // `initial` / `pick` / `resetWith` are *expected* stable across renders, but
+  // `refresh` must NOT carry them as deps: re-creating `refresh` re-fires the
+  // mount effect and re-fetches the section, which would clobber a dirty form.
+  // Mirror them into refs so `refresh` reads the current versions without
+  // closing over the first-render values (the stale-closure bug if a parent
+  // ever swaps these props).
+  const initialRef = useRef(initial);
+  const pickRef = useRef(pick);
+  const resetWithRef = useRef(resetWith);
+  useEffect(() => {
+    initialRef.current = initial;
+    pickRef.current = pick;
+    resetWithRef.current = resetWith;
+  });
+
   // Apply-dialog state. `pendingBody` captures the exact body that
   // went to /validate so confirmApply PUTs what the user saw (§F5).
   const [applyOpen, setApplyOpen] = useState(false);
@@ -144,15 +159,16 @@ export function useSectionEditor<Wire, Local = Wire>(
     try {
       setLoading(true);
       const body = await getSection<Wire>(section);
-      if (pick) {
+      const currentPick = pickRef.current;
+      if (currentPick) {
         // Caller converts wire → local outright (subset OR shape-change).
-        resetWith(pick(body));
+        resetWithRef.current(currentPick(body));
       } else {
         // Full-body edit path: local === wire. Merge incoming into
         // the initial so absent fields keep their form defaults
         // (e.g. a bare `{}` on a fresh install).
-        resetWith({
-          ...(initial as unknown as object),
+        resetWithRef.current({
+          ...(initialRef.current as unknown as object),
           ...(body as unknown as object),
         } as Local);
       }
@@ -166,8 +182,9 @@ export function useSectionEditor<Wire, Local = Wire>(
     } finally {
       setLoading(false);
     }
-    // `initial` / `resetWith` / `pick` are expected stable across renders.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // `initial` / `resetWith` / `pick` are read via refs (see above) so they
+    // stay current without forcing a refetch on every render — hence they're
+    // legitimately absent from the dep list.
   }, [section, onSessionExpired, noun]);
 
   useEffect(() => {

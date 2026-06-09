@@ -12,7 +12,7 @@
  * a copyable s3:// URI rather than performed here, since that's a
  * destructive operation we don't want one-click.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Typography, Button, Tag, Alert, Space, Select, InputNumber, Spin } from 'antd';
 import { ReloadOutlined, ThunderboltOutlined, CopyOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
@@ -85,6 +85,11 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Monotonic id stamped on each scan. A polling loop checks this
+  // against the latest id before publishing state, so a stale scan
+  // (e.g. bucket A still polling when the operator switches to bucket
+  // B) can't overwrite the newer scan's result. See runScan.
+  const scanIdRef = useRef(0);
 
   // Load bucket list on mount.
   useEffect(() => {
@@ -121,6 +126,7 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
    */
   const fetchOrPoll = async (
     forceRescan: boolean,
+    scanId: number,
   ): Promise<DeltaEfficiencyResponse | null> => {
     if (!bucket) return null;
     if (forceRescan) {
@@ -133,6 +139,9 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
     // If not, the server enqueues a scan and we get 202.
     while (Date.now() < deadline) {
       const r = await fetchDeltaEfficiency(bucket, minDeltas);
+      // A newer scan superseded us — stop polling and discard the
+      // result so it can't clobber the newer scan's state.
+      if (scanIdRef.current !== scanId) return null;
       if ('scanning' in r) {
         // Server is working on it. Wait briefly, then re-fetch.
         setScanning(true);
@@ -150,19 +159,29 @@ export default function DeltaEfficiencyPanel({ onSessionExpired }: Props) {
 
   const runScan = async (forceRescan = false) => {
     if (!bucket) return;
+    // Stamp this scan. Any older in-flight poll loop will see a newer
+    // id and bail before publishing, so out-of-order completions can't
+    // overwrite the latest scan's result.
+    const scanId = ++scanIdRef.current;
     setLoading(true);
     setError(null);
     if (forceRescan) setResponse(null);
     try {
-      const r = await fetchOrPoll(forceRescan);
+      const r = await fetchOrPoll(forceRescan, scanId);
+      if (scanIdRef.current !== scanId) return;
       if (r) setResponse(r);
     } catch (e) {
+      if (scanIdRef.current !== scanId) return;
       const msg = e instanceof Error ? e.message : String(e);
       if (/401|session/i.test(msg)) onSessionExpired?.();
       setError(`Scan failed: ${msg}`);
     } finally {
-      setLoading(false);
-      setScanning(false);
+      // Only the latest scan owns the shared loading/scanning flags;
+      // a superseded loop must not flip them off under the new scan.
+      if (scanIdRef.current === scanId) {
+        setLoading(false);
+        setScanning(false);
+      }
     }
   };
 

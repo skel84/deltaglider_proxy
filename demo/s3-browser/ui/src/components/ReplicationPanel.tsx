@@ -393,6 +393,16 @@ export default function ReplicationPanel({ onSessionExpired }: Props) {
               </Button>
             </div>
 
+            {isDirty && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginTop: 16 }}
+                message="Runtime stats reflect the applied configuration"
+                description="The status, recent runs, and failures below are for the last applied config — not your pending edits. Apply to refresh them."
+              />
+            )}
+
             <ReplicationRuntimeDetails history={history} failures={failures} />
           </>
         )}

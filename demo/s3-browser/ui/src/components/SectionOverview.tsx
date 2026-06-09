@@ -27,7 +27,7 @@
  * The component is presentation-only. Parents own the data
  * fetching + compute the stat / card content.
  */
-import type { ReactNode } from 'react';
+import { memo, type ReactNode } from 'react';
 import { RightOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 
@@ -86,7 +86,7 @@ interface Props {
   onNavigate: (path: string) => void;
 }
 
-export default function SectionOverview({
+function SectionOverview({
   title,
   description,
   icon,
@@ -231,7 +231,16 @@ export default function SectionOverview({
   );
 }
 
-function StatTile({ stat }: { stat: OverviewStat }) {
+/**
+ * Memoized so an unrelated re-render in a parent (AccessOverview,
+ * StorageOverview, …) doesn't re-render the whole overview tree.
+ * Presentation-only props; default shallow comparison is correct.
+ * StatTile / SubsectionCard below are memoized too so individual
+ * tiles/cards skip work when their own props are reference-stable.
+ */
+export default memo(SectionOverview);
+
+const StatTile = memo(function StatTile({ stat }: { stat: OverviewStat }) {
   const {
     BG_CARD,
     BORDER,
@@ -299,9 +308,9 @@ function StatTile({ stat }: { stat: OverviewStat }) {
       )}
     </div>
   );
-}
+});
 
-function SubsectionCard({
+const SubsectionCard = memo(function SubsectionCard({
   card,
   onNavigate,
 }: {
@@ -424,4 +433,4 @@ function SubsectionCard({
       </div>
     </button>
   );
-}
+});

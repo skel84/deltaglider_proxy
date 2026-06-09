@@ -238,8 +238,15 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
           <Button
             size="small"
             icon={<PlusOutlined />}
+            loading={rulesSaving}
             onClick={async () => {
               if (groups.length === 0) { message.warning('Create a group first'); return; }
+              // Disable the rule rows for the whole flush+create+refetch round-trip
+              // (same `rulesSaving` gate the Save Rules button uses). Without this,
+              // edits the operator types between flushPendingRules()'s setPendingRules({})
+              // and the create-triggered refetch land in pendingRules only to be
+              // clobbered by the incoming server snapshot — silently lost.
+              setRulesSaving(true);
               try {
                 // Flush any pending local edits before creating + refetching.
                 // Otherwise the refetch overwrites in-memory rule edits with the
@@ -253,6 +260,8 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
                 });
               } catch (e) {
                 message.error(e instanceof Error ? e.message : 'Failed');
+              } finally {
+                setRulesSaving(false);
               }
             }}
           >

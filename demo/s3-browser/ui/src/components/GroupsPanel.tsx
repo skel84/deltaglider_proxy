@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Button, Typography, Alert, Input, Divider, Checkbox } from 'antd';
 import { PlusOutlined, FolderOutlined, DeleteOutlined, CopyOutlined } from '@ant-design/icons';
 import type { IamGroup, IamUser } from '../adminApi';
@@ -41,8 +41,10 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
   // on success, so there's no manual loadData()-after-every-mutation reload.
   const groupsQuery = useGroups();
   const usersQuery = useUsers();
-  const groups = groupsQuery.data ?? [];
-  const users = usersQuery.data ?? [];
+  // Memoize so the `?? []` fallback doesn't hand a fresh array identity to the
+  // selection effect's dep list on every render (which would re-run it needlessly).
+  const groups = useMemo(() => groupsQuery.data ?? [], [groupsQuery.data]);
+  const users = useMemo(() => usersQuery.data ?? [], [usersQuery.data]);
   const loading = groupsQuery.isLoading || usersQuery.isLoading;
   const rawError = groupsQuery.error ?? usersQuery.error;
   const error = rawError ? (rawError instanceof Error ? rawError.message : 'Failed to load data') : '';
@@ -56,14 +58,19 @@ export default function GroupsPanel({ onSessionExpired, onSavingChange, initialG
     }
   }, [rawError, onSessionExpired]);
 
-  // Navigate to a specific group when coming from UserForm
+  // Navigate to a specific group when coming from UserForm. Only act once the
+  // requested group is actually present in the loaded list — checking
+  // groups.length alone would fire before the target row exists (and could
+  // select a stale id). find() uses strict === so prop-reference churn alone
+  // can't re-trigger a no-op selection.
   useEffect(() => {
-    if (initialGroupId != null && groups.length > 0) {
-      setSelectedId(initialGroupId);
-      setCreating(false);
-      onGroupSelected?.();
-    }
-  }, [initialGroupId, groups.length, onGroupSelected]);
+    if (initialGroupId == null) return;
+    const group = groups.find(g => g.id === initialGroupId);
+    if (!group) return;
+    setSelectedId(group.id);
+    setCreating(false);
+    onGroupSelected?.();
+  }, [initialGroupId, groups, onGroupSelected]);
 
   // Mutations used directly by the panel (the form gets its own). Each
   // invalidates qk.groups.list() (+ users) so the list refreshes automatically.

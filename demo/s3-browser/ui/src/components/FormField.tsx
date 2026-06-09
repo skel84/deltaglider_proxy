@@ -197,9 +197,9 @@ export default function FormField({
           )}
           {examples && examples.length > 0 && (
             <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
-              {examples.map((ex, i) => (
+              {examples.map((ex) => (
                 <button
-                  key={i}
+                  key={`ex-${ex}`}
                   type="button"
                   onClick={() => onExampleClick?.(ex)}
                   disabled={!onExampleClick}

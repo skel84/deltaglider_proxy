@@ -87,49 +87,61 @@ export default function AdmissionPanel({
     noun: 'admission blocks',
   });
 
-  // Modal state: when the operator clicks Add or Edit, we set
-  // `editing` to the index (or -1 for Add) and `editingBlock` to
-  // the block data (or null for Add).
-  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  // Modal state. The list passes us array indices, but indices go
+  // stale the instant an earlier insert/delete shifts the array (e.g.
+  // the operator opens Edit on row 2, then a queued mutation removes
+  // row 0 — index 2 now points at a different block). `AdmissionBlock.name`
+  // is unique (server-enforced) and is already the stable identity used
+  // for @dnd-kit + React keys throughout AdmissionBlockList, so we key
+  // editor state by name, not index. `ADD_SENTINEL` (rather than null)
+  // distinguishes "Add modal open" from "no modal".
+  const ADD_SENTINEL = '';
+  const [editingName, setEditingName] = useState<string | null>(null);
   const [editingBlock, setEditingBlock] = useState<AdmissionBlock | null>(null);
 
   const openAdd = () => {
-    setEditingIndex(-1);
+    setEditingName(ADD_SENTINEL);
     setEditingBlock(null);
   };
   const openEdit = (i: number) => {
-    setEditingIndex(i);
-    setEditingBlock(blocks[i]);
+    const block = blocks[i];
+    if (!block) return;
+    setEditingName(block.name);
+    setEditingBlock(block);
   };
   const closeEditor = () => {
-    setEditingIndex(null);
+    setEditingName(null);
     setEditingBlock(null);
   };
 
   const handleSave = (updated: AdmissionBlock) => {
-    if (editingIndex === null) return;
-    if (editingIndex < 0) {
+    if (editingName === null) return;
+    if (editingName === ADD_SENTINEL) {
       // Add
       setBlocks([...blocks, updated]);
     } else {
-      // Edit
-      const next = blocks.slice();
-      next[editingIndex] = updated;
-      setBlocks(next);
+      // Edit: replace the block whose name we opened. Resolving by name
+      // (not a captured index) means an intervening reorder/delete can't
+      // make us overwrite the wrong row. If the row vanished meanwhile,
+      // map() is a no-op and the stale edit is silently dropped.
+      setBlocks(blocks.map((b) => (b.name === editingName ? updated : b)));
     }
     closeEditor();
   };
 
   // Dedupe Modal.confirm: a rapid double-click on Delete must NOT
-  // queue two stacked modals — both would call `setBlocks` in order,
-  // dropping block `i` AND the block now at `i` (originally `i+1`).
-  // We guard with a ref that tracks whether ANY delete confirm is
-  // open; Modal.confirm's `afterClose` callback resets it.
+  // queue two stacked modals — both would call `setBlocks` in order
+  // and, with index-based splices, drop the wrong block. Keying the
+  // removal by name makes it idempotent (a second confirm filtering an
+  // already-gone name is a no-op), but we still guard with a ref so the
+  // operator never sees two stacked confirms.
   const deleteInFlightRef = useRef(false);
   const handleDelete = (i: number) => {
     if (deleteInFlightRef.current) return;
+    const block = blocks[i];
+    if (!block) return;
     deleteInFlightRef.current = true;
-    const name = blocks[i].name;
+    const name = block.name;
     Modal.confirm({
       title: `Remove block "${name}"?`,
       icon: <ExclamationCircleOutlined />,
@@ -139,9 +151,7 @@ export default function AdmissionPanel({
       okButtonProps: { danger: true },
       cancelText: 'Cancel',
       onOk: () => {
-        const next = blocks.slice();
-        next.splice(i, 1);
-        setBlocks(next);
+        setBlocks(blocks.filter((b) => b.name !== name));
       },
       afterClose: () => {
         deleteInFlightRef.current = false;
@@ -150,7 +160,7 @@ export default function AdmissionPanel({
   };
 
   const otherNames = blocks
-    .filter((_, i) => i !== editingIndex)
+    .filter((b) => b.name !== editingName)
     .map((b) => b.name);
 
   return (
@@ -241,7 +251,7 @@ export default function AdmissionPanel({
 
       {/* Editor modal */}
       <AdmissionBlockEditorModal
-        open={editingIndex !== null}
+        open={editingName !== null}
         initial={editingBlock}
         otherNames={otherNames}
         onCancel={closeEditor}

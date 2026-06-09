@@ -37,6 +37,12 @@ interface Props<T extends HasId> {
    * `remove()` drops it (by id). Both route through `onChange`, never a stale
    * closure. The consumer must key any inner controls it needs — the outer
    * `key={item.id}` is handled here.
+   *
+   * NOTE on large lists: every item re-renders whenever `items` changes (even
+   * if only one row's `id` was touched). This component intentionally does NOT
+   * memoize — it can't compare `T`s without a consumer-supplied equality fn. If
+   * `renderRow` is expensive, wrap it in `useCallback` and have it render a
+   * `React.memo`'d row component so unchanged rows skip re-render.
    */
   renderRow: (item: T, update: (patch: Partial<T>) => void, remove: () => void) => ReactNode;
   /** Factory for a fresh row (must mint a stable `id`). */

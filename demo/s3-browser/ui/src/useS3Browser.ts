@@ -468,7 +468,10 @@ export default function useS3Browser(options: UseS3BrowserOptions) {
   const [deltaSummary, setDeltaSummary] = useState<DeltaSummary | null>(null);
   useEffect(() => {
     if (!connected) return;
-    const bucket = getBucket();
+    // Use the URL-derived `bucket` prop (not the module-level getBucket()) so the
+    // fetched savings always match the bucket the URL is showing. Reading global
+    // state here raced the setBucket() sync effect: switching bucket A→B without
+    // changing prefix would fetch A's savings and commit them under B's view.
     if (!bucket) return;
     let cancelled = false;
     setDeltaSummary((prev) => (prev ? { ...prev, loading: true } : null));
@@ -490,7 +493,7 @@ export default function useS3Browser(options: UseS3BrowserOptions) {
     return () => {
       cancelled = true;
     };
-  }, [connected, prefix, refreshTrigger]);
+  }, [connected, bucket, prefix, refreshTrigger]);
 
   return {
     // Data

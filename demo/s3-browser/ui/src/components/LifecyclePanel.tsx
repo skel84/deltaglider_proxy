@@ -439,8 +439,18 @@ export default function LifecyclePanel({ onSessionExpired }: Props) {
               inputRadius={inputRadius}
               onChange={(patch) => updateRule(rule.name, patch)}
               onRename={(nextName) => {
-                updateRule(rule.name, { name: nextName });
+                const prevName = rule.name;
+                updateRule(prevName, { name: nextName });
                 setSelected(nextName);
+                // Carry the preview over to the new key so the renamed rule
+                // still shows its last preview instead of going blank.
+                setPreviews((prev) => {
+                  if (prevName === nextName || !prev[prevName]) return prev;
+                  const updated = { ...prev };
+                  updated[nextName] = updated[prevName];
+                  delete updated[prevName];
+                  return updated;
+                });
               }}
             />
 

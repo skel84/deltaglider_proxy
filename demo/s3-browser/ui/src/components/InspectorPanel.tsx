@@ -317,6 +317,14 @@ export default function InspectorPanel({
     return () => { cancelled = true; };
   }, [cachedHead, objectKey]);
 
+  // Clear any in-flight / completed download or share modal when the selected
+  // object changes. Otherwise a "Download ready" / "Share ready" modal opened
+  // for one object persists on top of a different object's drawer.
+  useEffect(() => {
+    setModalState(null);
+    blobRef.current = null;
+  }, [objectKey]);
+
   if (!object) return null;
 
   const fileName = getFileName(object.key);

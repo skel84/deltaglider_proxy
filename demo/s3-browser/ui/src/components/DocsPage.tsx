@@ -322,12 +322,13 @@ export default function DocsPage({ docId, onBack, accountMenu }: Props) {
             </div>
           ) : selectedDoc && (
             <article className="docs-content" style={{ flex: 1, minWidth: 0 }}>
-              {splitMermaid(selectedDoc.content).map((segment, i) =>
+              {splitMermaid(selectedDoc.content).map((segment) =>
                 segment.type === 'mermaid' ? (
-                  <Mermaid key={i} chart={segment.content} caption={segment.caption} />
+                  // Key by diagram content so reordering blocks doesn't reuse stale SVG state
+                  <Mermaid key={`mermaid-${segment.content}`} chart={segment.content} caption={segment.caption} />
                 ) : (
                   <ReactMarkdown
-                    key={i}
+                    key={`text-${segment.content}`}
                     remarkPlugins={[remarkGfm]}
                     rehypePlugins={[rehypeHighlight, rehypeSlug]}
                     components={{

@@ -23,14 +23,17 @@ function getModalTitle(mode: 'copy' | 'move', itemCount: number): string {
   return `${mode === 'move' ? 'Move' : 'Copy'} ${pluralize(itemCount, 'item')}`;
 }
 
-export default function DestinationPickerModal({ open, mode, itemCount, onConfirm, onCancel, loading }: Props) {
-  const colors = useColors();
-  /** Uppercase field caption shared by the bucket/path inputs. */
-  const SectionLabel = ({ children }: { children: React.ReactNode }) => (
-    <Text style={{ fontSize: 12, fontWeight: 600, color: colors.TEXT_MUTED, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 6 }}>
+/** Uppercase field caption shared by the bucket/path inputs. */
+function SectionLabel({ color, children }: { color: string; children: React.ReactNode }) {
+  return (
+    <Text style={{ fontSize: 12, fontWeight: 600, color, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 6 }}>
       {children}
     </Text>
   );
+}
+
+export default function DestinationPickerModal({ open, mode, itemCount, onConfirm, onCancel, loading }: Props) {
+  const colors = useColors();
   const [buckets, setBuckets] = useState<string[]>([]);
   const [destBucket, setDestBucket] = useState(getBucket());
   const [destPrefix, setDestPrefix] = useState('');
@@ -59,7 +62,7 @@ export default function DestinationPickerModal({ open, mode, itemCount, onConfir
       maskClosable={!loading}
     >
       <div style={{ marginBottom: 16 }}>
-        <SectionLabel>Destination Bucket</SectionLabel>
+        <SectionLabel color={colors.TEXT_MUTED}>Destination Bucket</SectionLabel>
         <SimpleSelect
           value={destBucket}
           onChange={setDestBucket}
@@ -70,7 +73,7 @@ export default function DestinationPickerModal({ open, mode, itemCount, onConfir
       </div>
 
       <div style={{ marginBottom: 16 }}>
-        <SectionLabel>Destination Path</SectionLabel>
+        <SectionLabel color={colors.TEXT_MUTED}>Destination Path</SectionLabel>
         <Input
           value={destPrefix}
           onChange={e => setDestPrefix(e.target.value)}

@@ -20,7 +20,7 @@
  *   * `whoami()` is NOT used — auth mode lives on the AdminConfig
  *     response as `auth_enabled`.
  */
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { TeamOutlined, CloudServerOutlined, SettingOutlined } from '@ant-design/icons';
 import { useAdminConfig } from '../queries/config';
 import { useUsers } from '../queries/users';
@@ -65,8 +65,13 @@ function useOverviewConfig(onSessionExpired?: () => void) {
   const { data, error: queryError, isError } = useAdminConfig();
   // getAdminConfig resolves to `null` on a non-OK (e.g. 401) response;
   // treat that as a session-expiry signal like the old effect did.
+  // Fire only on the non-null → null transition so a parent re-render that
+  // hands us a fresh `onSessionExpired` identity can't re-trigger the callback
+  // while `data` is unchanged (the ref guard makes the effect idempotent).
+  const prevDataRef = useRef(data);
   useEffect(() => {
-    if (data === null) onSessionExpired?.();
+    if (prevDataRef.current !== null && data === null) onSessionExpired?.();
+    prevDataRef.current = data;
   }, [data, onSessionExpired]);
   const config = data ?? null;
   const error = isError

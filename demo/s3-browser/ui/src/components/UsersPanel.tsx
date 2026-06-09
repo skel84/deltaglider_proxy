@@ -255,8 +255,11 @@ export default function UsersPanel({ onSessionExpired, onSavingChange, onNavigat
                     icon={<DeleteOutlined />}
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (!window.confirm(`Delete "${user.name}"? This cannot be undone.`)) return;
-                      deleteMutation.mutate(user.id, {
+                      // Capture this row's identity up front so the confirm dialog and
+                      // the mutation can't disagree if the list reorders mid-handler.
+                      const { id, name } = user;
+                      if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
+                      deleteMutation.mutate(id, {
                         onSuccess: handleDeleted,
                         onError: (err) => console.error('Delete user failed:', err),
                       });
