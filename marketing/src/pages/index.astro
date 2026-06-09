@@ -290,10 +290,9 @@ import {
       <h2>Try it in 30 seconds</h2>
 
       <pre><code>docker run -p 9000:9000 \
-  -e DGP_BACKEND=s3 \
   -e DGP_S3_ENDPOINT=https://your-backend \
-  -e AWS_ACCESS_KEY_ID=... \
-  -e AWS_SECRET_ACCESS_KEY=... \
+  -e DGP_BE_AWS_ACCESS_KEY_ID=... \
+  -e DGP_BE_AWS_SECRET_ACCESS_KEY=... \
   ghcr.io/beshu-tech/deltaglider_proxy:latest</code></pre>
 
       <p>

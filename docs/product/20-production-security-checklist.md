@@ -233,7 +233,8 @@ server {
 **DeltaGlider configuration:**
 
 ```bash
-# Trust proxy headers (default: true, safe behind reverse proxy)
+# Trust proxy headers (default: false — set true ONLY when behind a
+# trusted reverse proxy that sets X-Forwarded-For / X-Real-IP)
 DGP_TRUST_PROXY_HEADERS=true
 
 # Require HTTPS for session cookies
@@ -326,7 +327,7 @@ curl -s https://files.example.com/_/health
 | Admin | `DGP_BOOTSTRAP_PASSWORD_HASH` | Auto-generated | Set explicitly |
 | Rate limit | `DGP_RATE_LIMIT_MAX_ATTEMPTS` | 100 | 20-50 |
 | Rate limit | `DGP_RATE_LIMIT_LOCKOUT_SECS` | 600 | 1800-3600 |
-| Proxy | `DGP_TRUST_PROXY_HEADERS` | true | true (behind proxy) |
+| Proxy | `DGP_TRUST_PROXY_HEADERS` | false | true (behind proxy) |
 | Cookies | `DGP_SECURE_COOKIES` | true | true |
 | At-rest | `DGP_ENCRYPTION_KEY` | None (plaintext) | 64-char hex (optional) |
 | Debug | `DGP_DEBUG_HEADERS` | false | false |

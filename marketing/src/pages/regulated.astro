@@ -99,8 +99,8 @@ const description =
             is software, not a compliance regime.
           </li>
           <li>
-            <strong>"FIPS 140-3 validated"</strong> — we use ring/aes-gcm
-            crates which use OpenSSL or platform crypto. If you need FIPS,
+            <strong>"FIPS 140-3 validated"</strong> — we use the RustCrypto
+            <code>aes-gcm</code> crate for AES-256-GCM. If you need FIPS,
             ship the FIPS-validated crypto layer underneath us.
           </li>
           <li>

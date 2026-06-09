@@ -66,8 +66,8 @@ FROM debian:bookworm-slim
 LABEL org.opencontainers.image.title="DeltaGlider Proxy" \
       org.opencontainers.image.description="S3-compatible proxy with transparent delta compression" \
       org.opencontainers.image.vendor="DeltaGlider" \
-      org.opencontainers.image.source="https://github.com/sscarduzio/deltaglider-proxy" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.source="https://github.com/beshu-tech/deltaglider_proxy" \
+      org.opencontainers.image.licenses="GPL-3.0-only"
 
 # Install ca-certificates (HTTPS) and curl (healthcheck).
 # xdelta3 is copied from build stage to reduce apt dependency surface.

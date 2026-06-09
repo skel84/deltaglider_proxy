@@ -158,7 +158,8 @@ impl RateLimiter {
     /// Get the progressive delay for an IP based on failure count.
     /// Returns a duration to sleep before responding (makes brute force expensive).
     /// No delay for the first 10 failures (normal typos/misconfiguration).
-    /// After that, doubles each time: 100ms, 200ms, 400ms, 800ms, 1.6s, 3.2s, 5s.
+    /// After that, doubles each time from 200ms: 200ms (11), 400ms (12),
+    /// 800ms (13), 1.6s (14), 3.2s (15), then capped at 5s (16+).
     /// Capped at 5 seconds to avoid tying up connections forever.
     pub fn progressive_delay(&self, ip: &IpAddr) -> Duration {
         let entry = match self.entries.get(ip) {

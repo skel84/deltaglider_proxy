@@ -221,6 +221,24 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Server",
     },
     EnvVarEntry {
+        name: "DGP_MAX_TOTAL_MULTIPART_BYTES",
+        description: "Cap on total buffered multipart bytes across all uploads (default: unbounded)",
+        example: "1073741824",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_MULTIPART_IDLE_TTL_HOURS",
+        description: "Idle multipart upload TTL in hours before garbage collection (default: 24)",
+        example: "24",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_AUDIT_RING_SIZE",
+        description: "In-memory audit-log ring buffer capacity (default: 500)",
+        example: "500",
+        category: "Server",
+    },
+    EnvVarEntry {
         name: "DGP_CLOCK_SKEW_SECONDS",
         description: "SigV4 clock skew tolerance in seconds (default: 300)",
         example: "300",
@@ -2920,6 +2938,9 @@ mod tests {
             "DGP_MULTIPART_SWEEP_INTERVAL_SECS",     // main multipart sweeper cadence
             "DGP_MULTIPART_SWEEP_MAX_AGE_SECS",      // main multipart sweeper max-age cutoff
             "DGP_MULTIPART_COMPLETING_TIMEOUT_SECS", // main multipart Completing timeout
+            "DGP_MAX_TOTAL_MULTIPART_BYTES",         // multipart::max_total_multipart_bytes()
+            "DGP_MULTIPART_IDLE_TTL_HOURS",          // multipart::idle_ttl_hours()
+            "DGP_AUDIT_RING_SIZE",                   // audit::ring capacity
             "DGP_CLOCK_SKEW_SECONDS",                // api::auth + startup replay cache
             "DGP_MAX_CONCURRENT_REQUESTS",           // startup::build_s3_router()
             "DGP_CORS_PERMISSIVE",                   // demo::ui_router()

@@ -23,13 +23,12 @@ Failed auth attempts add an artificial delay to responses, making brute force ex
 | Failures | Delay |
 |----------|-------|
 | 1–10 | none |
-| 11 | 100ms |
-| 12 | 200ms |
-| 13 | 400ms |
-| 14 | 800ms |
-| 15 | 1.6s |
-| 16 | 3.2s |
-| 17+ | 5s (cap) |
+| 11 | 200ms |
+| 12 | 400ms |
+| 13 | 800ms |
+| 14 | 1.6s |
+| 15 | 3.2s |
+| 16+ | 5s (cap) |
 
 ### IP extraction
 
@@ -80,14 +79,15 @@ Returns 503 SlowDown when exceeded.
 
 ## Replay Detection Cache
 
-Prevents replay attacks by caching SigV4 signatures and rejecting duplicates within the clock skew window.
+Prevents replay attacks by caching SigV4 signatures and rejecting duplicates within the **replay window** (`DGP_REPLAY_WINDOW_SECS`, default 2s). This is independent of `DGP_CLOCK_SKEW_SECONDS` (300s), which governs how far a request timestamp may drift from the server clock during SigV4 verification — a different check.
 
 | Setting | Default | Env var |
 |---------|---------|---------|
-| Clock skew window | 300s | `DGP_CLOCK_SKEW_SECONDS` |
+| Replay window | 2s | `DGP_REPLAY_WINDOW_SECS` |
+| Clock skew tolerance | 300s | `DGP_CLOCK_SKEW_SECONDS` |
 | Max cache entries | 500,000 | — |
 
-When the cache exceeds 500K entries, expired signatures are evicted first. Duplicate signatures within the window are rejected with 403.
+A duplicate of a **mutating** request (PUT/POST/DELETE) within the window is rejected with 400. A duplicate of an **idempotent read** (GET/HEAD) is tolerated and served — boto3 emits byte-identical signatures for the same request within one signing second, and replaying a read just re-reads the same bytes. Replay rejections are **not** counted toward the auth-failure lockout. Set `DGP_REPLAY_WINDOW_SECS=0` to disable replay rejection entirely. When the cache exceeds 500K entries, expired signatures are evicted first.
 
 ## S3 Backend HEAD Concurrency
 
@@ -109,4 +109,5 @@ During LIST operations that require per-object metadata, the proxy issues HEAD r
 | `DGP_MAX_CONCURRENT_REQUESTS` | 1024 | Max in-flight HTTP requests |
 | `DGP_REQUEST_TIMEOUT_SECS` | 300 | Per-request timeout |
 | `DGP_MAX_MULTIPART_UPLOADS` | 1000 | Max concurrent multipart uploads |
-| `DGP_CLOCK_SKEW_SECONDS` | 300 | SigV4 timestamp tolerance / replay window |
+| `DGP_CLOCK_SKEW_SECONDS` | 300 | SigV4 request-timestamp drift tolerance |
+| `DGP_REPLAY_WINDOW_SECS` | 2 | SigV4 replay detection window (0 disables) |

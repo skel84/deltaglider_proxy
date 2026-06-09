@@ -179,7 +179,7 @@ If something doesn't behave as expected, check [Troubleshooting](41-troubleshoot
 ## Next steps
 
 - **Encrypt the backend.** Each backend carries an `encryption` block with four modes (`none`, `aes256-gcm-proxy`, `sse-kms`, `sse-s3`). Configure it in Admin → Storage → Backends, or add an `encryption: { mode: aes256-gcm-proxy, key: "${DGP_ENCRYPTION_KEY}" }` block to your YAML. See [reference/encryption-at-rest.md](reference/encryption-at-rest.md) for the decision tree and worked examples.
-- **Add IAM users.** The admin GUI at `/_/admin/users` — or via YAML + OAuth mapping rules. See [auth/31-sigv4-and-iam.md](auth/31-sigv4-and-iam.md).
+- **Add IAM users.** The admin GUI at `/_/admin/configuration/access/users` — or via YAML + OAuth mapping rules. See [auth/31-sigv4-and-iam.md](auth/31-sigv4-and-iam.md).
 - **Harden for production.** [20-production-security-checklist.md](20-production-security-checklist.md) covers SigV4, bootstrap password, rate limiting, TLS, and encryption at rest as a linear step-by-step.
 
 ## Related

@@ -90,7 +90,7 @@ All settings via environment variables:
 | `DGP_BE_AWS_ACCESS_KEY_ID` | *(unset)* | Backend S3 credentials |
 | `DGP_BE_AWS_SECRET_ACCESS_KEY` | *(unset)* | Backend S3 credentials |
 | `DGP_BOOTSTRAP_PASSWORD_HASH` | *(auto-generated)* | Bootstrap password bcrypt hash (encrypts IAM DB, signs session cookies, gates admin GUI). Base64-encoded form avoids `$` escaping in Docker. |
-| `DGP_LOG_LEVEL` | `deltaglider_proxy=debug` | Log filter (changeable at runtime via admin GUI) |
+| `DGP_LOG_LEVEL` | `deltaglider_proxy=debug,tower_http=debug` | Log filter (changeable at runtime via admin GUI) |
 | `DGP_CONFIG_SYNC_BUCKET` | *(unset)* | S3 bucket for encrypted-DB multi-instance sync |
 | `DGP_TLS_ENABLED` | `false` | Enable HTTPS |
 
@@ -119,19 +119,19 @@ The admin GUI is served at `/_/` on the same port as the S3 API:
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 9000 | HTTP/S | S3-compatible API + Admin GUI (`/_/`) + `/metrics` + `/health` + `/stats` |
+| 9000 | HTTP/S | S3-compatible API + Admin GUI (`/_/`) + `/_/metrics` + `/_/health` + `/_/stats` |
 
 ## Health Checks
 
 ```bash
 # S3 API health
-curl http://localhost:9000/health
+curl http://localhost:9000/_/health
 
 # Prometheus metrics
-curl http://localhost:9000/metrics
+curl http://localhost:9000/_/metrics
 
 # Storage stats (objects, savings %)
-curl http://localhost:9000/stats
+curl http://localhost:9000/_/stats
 ```
 
 The Docker image includes a built-in healthcheck on port 9000 (15s interval).

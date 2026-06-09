@@ -16,7 +16,6 @@ Conceptual reference and full policy syntax: [reference/authentication.md](../re
 If you haven't already, set bootstrap credentials in YAML:
 
 ```yaml
-# validate
 access:
   access_key_id: my-proxy-key
   secret_access_key: my-super-secret-key-change-me
