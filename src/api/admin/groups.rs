@@ -147,11 +147,10 @@ pub async fn clone_group(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            let names = db
-                .load_groups()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|g| g.name);
+            // Only the existing names matter for collision-avoidance, so use the
+            // lightweight name-only query rather than load_groups()'s per-group
+            // permission/member fan-out.
+            let names = db.load_group_names().unwrap_or_default().into_iter();
             next_copy_name(&source.name, names)
         });
     let copy_members = body.map(|b| b.copy_members).unwrap_or(false);

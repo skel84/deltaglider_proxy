@@ -82,6 +82,18 @@ impl ConfigDb {
         Ok(result)
     }
 
+    /// Load just the group names — a single `SELECT name FROM groups` with
+    /// none of the per-group permission/member fan-out that [`load_groups`]
+    /// does. Used where only the existing names matter (e.g. picking a
+    /// non-colliding auto-name when cloning a group).
+    pub fn load_group_names(&self) -> Result<Vec<String>, ConfigDbError> {
+        let mut stmt = self.conn.prepare("SELECT name FROM groups")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(names)
+    }
+
     /// Get a single group by ID with permissions and members.
     pub fn get_group_by_id(&self, group_id: i64) -> Result<Group, ConfigDbError> {
         let (id, name, description, created_at) = self.conn.query_row(
