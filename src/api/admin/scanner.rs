@@ -83,10 +83,16 @@ pub async fn get_usage(
     match state.usage_scanner.get(&q.bucket, &prefix) {
         Some(entry) => (StatusCode::OK, Json(serde_json::json!(entry))).into_response(),
         None => {
+            // "Not cached yet" is an expected state (no scan has run, or the
+            // result expired), NOT an error. Returning 404 made the browser log
+            // a red network error for a benign condition. Return 200 with
+            // `cached: false` so the client can treat it as "no data yet"
+            // without a console trace. (Mirrors the reasoning behind
+            // delta_efficiency's 202 — 404/"not found" is the wrong semantic.)
             let scanning = state.usage_scanner.is_scanning(&q.bucket, &prefix);
             (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "not_cached", "scanning": scanning})),
+                StatusCode::OK,
+                Json(serde_json::json!({"cached": false, "scanning": scanning})),
             )
                 .into_response()
         }

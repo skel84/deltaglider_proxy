@@ -23,13 +23,16 @@ export async function scanPrefixUsage(bucket: string, prefix: string): Promise<v
   if (!res.ok) await throwApiError(res, 'Prefix usage scan');
 }
 
-/** Get cached usage entry for a bucket/prefix, or null if not cached. */
+/** Get cached usage entry for a bucket/prefix, or null if not cached yet. */
 export async function getPrefixUsage(bucket: string, prefix: string): Promise<UsageEntry | null> {
   const params = new URLSearchParams({ bucket, prefix });
   const res = await adminFetch(`/api/admin/usage?${params}`);
-  if (res.status === 404) return null;
   if (!res.ok) await throwApiError(res, 'Usage query');
-  return safeJson(res);
+  // The server returns 200 `{ cached: false }` for the not-yet-scanned case
+  // (a benign state, not a 404 — keeps the console clean).
+  const body = await safeJson(res);
+  if (!body || (body as { cached?: boolean }).cached === false) return null;
+  return body as UsageEntry;
 }
 
 /**
