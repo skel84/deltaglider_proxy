@@ -929,4 +929,83 @@ mod tests {
             Some("real-archive")
         );
     }
+
+    // Regression: a bucket on a NON-default backend, routed by an explicit
+    // policy WITHOUT an alias (real_bucket == virtual name), where the default
+    // backend does NOT have that bucket. Mirrors the prod repro
+    // "create test-localfs-bucket on localfs" — origins must report `localfs`,
+    // not the default backend.
+    #[tokio::test]
+    async fn list_bucket_origins_reports_non_default_backend_no_alias() {
+        let primary = Arc::new(
+            Box::new(TestBackend::with_buckets(&["only-on-primary"])) as Box<dyn StorageBackend>,
+        );
+        let secondary = Arc::new(
+            Box::new(TestBackend::with_buckets(&["only-on-secondary"])) as Box<dyn StorageBackend>,
+        );
+        let mut backends = HashMap::new();
+        backends.insert("primary".to_string(), primary);
+        backends.insert("secondary".to_string(), secondary);
+        // Explicit route, NO alias: virtual name == real bucket name.
+        let mut routes = HashMap::new();
+        routes.insert(
+            "only-on-secondary".to_string(),
+            ("secondary".to_string(), None),
+        );
+
+        let routing = RoutingBackend::new(backends, routes, "primary".to_string())
+            .expect("routing backend");
+        let origins = routing.list_bucket_origins().await.expect("origins");
+        let by_name: HashMap<_, _> = origins
+            .iter()
+            .map(|b| (b.name.as_str(), b))
+            .collect();
+
+        assert_eq!(
+            by_name["only-on-secondary"].backend_name.as_deref(),
+            Some("secondary"),
+            "a bucket living only on a non-default backend (routed, no alias) must be \
+             attributed to that backend, not the default"
+        );
+    }
+
+    // Regression for the real prod bug: the engine holds its storage as a
+    // `Box<dyn StorageBackend>`. The blanket `impl StorageBackend for
+    // Box<dyn StorageBackend>` must FORWARD list_bucket_origins to the inner
+    // backend — if it falls through to the trait default, every bucket comes
+    // back with `backend_name: None` and the admin API mis-attributes them all
+    // to the default backend. This test calls through the Box exactly like the
+    // engine does.
+    #[tokio::test]
+    async fn list_bucket_origins_forwards_through_box_dyn() {
+        let primary = Arc::new(
+            Box::new(TestBackend::with_buckets(&["on-primary"])) as Box<dyn StorageBackend>,
+        );
+        let secondary = Arc::new(
+            Box::new(TestBackend::with_buckets(&["on-secondary"])) as Box<dyn StorageBackend>,
+        );
+        let mut backends = HashMap::new();
+        backends.insert("primary".to_string(), primary);
+        backends.insert("secondary".to_string(), secondary);
+        let mut routes = HashMap::new();
+        routes.insert("on-secondary".to_string(), ("secondary".to_string(), None));
+        let routing = RoutingBackend::new(backends, routes, "primary".to_string())
+            .expect("routing backend");
+
+        // Box it, exactly as DeltaGliderEngine stores its storage.
+        let boxed: Box<dyn StorageBackend> = Box::new(routing);
+        let origins = boxed.list_bucket_origins().await.expect("origins via box");
+        let by_name: HashMap<_, _> = origins.iter().map(|b| (b.name.as_str(), b)).collect();
+
+        assert_eq!(
+            by_name["on-secondary"].backend_name.as_deref(),
+            Some("secondary"),
+            "list_bucket_origins must forward through Box<dyn StorageBackend>, not fall back \
+             to the default impl that drops backend attribution"
+        );
+        assert_eq!(
+            by_name["on-primary"].backend_name.as_deref(),
+            Some("primary"),
+        );
+    }
 }

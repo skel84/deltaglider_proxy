@@ -469,6 +469,15 @@ macro_rules! impl_storage_backend_for_box {
             ) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>, StorageError> {
                 (**self).list_buckets_with_dates().await
             }
+            // MUST forward to the inner backend's override — otherwise a
+            // `Box<dyn StorageBackend>` (the engine's storage type) would fall
+            // through to the trait DEFAULT impl, which returns
+            // `backend_name: None` for every bucket and erases the routing
+            // layer's per-bucket backend attribution. That made the admin
+            // bucket-origins API mis-report every bucket as the default backend.
+            async fn list_bucket_origins(&self) -> Result<Vec<BucketListing>, StorageError> {
+                (**self).list_bucket_origins().await
+            }
             async fn head_bucket(&self, bucket: &str) -> Result<bool, StorageError> {
                 (**self).head_bucket(bucket).await
             }
