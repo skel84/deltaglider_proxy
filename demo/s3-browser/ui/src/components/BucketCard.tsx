@@ -17,7 +17,6 @@ import { DeleteOutlined } from '@ant-design/icons';
 import type { BackendInfo } from '../adminApi';
 import { resolveBackendFor, describeEncryption } from '../encryptionUi';
 import { useColors } from '../ThemeContext';
-import SimpleSelect from './SimpleSelect';
 import SimpleAutoComplete from './SimpleAutoComplete';
 import { formRow } from './ruleEditorHelpers';
 import type { BucketPolicyRow, PrefixEntry } from './bucketPolicyPayload';
@@ -81,18 +80,28 @@ export default function BucketCard({
           style={{ flex: 1 }}
         />
         {backends.length > 0 && (
-          <SimpleSelect
+          <Select
             value={row.backend}
             onChange={(v) => onChange({ backend: v })}
             placeholder="Route to..."
             allowClear
             size="small"
+            showSearch
+            optionFilterProp="label"
             style={{ width: 170 }}
             options={backends.map((b) => ({
               value: b.name,
               label: b.name,
               sublabel: b.backend_type,
             }))}
+            optionRender={(opt) => (
+              <div>
+                <div>{opt.data.label}</div>
+                {opt.data.sublabel && (
+                  <div style={{ fontSize: 11, opacity: 0.65 }}>{opt.data.sublabel}</div>
+                )}
+              </div>
+            )}
           />
         )}
         <Button

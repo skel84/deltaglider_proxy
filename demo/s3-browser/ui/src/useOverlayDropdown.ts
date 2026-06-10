@@ -4,9 +4,12 @@ import { useEscapeKey, useOnClickOutside } from './useDocumentEvent';
 import { useFixedOverlayPosition } from './useFixedOverlayPosition';
 
 /**
- * Shared fixed-overlay lifecycle for the app's hand-rolled dropdowns
- * (`SimpleSelect`, `SimpleAutoComplete`) that bypass Ant Design's broken
- * popup layer. Owns the trigger ref, the overlay element handle (as state
+ * Shared fixed-overlay lifecycle for `SimpleAutoComplete` — the app's
+ * hand-rolled free-text-with-suggestions input. (Plain selects use AntD
+ * <Select> directly; the old SimpleSelect fork was removed once we confirmed
+ * AntD 6's Select popup works fine here — it never injected the body
+ * scroll-lock that motivated the fork.) Owns the trigger ref, the overlay
+ * element handle (as state
  * so `useFixedOverlayPosition` can flip-above on first paint), anchored
  * positioning, click-outside close, and optional escape-to-close.
  *

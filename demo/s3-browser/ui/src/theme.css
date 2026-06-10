@@ -930,9 +930,27 @@ body {
   pointer-events: auto;
 }
 
-/* ───── Accessibility: respect reduced motion ───── */
+/* ───── Accessibility: respect reduced motion ─────
+ *
+ * Crush our OWN decorative animations/transitions, but DO NOT touch Ant
+ * Design's popup-motion classes. AntD popups (Select/Dropdown/DatePicker
+ * etc.) position themselves via rc-motion: the entrance transition drives
+ * the appear-prepare → appear-active phase that moves the popup from its
+ * off-screen measurement position to its final on-screen coordinates.
+ * Forcing `transition-duration: 0.01ms !important` on those classes stalls
+ * rc-motion in the prepare phase, leaving the popup stranded ~10000px
+ * off-screen (invisible). This was the real cause of the "AntD dropdowns
+ * don't open" malfunction — NOT a portal/transform bug. AntD already
+ * honours the OS reduced-motion preference internally, so excluding its
+ * motion classes here is correct, not a regression.
+ *
+ * `:not([class*="ant-"])` keeps the blanket reset off every AntD-animated
+ * element; our own components don't use the `ant-` class prefix.
+ */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *:not([class*="ant-"]),
+  *:not([class*="ant-"])::before,
+  *:not([class*="ant-"])::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

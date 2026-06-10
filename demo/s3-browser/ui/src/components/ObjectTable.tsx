@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Table, Typography, Alert, Progress, Checkbox, theme, Button } from 'antd';
+import { Table, Typography, Alert, Progress, Checkbox, theme, Button, Select } from 'antd';
 import { FolderOutlined, FileOutlined, LoadingOutlined, CalculatorOutlined, CloseCircleOutlined, WarningOutlined } from '@ant-design/icons';
 import type { S3Object } from '../types';
 import { formatBytes, displayName, timeAgo } from '../utils';
@@ -11,7 +11,6 @@ import { getPreviewMode } from './filePreviewMode';
 import { canRequestPrefixUsageScan, isVirtualFolderPrefix } from '../permissions';
 import { usePersistedPageSize } from '../usePersistedPageSize';
 import { clampPageToData, describeVisibleRange } from '../paginationLabels';
-import SimpleSelect from './SimpleSelect';
 import StorageTypeTag from './StorageTypeTag';
 
 const { Text } = Typography;
@@ -414,16 +413,9 @@ export default function ObjectTable({
         />
       )}
       {/*
-        AntD's Pagination size-changer (a portalled <Select>) triggers
-        @rc-component/portal's useScrollLocker the moment its dropdown
-        opens, injecting `body { overflow-y: hidden; width: calc(100%
-        - 6px) }`. On a 600-row table the body is scrolling, so the
-        width compensation kicks in and the layout shakes 5-6 px on
-        every open/close. Wrapping in a custom getPopupContainer
-        didn't help in practice — AntD popups have multiple portal
-        paths and one of them still hit body. We avoid the entire
-        problem by disabling AntD's size-changer and rendering our
-        own SimpleSelect (portal-free, no rc-util) in the status bar.
+        AntD's built-in Pagination size-changer is disabled; we render
+        a standalone <Select> for "Rows per page" in the status bar
+        below so the range readout and the size picker live together.
       */}
       <div style={{ flex: 1, overflow: 'auto' }}>
         <Table<RowData>
@@ -435,7 +427,7 @@ export default function ObjectTable({
             pageSize,
             current: currentPage,
             onChange: (page) => setCurrentPage(page),
-            // Size changer disabled — we render our own SimpleSelect
+            // Size changer disabled — we render our own Select
             // in the status bar below.
             showSizeChanger: false,
             size: 'small',
@@ -490,10 +482,7 @@ export default function ObjectTable({
           the page-size dropdown. */}
       {/*
         Footer row: aria-live range readout on the left, page-size
-        SimpleSelect on the right. Our own SimpleSelect avoids the
-        AntD/rc-util portal entirely, so opening it can't trigger the
-        scroll-locker that shook the layout when we used the built-in
-        Pagination size-changer.
+        Select on the right.
       */}
       <div
         style={{
@@ -523,7 +512,7 @@ export default function ObjectTable({
           }}
         >
           <span>Rows per page</span>
-          <SimpleSelect
+          <Select
             size="small"
             value={String(pageSize)}
             onChange={(v) => {

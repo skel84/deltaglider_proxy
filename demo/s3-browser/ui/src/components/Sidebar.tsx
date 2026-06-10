@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Layout, Button, Typography, Input, Drawer, theme, message, Modal } from 'antd';
+import { Layout, Button, Typography, Input, Drawer, theme, message, Modal, Select } from 'antd';
 import type { InputRef } from 'antd';
 import {
   PlusOutlined,
@@ -21,7 +21,6 @@ import { useColors } from '../ThemeContext';
 import BucketBackendBadge from './BucketBackendBadge';
 import { getBackends } from '../adminApi';
 import type { BackendInfo } from '../adminApi';
-import SimpleSelect from './SimpleSelect';
 
 const { Sider } = Layout;
 const { Text } = Typography;
@@ -487,7 +486,7 @@ export default function Sidebar({
       />
       {canAdmin && createBucketBackends.length > 1 && (
         <div style={{ marginTop: 12 }}>
-          <SimpleSelect
+          <Select
             value={selectedBackend}
             onChange={(value) => setSelectedBackend(value || undefined)}
             options={createBucketBackends.map((backend) => ({
@@ -495,6 +494,14 @@ export default function Sidebar({
               label: backend.name,
               sublabel: backend.backend_type,
             }))}
+            optionRender={(opt) => (
+              <div>
+                <div>{opt.data.label}</div>
+                {opt.data.sublabel && <div style={{ fontSize: 11, opacity: 0.65 }}>{opt.data.sublabel}</div>}
+              </div>
+            )}
+            showSearch
+            optionFilterProp="label"
             placeholder="Choose backend"
             style={{ width: '100%' }}
             size="middle"

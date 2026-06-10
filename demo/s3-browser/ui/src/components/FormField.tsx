@@ -22,7 +22,7 @@
  * ## Intentional constraints
  *
  * - **Does not render the input itself.** Callers pass whatever input
- *   they need (`<Input>`, `<InputNumber>`, `<Switch>`, `<SimpleSelect>`,
+ *   they need (`<Input>`, `<InputNumber>`, `<Switch>`, `<Select>`,
  *   `<Radio.Group>`) as children. FormField owns the chrome; the caller
  *   owns control behaviour. Keeps FormField free of input-type branches.
  * - **Placeholder ≠ value.** The `defaultPlaceholder` prop is a label

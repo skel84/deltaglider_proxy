@@ -2,12 +2,13 @@ import type { useColors } from '../ThemeContext';
 
 /**
  * Shared visual constants + base-style builder for the app's
- * custom fixed-position overlays (SimpleSelect / SimpleAutoComplete
- * dropdowns, HoverHint tooltips). All three bypass Ant Design's
- * popup layer (broken in this layout) and render a `position: fixed`
- * div anchored via `getBoundingClientRect`. They previously hand-
- * rolled identical shadow / z-index / radius literals — collapsed
- * here so the look stays consistent and tweaks land in one place.
+ * custom fixed-position overlays (SimpleAutoComplete dropdown,
+ * HoverHint tooltip). Both render a `position: fixed` div anchored
+ * via `getBoundingClientRect` — a deliberate choice for these two
+ * free-text/hover surfaces, NOT a blanket rejection of AntD popups
+ * (plain selects use AntD <Select>). They previously hand-rolled
+ * identical shadow / z-index / radius literals — collapsed here so
+ * the look stays consistent and tweaks land in one place.
  */
 
 /** Drop shadow for floating overlays (no blur radius variance — flat soft shadow). */

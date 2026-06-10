@@ -1,6 +1,5 @@
-import { Button, Typography, Input } from 'antd';
+import { Button, Typography, Input, Select } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
-import SimpleSelect from './SimpleSelect';
 import type { AuthProvider, MappingRule, IamGroup } from '../adminApi';
 import { useColors } from '../ThemeContext';
 
@@ -34,7 +33,7 @@ export default function MappingRuleRow({ rule, providers, groups, colors, onUpda
       flexWrap: 'wrap',
     }}>
       <Text style={{ fontSize: 12, color: colors.TEXT_MUTED, whiteSpace: 'nowrap' }}>When</Text>
-      <SimpleSelect
+      <Select
         size="small"
         disabled={disabled}
         value={rule.match_type}
@@ -69,16 +68,20 @@ export default function MappingRuleRow({ rule, providers, groups, colors, onUpda
         }
       />
       <Text style={{ fontSize: 12, color: colors.TEXT_MUTED, whiteSpace: 'nowrap' }}>assign to</Text>
-      <SimpleSelect
+      <Select
         size="small"
+        showSearch
+        optionFilterProp="label"
         disabled={disabled}
         value={String(rule.group_id)}
         onChange={v => onUpdate({ group_id: Number(v) })}
         options={groups.map(g => ({ value: String(g.id), label: g.name }))}
         style={{ width: 140 }}
       />
-      <SimpleSelect
+      <Select
         size="small"
+        showSearch
+        optionFilterProp="label"
         disabled={disabled}
         value={String(rule.provider_id ?? 0)}
         onChange={v => onUpdate({ provider_id: Number(v) === 0 ? null : Number(v) })}
@@ -87,7 +90,6 @@ export default function MappingRuleRow({ rule, providers, groups, colors, onUpda
           ...providers.map(p => ({ value: String(p.id), label: p.display_name || p.name })),
         ]}
         style={{ width: 130 }}
-
       />
       <Button size="small" danger disabled={disabled} icon={<DeleteOutlined />} onClick={onDelete} />
     </div>

@@ -1,4 +1,4 @@
-import { Alert, Input, InputNumber, Switch, Tag, Typography } from 'antd';
+import { Alert, Input, InputNumber, Select, Switch, Tag, Typography } from 'antd';
 import type {
   LifecycleRuleConfig,
   LifecycleRuleOverview,
@@ -7,7 +7,6 @@ import BucketPrefixInput from './BucketPrefixInput';
 import FormField from './FormField';
 import { AdvancedDisclosure } from './ruleEditorFields';
 import { fmtUnix, lineList, lines } from './ruleEditorHelpers';
-import SimpleSelect from './SimpleSelect';
 import { actionKind } from './lifecyclePayload';
 import { statusTone } from './lifecycleHelpers';
 
@@ -118,7 +117,7 @@ export default function RuleEditor({
           yamlPath="storage.lifecycle.rules[].action"
           helpText="What to do with expired candidates: delete them, or archive/move them through the engine to another bucket."
         >
-          <SimpleSelect
+          <Select
             value={actionKind(rule.action)}
             onChange={(value) => {
               if (value === 'transition') {
@@ -137,6 +136,14 @@ export default function RuleEditor({
               { value: 'delete', label: 'Delete', sublabel: 'Expire source objects' },
               { value: 'transition', label: 'Archive / move', sublabel: 'Copy first, optional source delete' },
             ]}
+            optionRender={(opt) => (
+              <div>
+                <div>{opt.data.label}</div>
+                {opt.data.sublabel && (
+                  <div style={{ fontSize: 11, opacity: 0.65 }}>{opt.data.sublabel}</div>
+                )}
+              </div>
+            )}
             style={{ width: '100%', ...inputRadius }}
           />
         </FormField>

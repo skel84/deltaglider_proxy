@@ -4,7 +4,7 @@ import { useFixedOverlayPosition } from '../useFixedOverlayPosition';
 import { BORDER_RADIUS, OVERLAY_SHADOW, Z_INDEX_OVERLAY } from './overlayStyles';
 
 /**
- * Self-contained tooltip. Sibling pattern to SimpleSelect: pure
+ * Self-contained tooltip. Sibling pattern to SimpleAutoComplete: pure
  * React + `position: fixed` overlay anchored via
  * `getBoundingClientRect`. Bypasses AntD's `<Tooltip>` entirely
  * because this app suppresses all `.ant-tooltip` rendering at the

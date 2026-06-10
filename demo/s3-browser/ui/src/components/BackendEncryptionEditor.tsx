@@ -16,7 +16,7 @@
  * sibling config.
  */
 import { useState } from 'react';
-import { Alert, Button, Checkbox, Input, Space, Typography, message } from 'antd';
+import { Alert, Button, Checkbox, Input, Select, Space, Typography, message } from 'antd';
 import {
   LockOutlined,
   SafetyOutlined,
@@ -25,7 +25,6 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons';
 import type { BackendEncryptionSummary, BackendEncryptionMode } from '../adminApi';
-import SimpleSelect from './SimpleSelect';
 import { useColors } from '../ThemeContext';
 import { useCardStyles } from './shared-styles';
 import { generateAesKeyHex } from '../aesKeyGen';
@@ -223,7 +222,7 @@ export default function BackendEncryptionEditor({ backendName, current, onApply 
                 Rotate key
               </Button>
             )}
-            <SimpleSelect
+            <Select
               value={current.mode}
               onChange={(v) => startEdit(v as BackendEncryptionMode)}
               options={modeOptions}

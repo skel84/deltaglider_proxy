@@ -1,11 +1,10 @@
 import { useState, useEffect } from 'react';
-import { Modal, Input, Alert, Typography } from 'antd';
+import { Modal, Input, Alert, Typography, Select } from 'antd';
 import { WarningOutlined } from '@ant-design/icons';
 import { listBuckets, getBucket } from '../s3client';
 import { useColors } from '../ThemeContext';
 import { pluralize } from '../utils';
 import { normalizeDestPrefix } from './destPrefix';
-import SimpleSelect from './SimpleSelect';
 
 const { Text } = Typography;
 
@@ -63,12 +62,14 @@ export default function DestinationPickerModal({ open, mode, itemCount, onConfir
     >
       <div style={{ marginBottom: 16 }}>
         <SectionLabel color={colors.TEXT_MUTED}>Destination Bucket</SectionLabel>
-        <SimpleSelect
+        <Select
           value={destBucket}
           onChange={setDestBucket}
           options={buckets.map(b => ({ value: b, label: b }))}
           placeholder="Select bucket"
           style={{ width: '100%' }}
+          showSearch
+          optionFilterProp="label"
         />
       </div>
 
