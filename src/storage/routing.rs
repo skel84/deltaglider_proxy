@@ -937,12 +937,12 @@ mod tests {
     // not the default backend.
     #[tokio::test]
     async fn list_bucket_origins_reports_non_default_backend_no_alias() {
-        let primary = Arc::new(
-            Box::new(TestBackend::with_buckets(&["only-on-primary"])) as Box<dyn StorageBackend>,
-        );
-        let secondary = Arc::new(
-            Box::new(TestBackend::with_buckets(&["only-on-secondary"])) as Box<dyn StorageBackend>,
-        );
+        let primary =
+            Arc::new(Box::new(TestBackend::with_buckets(&["only-on-primary"]))
+                as Box<dyn StorageBackend>);
+        let secondary =
+            Arc::new(Box::new(TestBackend::with_buckets(&["only-on-secondary"]))
+                as Box<dyn StorageBackend>);
         let mut backends = HashMap::new();
         backends.insert("primary".to_string(), primary);
         backends.insert("secondary".to_string(), secondary);
@@ -953,13 +953,10 @@ mod tests {
             ("secondary".to_string(), None),
         );
 
-        let routing = RoutingBackend::new(backends, routes, "primary".to_string())
-            .expect("routing backend");
+        let routing =
+            RoutingBackend::new(backends, routes, "primary".to_string()).expect("routing backend");
         let origins = routing.list_bucket_origins().await.expect("origins");
-        let by_name: HashMap<_, _> = origins
-            .iter()
-            .map(|b| (b.name.as_str(), b))
-            .collect();
+        let by_name: HashMap<_, _> = origins.iter().map(|b| (b.name.as_str(), b)).collect();
 
         assert_eq!(
             by_name["only-on-secondary"].backend_name.as_deref(),
@@ -979,18 +976,18 @@ mod tests {
     #[tokio::test]
     async fn list_bucket_origins_forwards_through_box_dyn() {
         let primary = Arc::new(
-            Box::new(TestBackend::with_buckets(&["on-primary"])) as Box<dyn StorageBackend>,
+            Box::new(TestBackend::with_buckets(&["on-primary"])) as Box<dyn StorageBackend>
         );
         let secondary = Arc::new(
-            Box::new(TestBackend::with_buckets(&["on-secondary"])) as Box<dyn StorageBackend>,
+            Box::new(TestBackend::with_buckets(&["on-secondary"])) as Box<dyn StorageBackend>
         );
         let mut backends = HashMap::new();
         backends.insert("primary".to_string(), primary);
         backends.insert("secondary".to_string(), secondary);
         let mut routes = HashMap::new();
         routes.insert("on-secondary".to_string(), ("secondary".to_string(), None));
-        let routing = RoutingBackend::new(backends, routes, "primary".to_string())
-            .expect("routing backend");
+        let routing =
+            RoutingBackend::new(backends, routes, "primary".to_string()).expect("routing backend");
 
         // Box it, exactly as DeltaGliderEngine stores its storage.
         let boxed: Box<dyn StorageBackend> = Box::new(routing);
