@@ -50,6 +50,26 @@ pub struct CreateBucketOnBackendResponse {
 }
 
 #[derive(Deserialize)]
+pub struct MigrateBucketRequest {
+    pub target_backend: String,
+    /// Delete the source objects after a verified copy. Default false — the
+    /// safe path leaves the source as a copy for the operator to remove later.
+    #[serde(default)]
+    pub delete_source: bool,
+}
+
+#[derive(Serialize)]
+pub struct MigrateBucketResponse {
+    pub success: bool,
+    pub bucket: String,
+    pub from_backend: String,
+    pub to_backend: String,
+    pub objects_copied: u64,
+    pub bytes_copied: u64,
+    pub source_deleted: bool,
+}
+
+#[derive(Deserialize)]
 pub struct CreateBackendRequest {
     pub name: String,
     #[serde(rename = "type")]
@@ -314,6 +334,309 @@ pub async fn create_bucket_on_backend(
         success: true,
         bucket,
         backend_name,
+    }))
+}
+
+/// POST /api/admin/buckets/{bucket}/migrate — move a bucket's objects to a
+/// different backend, then re-route the bucket to that backend.
+///
+/// Re-routing alone orphans data (the explicit route wins, so the old
+/// backend's objects become unreachable by the bucket name). This endpoint
+/// does the honest version: it copies every object to the target FIRST, while
+/// both backends are still addressable under distinct virtual names, verifies,
+/// and only then flips the route. Mechanism:
+///
+///   1. Resolve the bucket's CURRENT backend; reject if target == current.
+///   2. Create a transient virtual bucket `__dgmigrate_<bucket>_<n>` routed to
+///      the target backend, ALIASED to the real bucket name — so writes land in
+///      the real `<bucket>` on the target. (Engine rebuilt so the route is live.)
+///   3. Copy each source object → the transient bucket via the shared
+///      `transfer::copy_object_with_retries` (preserves metadata/ETag, stamps
+///      `dg-migration` provenance). Idempotent: skip keys already on the target.
+///   4. Verify every source key exists on the target.
+///   5. Flip `<bucket>`'s route to the target backend; drop the transient route;
+///      rebuild + persist.
+///   6. `delete_source` (default false): only after the flip + verify, delete the
+///      source objects. Off by default — the source stays as a safety copy.
+///
+/// Any failure BEFORE the flip leaves the source untouched and rolls the
+/// transient route back. This is the only admin op that moves object data, so
+/// it's deliberately conservative.
+pub async fn migrate_bucket(
+    State(state): State<Arc<AdminState>>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<MigrateBucketRequest>,
+) -> Result<Json<MigrateBucketResponse>, (StatusCode, String)> {
+    let bucket = bucket.trim().to_string();
+    let bucket_key = bucket.to_ascii_lowercase();
+    let target_backend = body.target_backend.trim().to_string();
+    if bucket.is_empty() || target_backend.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "bucket and target_backend are required".into(),
+        ));
+    }
+
+    // ── Resolve current backend + validate target (under the config lock) ──
+    let (from_backend, transient_key) = {
+        let cfg = state.config.read().await;
+        if !cfg.backends.is_empty() && !cfg.backends.iter().any(|b| b.name == target_backend) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Unknown target backend '{}'", target_backend),
+            ));
+        }
+        // Current backend = explicit policy route, else the default.
+        let from_backend = cfg
+            .buckets
+            .get(&bucket_key)
+            .and_then(|p| p.backend.clone())
+            .or_else(|| cfg.default_backend.clone())
+            .unwrap_or_else(|| "default".to_string());
+        if from_backend == target_backend {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Bucket '{}' is already on backend '{}'",
+                    bucket, target_backend
+                ),
+            ));
+        }
+        // Pick a transient virtual-bucket name that isn't already taken.
+        let mut n = 0u32;
+        let transient_key = loop {
+            let candidate = format!("__dgmigrate_{}_{}", bucket_key, n);
+            if !cfg.buckets.contains_key(&candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+        (from_backend, transient_key)
+    };
+
+    // ── Stage: transient virtual bucket → target backend, aliased to the real
+    //    bucket name, so copies land in the real bucket on the target. ──
+    {
+        let mut cfg = state.config.write().await;
+        let policy = crate::bucket_policy::BucketPolicyConfig {
+            backend: Some(target_backend.clone()),
+            alias: Some(bucket.clone()),
+            ..Default::default()
+        };
+        cfg.buckets.insert(transient_key.clone(), policy);
+        if let Err(e) = super::config::rebuild_engine(
+            &state,
+            &cfg,
+            &format!(
+                "Migration staging route '{}' → '{}'",
+                transient_key, target_backend
+            ),
+        )
+        .await
+        {
+            cfg.buckets.remove(&transient_key);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to stage migration: {e}"),
+            ));
+        }
+    }
+
+    // Helper to tear down the transient route on any failure before the flip.
+    let teardown_transient = |state: Arc<AdminState>, transient_key: String| async move {
+        let mut cfg = state.config.write().await;
+        cfg.buckets.remove(&transient_key);
+        let _ =
+            super::config::rebuild_engine(&state, &cfg, "Migration aborted, staging route removed")
+                .await;
+    };
+
+    // Ensure the real bucket exists on the TARGET backend before copying into it
+    // (the staging route resolves writes to `target/<bucket>`, which won't exist
+    // yet on a fresh target). Idempotent: a pre-existing bucket is fine.
+    {
+        let engine = state.s3_state.engine.load();
+        if let Err(e) = engine.create_bucket(&transient_key).await {
+            let msg = e.to_string();
+            // Tolerate "already exists"; fail on anything else.
+            if !msg.to_lowercase().contains("exist") {
+                teardown_transient(state.clone(), transient_key).await;
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to create bucket on target backend: {msg}"),
+                ));
+            }
+        }
+    }
+
+    // ── Copy every object: source bucket (→ from_backend) into the transient
+    //    bucket (→ target_backend / real bucket). ──
+    let engine = state.s3_state.engine.load();
+    let provenance_value = format!("{}->{}", from_backend, target_backend);
+    let mut objects_copied: u64 = 0;
+    let mut bytes_copied: u64 = 0;
+    let mut copied_keys: Vec<String> = Vec::new();
+    let mut continuation: Option<String> = None;
+    loop {
+        let page = match engine
+            .list_objects(&bucket, "", None, 1000, continuation.as_deref(), false)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                teardown_transient(state.clone(), transient_key).await;
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to list source bucket: {e}"),
+                ));
+            }
+        };
+        for (key, _meta) in &page.objects {
+            // Idempotent: skip if already present on the target.
+            if engine.head(&transient_key, key).await.is_ok() {
+                copied_keys.push(key.clone());
+                continue;
+            }
+            let req = crate::transfer::ObjectTransferRequest {
+                source_bucket: &bucket,
+                source_key: key,
+                destination_bucket: &transient_key,
+                destination_key: key,
+                provenance: Some(crate::transfer::TransferProvenance {
+                    metadata_key: "dg-migration",
+                    metadata_value: &provenance_value,
+                }),
+                operation: "migrate",
+            };
+            match crate::transfer::copy_object_with_retries(&engine, req).await {
+                Ok(outcome) => {
+                    objects_copied += 1;
+                    bytes_copied += outcome.bytes_copied as u64;
+                    copied_keys.push(key.clone());
+                }
+                Err(e) => {
+                    teardown_transient(state.clone(), transient_key).await;
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to copy object '{}': {e}", key),
+                    ));
+                }
+            }
+        }
+        match page.next_continuation_token {
+            Some(token) => continuation = Some(token),
+            None => break,
+        }
+    }
+
+    // ── Verify: every copied key is readable on the target. ──
+    for key in &copied_keys {
+        if engine.head(&transient_key, key).await.is_err() {
+            teardown_transient(state.clone(), transient_key).await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "Verification failed: '{}' missing on target after copy",
+                    key
+                ),
+            ));
+        }
+    }
+
+    // ── Flip: route the real bucket to the target, drop the transient route. ──
+    {
+        let mut cfg = state.config.write().await;
+        let old_policy = cfg.buckets.get(&bucket_key).cloned();
+        let mut policy = old_policy.clone().unwrap_or_default();
+        policy.backend = Some(target_backend.clone());
+        cfg.buckets.insert(bucket_key.clone(), policy);
+        cfg.buckets.remove(&transient_key);
+        if let Err(e) = super::config::rebuild_engine(
+            &state,
+            &cfg,
+            &format!(
+                "Bucket '{}' migrated to backend '{}'",
+                bucket, target_backend
+            ),
+        )
+        .await
+        {
+            // Restore both the original bucket route and drop the transient.
+            match old_policy {
+                Some(prev) => {
+                    cfg.buckets.insert(bucket_key.clone(), prev);
+                }
+                None => {
+                    cfg.buckets.remove(&bucket_key);
+                }
+            }
+            let _ = super::config::rebuild_engine(&state, &cfg, "Migration flip failed, reverted")
+                .await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to re-route after copy: {e}"),
+            ));
+        }
+        let persist_path = super::config::active_config_path(&state);
+        if let Err(e) = cfg.persist_to_file(&persist_path) {
+            tracing::warn!("Failed to persist config to {}: {}", persist_path, e);
+        }
+    }
+
+    // ── Optional source cleanup (after the flip + verify). The bucket now
+    //    routes to the target; reads come from there. The source objects on the
+    //    old backend are addressed by deleting through a fresh transient route
+    //    back to the source — skipped here for safety unless requested. ──
+    let mut source_deleted = false;
+    if body.delete_source {
+        // Re-stage a transient route to the SOURCE backend (aliased to the real
+        // bucket) so we can delete the now-orphaned source objects by name.
+        let cleanup_key = format!("{}__src", transient_key);
+        {
+            let mut cfg = state.config.write().await;
+            let policy = crate::bucket_policy::BucketPolicyConfig {
+                backend: Some(from_backend.clone()),
+                alias: Some(bucket.clone()),
+                ..Default::default()
+            };
+            cfg.buckets.insert(cleanup_key.clone(), policy);
+            let _ =
+                super::config::rebuild_engine(&state, &cfg, "Migration source-cleanup route").await;
+        }
+        let cleanup_engine = state.s3_state.engine.load();
+        let mut all_deleted = true;
+        for key in &copied_keys {
+            if cleanup_engine.delete(&cleanup_key, key).await.is_err() {
+                all_deleted = false;
+            }
+        }
+        {
+            let mut cfg = state.config.write().await;
+            cfg.buckets.remove(&cleanup_key);
+            let _ =
+                super::config::rebuild_engine(&state, &cfg, "Migration source-cleanup done").await;
+            let persist_path = super::config::active_config_path(&state);
+            let _ = cfg.persist_to_file(&persist_path);
+        }
+        source_deleted = all_deleted;
+    }
+
+    audit_log(
+        "admin_migrate_bucket",
+        "admin",
+        &format!("{bucket}: {from_backend}->{target_backend} ({objects_copied} objects)"),
+        &headers,
+    );
+
+    Ok(Json(MigrateBucketResponse {
+        success: true,
+        bucket,
+        from_backend,
+        to_backend: target_backend,
+        objects_copied,
+        bytes_copied,
+        source_deleted,
     }))
 }
 

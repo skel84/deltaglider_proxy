@@ -12,6 +12,7 @@
  * transform through the parent's functional `setRows`, so prefix edits
  * never read a stale closure (recent bug fix preserved).
  */
+import { useState } from 'react';
 import { Button, Input, InputNumber, Modal, Radio, Select, Typography } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import type { BackendInfo } from '../adminApi';
@@ -22,6 +23,7 @@ import { formRow } from './ruleEditorHelpers';
 import type { BucketPolicyRow, PrefixEntry } from './bucketPolicyPayload';
 import { freshId } from './bucketPolicyPayload';
 import PrefixListEditor from './PrefixListEditor';
+import MigrateBucketModal from './MigrateBucketModal';
 
 const { Text } = Typography;
 
@@ -55,6 +57,11 @@ export default function BucketCard({
   inputRadius,
 }: CardProps) {
   const colors = useColors();
+  const [migrateOpen, setMigrateOpen] = useState(false);
+  // The bucket actually exists (vs. an unsaved draft row) only when its name is
+  // in the known bucket list — migration is an imperative op on real data.
+  const bucketExists = Boolean(row.name) && availableBuckets.includes(row.name);
+  const currentBackend = row.backend || defaultBackend || null;
 
   const isPublic = row.publicMode !== 'none';
   const cardBorder = isPublic ? `${colors.ACCENT_AMBER}66` : colors.BORDER;
@@ -148,12 +155,31 @@ export default function BucketCard({
       </div>
 
       {row.backend && (
-        <Text
-          type="secondary"
-          style={{ display: 'block', fontSize: 11, marginTop: -6, marginBottom: 10 }}
-        >
-          Routing only — won't move existing objects.
-        </Text>
+        <div style={{ marginTop: -6, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            Routing only — won't move existing objects.
+          </Text>
+          {bucketExists && backends.length > 1 && (
+            <Button
+              size="small"
+              type="link"
+              style={{ fontSize: 11, padding: 0, height: 'auto' }}
+              onClick={() => setMigrateOpen(true)}
+            >
+              Migrate data…
+            </Button>
+          )}
+        </div>
+      )}
+
+      {bucketExists && (
+        <MigrateBucketModal
+          open={migrateOpen}
+          bucket={row.name}
+          currentBackend={currentBackend}
+          backends={backends}
+          onClose={() => setMigrateOpen(false)}
+        />
       )}
 
       {/* Compression + alias + quota row */}

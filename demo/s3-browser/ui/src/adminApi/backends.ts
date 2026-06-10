@@ -55,6 +55,35 @@ export async function createBucketOnBackend(
   return safeJson(res);
 }
 
+interface MigrateBucketResult {
+  success: boolean;
+  bucket: string;
+  from_backend: string;
+  to_backend: string;
+  objects_copied: number;
+  bytes_copied: number;
+  source_deleted: boolean;
+}
+
+/**
+ * Migrate a bucket's objects to a different backend, then re-route it there.
+ * Copies first, verifies, then flips the route (re-routing alone would orphan
+ * the objects). `deleteSource` defaults false — the source is kept as a copy.
+ */
+export async function migrateBucket(
+  bucket: string,
+  targetBackend: string,
+  deleteSource = false,
+): Promise<MigrateBucketResult> {
+  const res = await adminFetch(
+    `/api/admin/buckets/${encodeURIComponent(bucket)}/migrate`,
+    'POST',
+    { target_backend: targetBackend, delete_source: deleteSource },
+  );
+  if (!res.ok) await throwApiError(res, `Migrate bucket ${bucket}`);
+  return safeJson(res);
+}
+
 export async function createBackend(req: CreateBackendRequest): Promise<{ success: boolean; error?: string }> {
   const res = await adminFetch('/api/admin/backends', 'POST', req);
   return safeJson(res);
