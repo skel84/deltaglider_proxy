@@ -62,12 +62,12 @@ emit() {  # emit <ENV_KEY> <file> <jq-filter>
 # Keep this in sync with secrets.env.template.
 user_var() {
   case "$1" in
-    "Simone Scarduzio") echo "USER_SIMONE_SECRET" ;;
-    "ror-ci-rw")        echo "USER_ROR_CI_RW_SECRET" ;;
-    "ror-ci-ro")        echo "USER_ROR_CI_RO_SECRET" ;;
-    "rorkbn-ci")        echo "USER_RORKBN_CI_SECRET" ;;
-    "xperi")            echo "USER_XPERI_SECRET" ;;
-    "legacy-admin")     echo "USER_LEGACY_ADMIN_SECRET" ;;
+    "Simone Scarduzio") echo "DGP_USER_SIMONE_SECRET" ;;
+    "ror-ci-rw")        echo "DGP_USER_ROR_CI_RW_SECRET" ;;
+    "ror-api-ro")       echo "DGP_USER_ROR_API_RO_SECRET" ;;
+    "rorkbn-ci")        echo "DGP_USER_RORKBN_CI_SECRET" ;;
+    "xperi")            echo "DGP_USER_XPERI_SECRET" ;;
+    "legacy-admin")     echo "DGP_USER_LEGACY_ADMIN_SECRET" ;;
     *)                  echo "" ;;   # OAuth-provisioned / dropped (test) / unknown → skip
   esac
 }
@@ -93,17 +93,17 @@ emit DGP_BOOTSTRAP_PASSWORD_HASH  "$SEC" '.bootstrap_password_hash'
 # Bootstrap SigV4 pair (access.* in the backup). REQUIRED for cold start — the
 # startup auth gate runs before declarative IAM is reconciled, so the proxy
 # needs these (or authentication:none) to come up on a fresh DB.
-emit BOOTSTRAP_ACCESS_KEY_ID      "$SEC" '.access.access_key_id'
-emit BOOTSTRAP_SECRET_ACCESS_KEY  "$SEC" '.access.secret_access_key'
+emit DGP_BOOTSTRAP_ACCESS_KEY_ID      "$SEC" '.access.access_key_id'
+emit DGP_BOOTSTRAP_SECRET_ACCESS_KEY  "$SEC" '.access.secret_access_key'
 
 # Named-backend (Hetzner) creds — inline in the YAML, so ${VAR}, not DGP_BE_AWS_*.
 # Prefer the per-named-backend secret; fall back to the singular storage.* (same
 # upstream) for older backups that don't carry storage_backends.
-emit BACKEND_HETZNER_ACCESS_KEY_ID     "$SEC" '.storage_backends.HetznerHelsinki1.access_key_id // .storage.access_key_id'
-emit BACKEND_HETZNER_SECRET_ACCESS_KEY "$SEC" '.storage_backends.HetznerHelsinki1.secret_access_key // .storage.secret_access_key'
+emit DGP_BACKEND_HETZNER_ACCESS_KEY_ID     "$SEC" '.storage_backends.HetznerHelsinki1.access_key_id // .storage.access_key_id'
+emit DGP_BACKEND_HETZNER_SECRET_ACCESS_KEY "$SEC" '.storage_backends.HetznerHelsinki1.secret_access_key // .storage.secret_access_key'
 
-# OAuth client secret (provider name "goog" → GOOGLE_OAUTH_CLIENT_SECRET).
-emit GOOGLE_OAUTH_CLIENT_SECRET   "$SEC" '.oauth_client_secrets.goog'
+# OAuth client secret (provider name "goog" → DGP_GOOGLE_OAUTH_CLIENT_SECRET).
+emit DGP_GOOGLE_OAUTH_CLIENT_SECRET   "$SEC" '.oauth_client_secrets.goog'
 
 # Per-user secret access keys, mapped by user NAME.
 echo "  --- per-user secret keys ---"

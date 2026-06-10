@@ -23,11 +23,16 @@ DGP's runtime IAM permission templates (`${iam:username}`,
 `${iam:access_key_id}`), which are left untouched for the auth layer. An unset
 `${env:NAME}` (with no `:-default`) **fails loudly at load**.
 
-So there are two ways a secret reaches the proxy:
-- **Native `DGP_*` env** — read directly by DGP, overlaid on top of the YAML
-  (e.g. `DGP_BOOTSTRAP_PASSWORD_HASH`, `DGP_CONFIG`).
-- **`${env:NAME}` in the YAML** — expanded from the same environment at load
-  (named-backend creds, bootstrap SigV4 pair, per-user secret keys, OAuth secret).
+Every secret is `DGP_*`-prefixed so the whole set lives in one Doppler project
+namespace. The prefix does NOT signal the mechanism — DGP consumes them two
+ways, both from the same environment:
+- **Native config vars** — a fixed set of `DGP_*` names DGP reads directly and
+  overlays on top of the YAML (e.g. `DGP_BOOTSTRAP_PASSWORD_HASH`, `DGP_CONFIG`,
+  `DGP_LISTEN_ADDR`).
+- **`${env:DGP_...}` placeholders in the YAML** — expanded from the same
+  environment at load (named-backend creds, bootstrap SigV4 pair, per-user
+  secret keys, OAuth secret). These names are NOT in DGP's native registry;
+  they exist only because the YAML references them.
 
 Both come from one `secrets.env`. To write a literal dollar-brace in a YAML
 comment, double the dollar (`$${...}`) so the expander leaves it alone.
@@ -88,7 +93,7 @@ values as container env (Secret refs); the proxy does the substitution.
 ## First-boot note (declarative IAM)
 
 On a **fresh** DB the proxy comes up in bootstrap mode using the bootstrap SigV4
-pair (`access.access_key_id`/`secret_access_key`, here `${env:BOOTSTRAP_*}`).
+pair (`access.access_key_id`/`secret_access_key`, here `${env:DGP_BOOTSTRAP_*}`).
 Declarative `iam_users`/groups are reconciled into the DB on a `config apply`
 (admin API / GUI), not automatically at cold boot — so after first `up`, push the
 config once to populate IAM.
@@ -97,7 +102,7 @@ config once to populate IAM.
 - `legacy-admin` (access_key `admin`, wildcard `*`/`*`) — consider folding into
   the `Administrators` group or removing.
 - The Google OAuth `client_id` is committed (semi-public); the `client_secret`
-  is `${env:GOOGLE_OAUTH_CLIENT_SECRET}`.
+  is `${env:DGP_GOOGLE_OAUTH_CLIENT_SECRET}`.
 - `advanced.listen_addr` is `${env:DGP_LISTEN_ADDR}` (the export's local
   `127.0.0.1:9000` was a dev override) — set the real prod bind, e.g.
   `0.0.0.0:9000` behind your TLS-terminating ingress.
