@@ -52,8 +52,25 @@ const replication = await loadPayloadModule(
 
 // ───────────────────────────────────────────────────────────────────
 // BucketsPanel — buildBucketPayload
+//
+// The storage-section PUT deep-merges (RFC 7396): ABSENT keys preserve
+// server values, explicit `null` deletes. The builder therefore emits
+// every clearable field explicitly, and takes the BASELINE bucket names
+// so removed/reset policies serialise as `name: null`. The pre-2026-06
+// builder omitted unset fields — which made un-publicking, un-routing,
+// and policy deletion silent server-side no-ops.
 // ───────────────────────────────────────────────────────────────────
-const { buildBucketPayload, freshId, policyToRow } = bucket;
+const { buildBucketPayload, freshId, policyToRow, isAllDefaultRow } = bucket;
+
+const defaultFields = {
+  compression: null,
+  max_delta_ratio: null,
+  backend: '',
+  alias: '',
+  publicMode: 'none',
+  public_prefixes: [],
+  quota_bytes: null,
+};
 
 // (1) Synthetic ids are unique + monotonic, and NEVER appear in the wire.
 {
@@ -63,20 +80,11 @@ const { buildBucketPayload, freshId, policyToRow } = bucket;
   assert.ok(a.startsWith('bkt-') && b.startsWith('bkt-'));
 }
 
-// (2) Empty-name rows are dropped; a populated row serialises with no `_id`.
+// (2) Empty-name rows are dropped; a populated row serialises every
+//     clearable field explicitly (value or null) and no `_id`.
 {
   const rows = [
-    {
-      _id: 'bkt-x',
-      name: '',
-      compression: null,
-      max_delta_ratio: null,
-      backend: '',
-      alias: '',
-      publicMode: 'none',
-      public_prefixes: [],
-      quota_bytes: null,
-    },
+    { _id: 'bkt-x', name: '', ...defaultFields },
     {
       _id: 'bkt-y',
       name: 'prod',
@@ -94,30 +102,21 @@ const { buildBucketPayload, freshId, policyToRow } = bucket;
   assert.deepEqual(Object.keys(res.body.buckets), ['prod'], 'unnamed row dropped');
   const p = res.body.buckets.prod;
   assert.ok(!('_id' in p), 'synthetic id must never reach the wire');
-  // Byte-identical to the historical rowToPolicy output.
   assert.deepEqual(p, {
     compression: false,
     max_delta_ratio: 0.5,
     backend: 'b1',
     alias: 'realprod',
+    public: null,
+    public_prefixes: null,
     quota_bytes: 1073741824,
   });
 }
 
-// (3) compression:null is preserved as explicit null (RFC 7396 merge delete).
+// (3) compression:null is preserved as explicit null (merge-clears the key).
 {
   const res = buildBucketPayload([
-    {
-      _id: 'bkt-1',
-      name: 'b',
-      compression: null,
-      max_delta_ratio: null,
-      backend: '',
-      alias: '',
-      publicMode: 'none',
-      public_prefixes: [],
-      quota_bytes: null,
-    },
+    { _id: 'bkt-1', name: 'b', ...defaultFields, backend: 'b1' },
   ]);
   assert.equal(res.ok, true);
   assert.equal(res.body.buckets.b.compression, null);
@@ -126,44 +125,39 @@ const { buildBucketPayload, freshId, policyToRow } = bucket;
 }
 
 // (4) Tri-state public mode → wire sentinels. `entire` => [""]; `prefixes`
-//     drops blanks; `none` omits public_prefixes entirely.
+//     drops blanks; `none` emits EXPLICIT nulls so the merge clears any
+//     previous public state (omission would keep the bucket public).
 {
   const entire = buildBucketPayload([
-    {
-      _id: 'bkt-e', name: 'e', compression: null, max_delta_ratio: null,
-      backend: '', alias: '', publicMode: 'entire', public_prefixes: [], quota_bytes: null,
-    },
+    { _id: 'bkt-e', name: 'e', ...defaultFields, publicMode: 'entire' },
   ]);
   assert.deepEqual(entire.body.buckets.e.public_prefixes, ['']);
+  assert.equal(entire.body.buckets.e.public, null, 'shorthand `public` always cleared; [""] is the wire spelling');
 
   const prefixes = buildBucketPayload([
     {
-      _id: 'bkt-p', name: 'p', compression: null, max_delta_ratio: null,
-      backend: '', alias: '', publicMode: 'prefixes',
+      _id: 'bkt-p', name: 'p', ...defaultFields, publicMode: 'prefixes',
       public_prefixes: [
         { id: 'a', value: 'builds/' },
         { id: 'b', value: '  ' }, // blank dropped
         { id: 'c', value: 'rel/' },
       ],
-      quota_bytes: null,
     },
   ]);
   assert.deepEqual(prefixes.body.buckets.p.public_prefixes, ['builds/', 'rel/']);
 
   const none = buildBucketPayload([
-    {
-      _id: 'bkt-n', name: 'n', compression: null, max_delta_ratio: null,
-      backend: '', alias: '', publicMode: 'none', public_prefixes: [], quota_bytes: null,
-    },
+    { _id: 'bkt-n', name: 'n', ...defaultFields, backend: 'b1' },
   ]);
-  assert.ok(!('public_prefixes' in none.body.buckets.n), 'none omits public_prefixes');
+  assert.equal(none.body.buckets.n.public_prefixes, null, 'none emits explicit null (merge-clears)');
+  assert.equal(none.body.buckets.n.public, null);
 }
 
 // (5) Duplicate bucket names abort with an error, zero body.
 {
   const res = buildBucketPayload([
-    { _id: '1', name: 'dup', compression: null, max_delta_ratio: null, backend: '', alias: '', publicMode: 'none', public_prefixes: [], quota_bytes: null },
-    { _id: '2', name: 'dup', compression: null, max_delta_ratio: null, backend: '', alias: '', publicMode: 'none', public_prefixes: [], quota_bytes: null },
+    { _id: '1', name: 'dup', ...defaultFields },
+    { _id: '2', name: 'dup', ...defaultFields },
   ]);
   assert.equal(res.ok, false);
   assert.equal(res.error, 'Duplicate bucket name: dup');
@@ -176,10 +170,50 @@ const { buildBucketPayload, freshId, policyToRow } = bucket;
   assert.equal(row.publicMode, 'entire');
   const res = buildBucketPayload([row]);
   assert.deepEqual(res.body.buckets.shorthand.public_prefixes, ['']);
-  // public_prefixes: [""] expanded form also decodes to entire.
   const row2 = policyToRow('expanded', { public_prefixes: [''] });
   assert.equal(row2.publicMode, 'entire');
   assert.deepEqual(buildBucketPayload([row2]).body.buckets.expanded.public_prefixes, ['']);
+}
+
+// (7) isAllDefaultRow truth table — incl. the blank-prefixes edge.
+{
+  assert.equal(isAllDefaultRow({ _id: 'x', name: 'a', ...defaultFields }), true);
+  assert.equal(isAllDefaultRow({ _id: 'x', name: 'a', ...defaultFields, backend: 'b1' }), false);
+  assert.equal(isAllDefaultRow({ _id: 'x', name: 'a', ...defaultFields, publicMode: 'entire' }), false);
+  assert.equal(
+    isAllDefaultRow({
+      _id: 'x', name: 'a', ...defaultFields, publicMode: 'prefixes',
+      public_prefixes: [{ id: 'p', value: '  ' }],
+    }),
+    true,
+    'prefixes mode with only blanks overrides nothing'
+  );
+}
+
+// (8) A brand-new all-default row (not in baseline) serialises NOTHING —
+//     a policy exists iff something is overridden.
+{
+  const res = buildBucketPayload([{ _id: 'x', name: 'fresh', ...defaultFields }], []);
+  assert.deepEqual(res.body.buckets, {}, 'all-default new row is a no-op');
+}
+
+// (9) An all-default row whose bucket IS in the baseline serialises
+//     `name: null` — reset-to-defaults deletes the policy.
+{
+  const res = buildBucketPayload([{ _id: 'x', name: 'was', ...defaultFields }], ['was']);
+  assert.deepEqual(res.body.buckets, { was: null });
+}
+
+// (10) A baseline bucket absent from the rows serialises `name: null` —
+//      removing a policy actually deletes it server-side.
+{
+  const res = buildBucketPayload(
+    [{ _id: 'x', name: 'kept', ...defaultFields, backend: 'b1' }],
+    ['kept', 'removed']
+  );
+  assert.deepEqual(Object.keys(res.body.buckets).sort(), ['kept', 'removed']);
+  assert.equal(res.body.buckets.removed, null);
+  assert.equal(res.body.buckets.kept.backend, 'b1');
 }
 
 // ───────────────────────────────────────────────────────────────────

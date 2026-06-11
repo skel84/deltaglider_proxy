@@ -1,102 +1,234 @@
 /**
- * BucketCard — the per-bucket policy render unit for {@link BucketsPanel}.
+ * BucketCard — one bucket's status row for {@link BucketsPanel}.
  *
- * Extracted verbatim from BucketsPanel for file-size / readability. The
- * card owns the compression / backend / alias / quota controls and the
- * tri-state anonymous-read radio group; the specific-prefixes editor is
- * delegated to the sibling {@link PrefixListEditor}.
+ * Redesigned per the cognitive-load study (docs/plan/storage-ui-cognitive-load.md):
  *
- * Props carry exactly the data + callbacks the card used as closures
- * before the split — nothing is re-derived here that the parent used to
- * own. In particular `onPrefixesChange` still routes a functional
- * transform through the parent's functional `setRows`, so prefix edits
- * never read a stale closure (recent bug fix preserved).
+ *   * COLLAPSED (the default): a single status line — bucket name + chips
+ *     showing the EFFECTIVE state (backend incl. the default, encryption,
+ *     public access, quota, compression override). A read task costs zero
+ *     form controls.
+ *   * EXPANDED (click): three groups — Public access (the dangerous one,
+ *     amber), Placement (backend + migrate), and Advanced (compression /
+ *     delta cutoff / real-name alias / quota behind a disclosure).
+ *
+ * Every inherited value renders RESOLVED with provenance ("Default —
+ * hetzner", "0.75 — global default") so the user never computes the
+ * inheritance chain in their head.
+ *
+ * The row may represent a REAL bucket without any policy (all chips show
+ * inherited state; editing creates the policy via the parent's onPatch) or
+ * a policy row whose bucket doesn't exist ("not found" chip; name editable
+ * for pre-provisioning drafts).
  */
 import { useState } from 'react';
-import { Button, Input, InputNumber, Modal, Radio, Select, Typography } from 'antd';
-import { DeleteOutlined } from '@ant-design/icons';
+import { Button, Collapse, Input, InputNumber, Modal, Radio, Select, Typography } from 'antd';
+import { DownOutlined, RightOutlined } from '@ant-design/icons';
 import type { BackendInfo } from '../adminApi';
 import { resolveBackendFor, describeEncryption } from '../encryptionUi';
 import { useColors } from '../ThemeContext';
 import SimpleAutoComplete from './SimpleAutoComplete';
 import { formRow } from './ruleEditorHelpers';
 import type { BucketPolicyRow, PrefixEntry } from './bucketPolicyPayload';
-import { freshId } from './bucketPolicyPayload';
+import { DEFAULT_ROW_FIELDS, freshId, isAllDefaultRow } from './bucketPolicyPayload';
 import PrefixListEditor from './PrefixListEditor';
 import MigrateBucketModal from './MigrateBucketModal';
 
 const { Text } = Typography;
 
 interface CardProps {
-  row: BucketPolicyRow;
+  /** Bucket name (the display identity of the row). */
+  name: string;
+  /** The policy row, or null when this real bucket has no overrides. */
+  row: BucketPolicyRow | null;
+  /** Whether the bucket actually exists on storage (vs a policy draft). */
+  real: boolean;
+  expanded: boolean;
+  onToggle: () => void;
   backends: BackendInfo[];
-  availableBuckets: string[];
-  /**
-   * Name of the configured default backend. A bucket with no
-   * explicit `backend` override routes here. The per-bucket
-   * encryption badge resolves against this when the row's backend
-   * field is empty.
-   */
   defaultBackend: string | null;
-  onChange: (patch: Partial<BucketPolicyRow>) => void;
-  /** Apply a functional transform to this row's prefix list, by id,
-   *  via the parent's functional setRows — never a stale closure. */
+  /** Global compression default — for resolved labels. */
+  globalCompressionOn: boolean;
+  globalRatio: number;
+  /** Stage a change. Parent materialises a policy row on first edit. */
+  onPatch: (patch: Partial<BucketPolicyRow>) => void;
+  /** Functional prefix-list transform routed through the parent's setRows. */
   onPrefixesChange: (fn: (prev: PrefixEntry[]) => PrefixEntry[]) => void;
-  onDelete: () => void;
+  /** Drafts only: rename / remove the draft row. */
+  onDraftNameChange?: (name: string) => void;
+  onRemoveDraft?: () => void;
+  /** Draft-name autocomplete options. */
+  availableBuckets?: string[];
   inputRadius: { borderRadius: number };
 }
 
+/** Small status chip used in the collapsed row. */
+function Chip({ tone, children, title }: { tone: string; children: React.ReactNode; title?: string }) {
+  return (
+    <span
+      title={title}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        fontSize: 10,
+        fontWeight: 600,
+        letterSpacing: 0.4,
+        textTransform: 'uppercase',
+        padding: '2px 8px',
+        borderRadius: 10,
+        background: `${tone}22`,
+        color: tone,
+        whiteSpace: 'nowrap',
+        cursor: title ? 'help' : undefined,
+      }}
+    >
+      <span style={{ width: 6, height: 6, borderRadius: '50%', background: tone }} />
+      {children}
+    </span>
+  );
+}
+
 export default function BucketCard({
+  name,
   row,
+  real,
+  expanded,
+  onToggle,
   backends,
-  availableBuckets,
   defaultBackend,
-  onChange,
+  globalCompressionOn,
+  globalRatio,
+  onPatch,
   onPrefixesChange,
-  onDelete,
+  onDraftNameChange,
+  onRemoveDraft,
+  availableBuckets = [],
   inputRadius,
 }: CardProps) {
   const colors = useColors();
   const [migrateOpen, setMigrateOpen] = useState(false);
-  // The bucket actually exists (vs. an unsaved draft row) only when its name is
-  // in the known bucket list — migration is an imperative op on real data.
-  const bucketExists = Boolean(row.name) && availableBuckets.includes(row.name);
-  const currentBackend = row.backend || defaultBackend || null;
 
-  const isPublic = row.publicMode !== 'none';
+  // Effective field values: the policy row when present, defaults otherwise.
+  // Fresh fallback object (not the frozen singleton) so the shared
+  // `public_prefixes: []` reference can never leak into a materialised row.
+  const eff: Omit<BucketPolicyRow, '_id' | 'name'> = row ?? { ...DEFAULT_ROW_FIELDS, public_prefixes: [] };
+  const isPublic = eff.publicMode !== 'none';
+  const publicPrefixCount = eff.public_prefixes.filter((p) => p.value.trim()).length;
+  const hasOverrides = row !== null && !isAllDefaultRow(row);
+  const currentBackend = eff.backend || defaultBackend || null;
+
   const cardBorder = isPublic ? `${colors.ACCENT_AMBER}66` : colors.BORDER;
   const cardBg = isPublic ? `${colors.ACCENT_AMBER}0a` : colors.BG_ELEVATED;
 
-  // Changing the backend of a bucket that is ALREADY routed somewhere is a
-  // re-route, and re-routing only changes where the bucket points — it does NOT
-  // move existing objects, which then become unreachable through this bucket
-  // (the routing layer's explicit route wins, so the old backend is never
-  // HEAD-scanned). Confirm before applying such a change. First-time set on a
-  // fresh row (empty `row.backend`) is the create path, not a re-route — apply
-  // directly. AntD Select emits `undefined` on clear; coerce to '' to keep the
-  // non-optional string contract (and avoid the resolveBackendFor crash).
-  const handleBackendChange = (next: string | undefined) => {
+  // Re-routing an ALREADY-routed bucket orphans its objects (explicit route
+  // wins; the old backend is never scanned) — confirm first. First-time set
+  // is the create path and applies directly.
+  const handleBackendChange = (next: string) => {
     const value = next ?? '';
-    const prev = row.backend;
+    const prev = eff.backend;
     if (!prev || value === prev) {
-      onChange({ backend: value });
+      onPatch({ backend: value });
       return;
     }
-    const bucketLabel = row.name || 'this bucket';
-    const target = value || '(default)';
+    const target = value || `the default (${defaultBackend ?? 'default'})`;
     Modal.confirm({
-      title: `Re-route ${bucketLabel} to ${target}?`,
+      title: `Re-route ${name || 'this bucket'} to ${target}?`,
       okText: 'Re-route anyway',
       okButtonProps: { danger: true },
       content: (
         <Text type="secondary">
           Routing only — this does <strong>not</strong> move existing objects.
           Objects already stored on <Text code>{prev}</Text> become unreachable
-          through this bucket until they are migrated.
+          through this bucket until they are migrated (use &ldquo;Migrate
+          data&hellip;&rdquo; instead to move them).
         </Text>
       ),
-      onOk: () => onChange({ backend: value }),
+      onOk: () => onPatch({ backend: value }),
     });
+  };
+
+  // ── Collapsed status chips (effective state, always resolved) ──
+  const encryptionInfo = (() => {
+    const info = resolveBackendFor(eff.backend, backends, defaultBackend);
+    return describeEncryption(info?.encryption);
+  })();
+  const advancedActive =
+    eff.compression !== null || eff.max_delta_ratio !== null || eff.alias !== '' || eff.quota_bytes !== null;
+
+  const chips: React.ReactNode[] = [];
+  if (!real) {
+    chips.push(
+      <Chip key="missing" tone={colors.ACCENT_AMBER} title="No bucket with this name exists yet — the policy applies once it's created.">
+        bucket not found
+      </Chip>
+    );
+  }
+  chips.push(
+    eff.backend ? (
+      <Chip key="backend" tone={colors.ACCENT_BLUE} title={`Explicitly routed to ${eff.backend}`}>
+        → {eff.backend}
+      </Chip>
+    ) : (
+      <Chip key="backend" tone={colors.TEXT_MUTED} title="No explicit route — uses the default backend">
+        default{defaultBackend ? ` — ${defaultBackend}` : ''}
+      </Chip>
+    )
+  );
+  chips.push(
+    <Chip
+      key="enc"
+      tone={encryptionInfo.isEncrypted ? colors.ACCENT_GREEN : colors.TEXT_MUTED}
+      title={encryptionInfo.tooltip}
+    >
+      {encryptionInfo.label}
+    </Chip>
+  );
+  chips.push(
+    eff.publicMode === 'none' ? (
+      <Chip key="pub" tone={colors.TEXT_MUTED} title="Authenticated requests only">
+        private
+      </Chip>
+    ) : (
+      <Chip
+        key="pub"
+        tone={colors.ACCENT_AMBER}
+        title={
+          eff.publicMode === 'entire'
+            ? 'The whole bucket is readable without credentials'
+            : 'Some prefixes are readable without credentials'
+        }
+      >
+        {eff.publicMode === 'entire' ? '⚠ public bucket' : `⚠ ${publicPrefixCount} public prefix${publicPrefixCount === 1 ? '' : 'es'}`}
+      </Chip>
+    )
+  );
+  if (eff.quota_bytes != null) {
+    chips.push(
+      <Chip key="quota" tone={colors.ACCENT_AMBER} title="Storage quota">
+        ≤ {Math.round(eff.quota_bytes / (1024 * 1024 * 1024))} GB
+      </Chip>
+    );
+  }
+  if (eff.compression !== null || eff.max_delta_ratio !== null) {
+    chips.push(
+      <Chip key="comp" tone={colors.ACCENT_PURPLE} title="Compression override on this bucket">
+        {eff.compression === false
+          ? 'compression off'
+          : eff.max_delta_ratio !== null
+            ? `delta ≤ ${eff.max_delta_ratio}`
+            : 'compression on'}
+      </Chip>
+    );
+  }
+
+  const groupLabel: React.CSSProperties = {
+    fontSize: 10,
+    fontWeight: 700,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    fontFamily: 'var(--font-ui)',
+    display: 'block',
+    marginBottom: 8,
   };
 
   return (
@@ -105,305 +237,300 @@ export default function BucketCard({
         border: `1px solid ${cardBorder}`,
         borderRadius: 10,
         background: cardBg,
-        padding: 14,
         transition: 'all 0.15s',
       }}
     >
-      {/* Header row: bucket name + backend + delete */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-        <SimpleAutoComplete
-          value={row.name}
-          onChange={(v) => onChange({ name: v.toLowerCase().replace(/[^a-z0-9.-]/g, '') })}
-          options={availableBuckets}
-          placeholder="Bucket name"
-          style={{ flex: 1 }}
-        />
-        {backends.length > 0 && (
-          <Select
-            value={row.backend || undefined}
-            // Re-routing an already-routed bucket is confirmed first (see
-            // handleBackendChange) because it orphans existing objects.
-            onChange={handleBackendChange}
-            placeholder="Route to..."
-            allowClear
-            size="small"
-            showSearch
-            optionFilterProp="label"
-            style={{ width: 170 }}
-            options={backends.map((b) => ({
-              value: b.name,
-              label: b.name,
-              sublabel: b.backend_type,
-            }))}
-            optionRender={(opt) => (
-              <div>
-                <div>{opt.data.label}</div>
-                {opt.data.sublabel && (
-                  <div style={{ fontSize: 11, opacity: 0.65 }}>{opt.data.sublabel}</div>
-                )}
-              </div>
-            )}
-          />
-        )}
-        <Button
-          size="small"
-          danger
-          icon={<DeleteOutlined />}
-          onClick={onDelete}
-          aria-label={`Remove ${row.name || 'bucket'}`}
-        />
-      </div>
-
-      {row.backend && (
-        <div style={{ marginTop: -6, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            Routing only — won't move existing objects.
-          </Text>
-          {bucketExists && backends.length > 1 && (
-            <Button
-              size="small"
-              type="link"
-              style={{ fontSize: 11, padding: 0, height: 'auto' }}
-              onClick={() => setMigrateOpen(true)}
-            >
-              Migrate data…
-            </Button>
-          )}
-        </div>
-      )}
-
-      {bucketExists && (
-        <MigrateBucketModal
-          open={migrateOpen}
-          bucket={row.name}
-          currentBackend={currentBackend}
-          backends={backends}
-          onClose={() => setMigrateOpen(false)}
-        />
-      )}
-
-      {/* Compression + alias + quota row */}
-      <div style={formRow(16, { flexWrap: 'wrap', marginBottom: 12 })}>
-        <div style={formRow(8, { flexWrap: 'wrap' })}>
-          <Text style={{ fontSize: 12, fontFamily: 'var(--font-ui)', color: colors.TEXT_MUTED }}>
-            Compression
-          </Text>
-          <Select
-            size="small"
-            style={{ minWidth: 200, ...inputRadius }}
-            value={
-              row.compression === null ? 'inherit' : row.compression ? 'on' : 'off'
-            }
-            onChange={(v) => {
-              if (v === 'inherit') onChange({ compression: null });
-              else onChange({ compression: v === 'on' });
-            }}
-            options={[
-              {
-                value: 'inherit',
-                label: 'Default (on) — no override',
-              },
-              { value: 'on', label: 'On — explicit in YAML' },
-              { value: 'off', label: 'Off — explicit in YAML' },
-            ]}
-          />
-          {row.compression !== false && (
-            <>
-              <Text style={{ fontSize: 11, color: colors.TEXT_MUTED, marginLeft: 8 }}>
-                Ratio:
-              </Text>
-              <InputNumber
-                value={row.max_delta_ratio ?? undefined}
-                onChange={(v) => onChange({ max_delta_ratio: v ?? null })}
-                min={0}
-                max={1}
-                step={0.05}
-                placeholder="global"
-                style={{ width: 80, ...inputRadius }}
-                size="small"
-              />
-            </>
-          )}
-          {/* Per-bucket encryption-at-rest badge. Resolved via the
-             backend this bucket routes to — explicit `row.backend`,
-             else `defaultBackend`, else the synthetic "default" entry
-             surfaced by the server for the singleton-backend path.
-             Each mode gets a distinct label so an operator can tell
-             at a glance whether the bucket's storage is proxy-AES,
-             SSE-KMS, SSE-S3, or plaintext. */}
-          {(() => {
-            const info = resolveBackendFor(row.backend, backends, defaultBackend);
-            const summary = info?.encryption;
-            const { label, tooltip, isEncrypted } = describeEncryption(summary);
-            const tone = isEncrypted ? colors.ACCENT_GREEN : colors.TEXT_MUTED;
-            return (
-              <span
-                title={tooltip}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 4,
-                  marginLeft: 12,
-                  fontSize: 10,
-                  fontWeight: 600,
-                  letterSpacing: 0.4,
-                  textTransform: 'uppercase',
-                  padding: '2px 8px',
-                  borderRadius: 10,
-                  background: `${tone}22`,
-                  color: tone,
-                  cursor: 'help',
-                }}
-              >
-                <span
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    background: tone,
-                  }}
-                />
-                {label}
-              </span>
-            );
-          })()}
-        </div>
-        <div style={formRow(6)}>
-          <Text style={{ fontSize: 11, color: colors.TEXT_MUTED }}>Alias:</Text>
-          <Input
-            value={row.alias}
-            onChange={(e) => onChange({ alias: e.target.value })}
-            placeholder="same as name"
-            style={{
-              width: 140,
-              ...inputRadius,
-              fontFamily: 'var(--font-mono)',
-              fontSize: 11,
-            }}
-            size="small"
-          />
-        </div>
-        <div style={formRow(6)}>
-          <Text
-            style={{
-              fontSize: 11,
-              color: row.quota_bytes != null ? colors.ACCENT_AMBER : colors.TEXT_MUTED,
-            }}
-          >
-            Quota:
-          </Text>
-          <InputNumber
-            value={
-              row.quota_bytes != null
-                ? Math.round(row.quota_bytes / (1024 * 1024 * 1024))
-                : undefined
-            }
-            onChange={(v) => onChange({ quota_bytes: v != null ? v * 1024 * 1024 * 1024 : null })}
-            min={0}
-            placeholder="unlimited"
-            style={{ width: 100, ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 11 }}
-            size="small"
-            addonAfter="GB"
-          />
-        </div>
-      </div>
-
-      {/* Anonymous read access — tri-state radio group (§7.5). */}
+      {/* ── Collapsed status row: name + effective-state chips ── */}
       <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        aria-label={`${name || 'new bucket policy'} — click to ${expanded ? 'collapse' : 'edit'}`}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
         style={{
-          borderTop: `1px solid ${colors.BORDER}`,
-          paddingTop: 10,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '10px 14px',
+          cursor: 'pointer',
+          minHeight: 42,
         }}
       >
-        <Text
-          style={{
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: 0.5,
-            textTransform: 'uppercase',
-            color: isPublic ? colors.ACCENT_AMBER : colors.TEXT_MUTED,
-            fontFamily: 'var(--font-ui)',
-            display: 'block',
-            marginBottom: 8,
-          }}
-        >
-          Anonymous read access
-          {isPublic && (
-            <span
-              style={{
-                fontSize: 10,
-                marginLeft: 8,
-                fontWeight: 500,
-                letterSpacing: 0,
-                textTransform: 'none',
+        {expanded ? (
+          <DownOutlined style={{ fontSize: 10, color: colors.TEXT_MUTED }} />
+        ) : (
+          <RightOutlined style={{ fontSize: 10, color: colors.TEXT_MUTED }} />
+        )}
+        {onDraftNameChange ? (
+          <span onClick={(e) => e.stopPropagation()} style={{ flex: 1, minWidth: 160 }}>
+            <SimpleAutoComplete
+              value={name}
+              onChange={(v) => onDraftNameChange(v.toLowerCase().replace(/[^a-z0-9.-]/g, ''))}
+              options={availableBuckets}
+              placeholder="Bucket name"
+              style={{ width: '100%' }}
+            />
+          </span>
+        ) : (
+          <Text
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 13,
+              fontWeight: 600,
+              color: colors.TEXT_PRIMARY,
+              flexShrink: 0,
+            }}
+          >
+            {name}
+          </Text>
+        )}
+        <span style={{ flex: 1 }} />
+        <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>{chips}</span>
+      </div>
+
+      {/* ── Expanded editor: Public access / Placement / Advanced ── */}
+      {expanded && (
+        <div style={{ padding: '0 14px 14px', borderTop: `1px solid ${colors.BORDER}` }}>
+          {/* Public access — the consequential group, first and amber. */}
+          <div style={{ paddingTop: 12 }}>
+            <Text style={{ ...groupLabel, color: isPublic ? colors.ACCENT_AMBER : colors.TEXT_MUTED }}>
+              Public access
+              {isPublic && (
+                <span style={{ fontSize: 10, marginLeft: 8, fontWeight: 500, letterSpacing: 0, textTransform: 'none' }}>
+                  ⚠ readable without credentials
+                </span>
+              )}
+            </Text>
+            <Radio.Group
+              value={eff.publicMode}
+              onChange={(e) => {
+                const mode = e.target.value as BucketPolicyRow['publicMode'];
+                onPatch({
+                  publicMode: mode,
+                  public_prefixes:
+                    mode === 'prefixes'
+                      ? eff.public_prefixes.length > 0
+                        ? eff.public_prefixes
+                        : [{ id: freshId(), value: '' }]
+                      : [],
+                });
               }}
+              style={formRow(6, { flexDirection: 'column', alignItems: 'stretch' })}
             >
-              ⚠ publicly readable
-            </span>
-          )}
-        </Text>
-        <Radio.Group
-          value={row.publicMode}
-          onChange={(e) => {
-            const mode = e.target.value as BucketPolicyRow['publicMode'];
-            // Switching AWAY from prefixes clears them; switching TO
-            // prefixes seeds an empty list so the editor appears.
-            onChange({
-              publicMode: mode,
-              public_prefixes:
-                mode === 'prefixes'
-                  ? row.public_prefixes.length > 0
-                    ? row.public_prefixes
-                    : [{ id: freshId(), value: '' }]
-                  : [],
-            });
-          }}
-          style={formRow(6, { flexDirection: 'column', alignItems: 'stretch' })}
-        >
-          <Radio value="none" style={{ alignItems: 'flex-start' }}>
-            <div>
-              <span style={{ fontSize: 13 }}>None (default)</span>
-              <Text
-                type="secondary"
-                style={{ fontSize: 11, display: 'block', marginTop: 1 }}
-              >
-                Authenticated SigV4 requests only.
-              </Text>
-            </div>
-          </Radio>
-          <Radio value="entire" style={{ alignItems: 'flex-start' }}>
-            <div>
-              <span style={{ fontSize: 13 }}>Entire bucket</span>
-              <Text
-                type="secondary"
-                style={{ fontSize: 11, display: 'block', marginTop: 1 }}
-              >
-                All GET/HEAD/LIST requests succeed without credentials.
-                YAML: <code style={{ fontFamily: 'var(--font-mono)' }}>public: true</code>.
-              </Text>
-            </div>
-          </Radio>
-          <Radio value="prefixes" style={{ alignItems: 'flex-start' }}>
-            <div style={{ width: '100%' }}>
-              <span style={{ fontSize: 13 }}>Specific prefixes</span>
-              <Text
-                type="secondary"
-                style={{ fontSize: 11, display: 'block', marginTop: 1 }}
-              >
-                Only keys under these prefixes are publicly readable.
-                Use a trailing <code>/</code> for directory-aligned matching.
-              </Text>
-              {row.publicMode === 'prefixes' && (
-                <PrefixListEditor
-                  prefixes={row.public_prefixes}
-                  onPrefixesChange={onPrefixesChange}
-                  inputRadius={inputRadius}
+              <Radio value="none" style={{ alignItems: 'flex-start' }}>
+                <div>
+                  <span style={{ fontSize: 13 }}>Private (default)</span>
+                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 1 }}>
+                    Authenticated requests only.
+                  </Text>
+                </div>
+              </Radio>
+              <Radio value="entire" style={{ alignItems: 'flex-start' }}>
+                <div>
+                  <span style={{ fontSize: 13 }}>Entire bucket public</span>
+                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 1 }}>
+                    Anyone can read and list every object — no credentials needed.
+                  </Text>
+                </div>
+              </Radio>
+              <Radio value="prefixes" style={{ alignItems: 'flex-start' }}>
+                <div style={{ width: '100%' }}>
+                  <span style={{ fontSize: 13 }}>Specific prefixes public</span>
+                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 1 }}>
+                    Only keys under these prefixes are readable without credentials.
+                    End folder prefixes with <code>/</code>.
+                  </Text>
+                  {eff.publicMode === 'prefixes' && (
+                    <PrefixListEditor
+                      prefixes={eff.public_prefixes}
+                      onPrefixesChange={onPrefixesChange}
+                      inputRadius={inputRadius}
+                    />
+                  )}
+                </div>
+              </Radio>
+            </Radio.Group>
+          </div>
+
+          {/* Placement — backend routing + the honest move. */}
+          {backends.length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <Text style={{ ...groupLabel, color: colors.TEXT_MUTED }}>Backend</Text>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <Select
+                  value={eff.backend}
+                  onChange={handleBackendChange}
+                  size="small"
+                  showSearch
+                  optionFilterProp="label"
+                  style={{ width: 260 }}
+                  options={[
+                    {
+                      value: '',
+                      label: `Default — ${defaultBackend ?? 'default backend'}`,
+                      sublabel: 'follows the default backend',
+                    },
+                    ...backends.map((b) => ({
+                      value: b.name,
+                      label: b.name,
+                      sublabel: b.backend_type,
+                    })),
+                  ]}
+                  optionRender={(opt) => (
+                    <div>
+                      <div>{opt.data.label}</div>
+                      {opt.data.sublabel && (
+                        <div style={{ fontSize: 11, opacity: 0.65 }}>{opt.data.sublabel}</div>
+                      )}
+                    </div>
+                  )}
                 />
+                {real && backends.length > 1 && (
+                  <Button
+                    size="small"
+                    type="link"
+                    style={{ fontSize: 11, padding: 0, height: 'auto' }}
+                    onClick={() => setMigrateOpen(true)}
+                  >
+                    Migrate data…
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {real && (
+            <MigrateBucketModal
+              open={migrateOpen}
+              bucket={name}
+              currentBackend={currentBackend}
+              backends={backends}
+              onClose={() => setMigrateOpen(false)}
+            />
+          )}
+
+          {/* Advanced — rare knobs behind a disclosure; auto-open when in use. */}
+          <Collapse
+            ghost
+            size="small"
+            style={{ marginTop: 10, marginLeft: -8 }}
+            defaultActiveKey={advancedActive ? ['adv'] : []}
+            items={[
+              {
+                key: 'adv',
+                label: (
+                  <Text style={{ fontSize: 11, fontWeight: 600, color: colors.TEXT_MUTED, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    Advanced{advancedActive ? ' · in use' : ''}
+                  </Text>
+                ),
+                children: (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={formRow(8, { flexWrap: 'wrap' })}>
+                      <Text style={{ fontSize: 12, fontFamily: 'var(--font-ui)', color: colors.TEXT_MUTED, width: 150 }}>
+                        Compression
+                      </Text>
+                      <Select
+                        size="small"
+                        style={{ minWidth: 220, ...inputRadius }}
+                        value={eff.compression === null ? 'inherit' : eff.compression ? 'on' : 'off'}
+                        onChange={(v) => {
+                          if (v === 'inherit') onPatch({ compression: null });
+                          else onPatch({ compression: v === 'on' });
+                        }}
+                        options={[
+                          {
+                            value: 'inherit',
+                            label: `Inherit — global default (${globalCompressionOn ? 'on' : 'off'})`,
+                          },
+                          { value: 'on', label: 'Always on' },
+                          { value: 'off', label: 'Off' },
+                        ]}
+                      />
+                    </div>
+                    {eff.compression !== false && (
+                      <div style={formRow(8, { flexWrap: 'wrap' })}>
+                        <Text style={{ fontSize: 12, color: colors.TEXT_MUTED, width: 150 }} title="A delta is kept only when delta-size / original-size is below this cutoff; otherwise the file is stored as-is.">
+                          Delta size cutoff
+                        </Text>
+                        <InputNumber
+                          value={eff.max_delta_ratio ?? undefined}
+                          onChange={(v) => onPatch({ max_delta_ratio: v ?? null })}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          placeholder={`${globalRatio} — global default`}
+                          style={{ width: 170, ...inputRadius }}
+                          size="small"
+                        />
+                      </div>
+                    )}
+                    <div style={formRow(8, { flexWrap: 'wrap' })}>
+                      <Text style={{ fontSize: 12, color: colors.TEXT_MUTED, width: 150 }} title="Store this bucket under a different real name on the backend.">
+                        Real name on backend
+                      </Text>
+                      <Input
+                        value={eff.alias}
+                        onChange={(e) => onPatch({ alias: e.target.value })}
+                        placeholder={`same as name${name ? ` (${name})` : ''}`}
+                        style={{ width: 220, ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 11 }}
+                        size="small"
+                      />
+                    </div>
+                    <div style={formRow(8, { flexWrap: 'wrap' })}>
+                      <Text style={{ fontSize: 12, color: eff.quota_bytes != null ? colors.ACCENT_AMBER : colors.TEXT_MUTED, width: 150 }}>
+                        Quota
+                      </Text>
+                      <InputNumber
+                        value={eff.quota_bytes != null ? Math.round(eff.quota_bytes / (1024 * 1024 * 1024)) : undefined}
+                        onChange={(v) => onPatch({ quota_bytes: v != null ? v * 1024 * 1024 * 1024 : null })}
+                        min={0}
+                        placeholder="Unlimited"
+                        style={{ width: 170, ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 11 }}
+                        size="small"
+                        addonAfter="GB"
+                      />
+                    </div>
+                  </div>
+                ),
+              },
+            ]}
+          />
+
+          {/* Row-level actions. Reset stages defaults (reviewed on Apply). */}
+          {(hasOverrides || onRemoveDraft) && (
+            <div style={{ marginTop: 10, display: 'flex', gap: 12 }}>
+              {hasOverrides && (
+                <Button
+                  size="small"
+                  type="text"
+                  danger
+                  style={{ fontSize: 11, padding: '0 4px' }}
+                  onClick={() => onPatch({ ...DEFAULT_ROW_FIELDS })}
+                >
+                  Reset to defaults
+                </Button>
+              )}
+              {onRemoveDraft && (
+                <Button
+                  size="small"
+                  type="text"
+                  danger
+                  style={{ fontSize: 11, padding: '0 4px' }}
+                  onClick={onRemoveDraft}
+                >
+                  Remove draft
+                </Button>
               )}
             </div>
-          </Radio>
-        </Radio.Group>
-      </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

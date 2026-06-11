@@ -1,63 +1,60 @@
 /**
- * BucketsPanel — Wave 6 of the admin UI revamp (§7.5).
+ * BucketsPanel — per-bucket settings, redesigned per the cognitive-load
+ * study (docs/plan/storage-ui-cognitive-load.md).
  *
- * Dedicated editor for per-bucket policies:
+ * The page lists EVERY real bucket (from the S3 list) as a one-line status
+ * row showing its EFFECTIVE state — backend (incl. the default), encryption,
+ * public access, quota, compression override — and expands to edit. The
+ * "policy" is invisible vocabulary: a bucket has settings; a policy exists
+ * server-side iff something is overridden. Editing a no-override bucket
+ * materialises a row; resetting a bucket to defaults deletes its policy.
  *
- *   * **Compression override** — toggle + optional ratio threshold.
- *   * **Backend routing** — pick a named backend to route this
- *     bucket to.
- *   * **Alias** — virtual → real bucket name map.
- *   * **Quota** — soft storage quota in GiB.
- *   * **Anonymous read access (tri-state)** — the §7.5 UX fix:
- *     None / Entire bucket / Specific prefixes.
+ * Policy entries whose bucket doesn't exist (pre-provisioned or stale) are
+ * still shown, flagged "bucket not found", with an editable name.
  *
- * The tri-state replaces the old "Public Prefixes list" that left
- * operators guessing whether an empty-string sentinel meant "no
- * public access" or "entire bucket public" (it's the latter, but
- * nothing in the UI said so). The radio group makes the intent
- * explicit; the backend's `public: true` shorthand handles the
- * entire-bucket case losslessly.
+ * ## Merge-patch correctness
+ *
+ * The storage section PUT deep-merges (RFC 7396): absent keys PRESERVE
+ * server values. `buildBucketPayload` therefore receives the BASELINE
+ * bucket names (captured at fetch time in `pick`) and emits `name: null`
+ * for removed/reset policies, plus explicit per-field nulls — without
+ * which un-publicking, un-routing, and policy deletion silently no-op.
  *
  * Uses the section-level storage Apply flow so dirty-state indicators,
  * beforeunload, and Cmd/Ctrl+S behave like the rest of Configuration.
  */
-import { useCallback, useEffect, useState } from 'react';
-import {
-  Alert,
-  Button,
-  Modal,
-  Space,
-  Typography,
-  message,
-} from 'antd';
-import {
-  CloudOutlined,
-  ExclamationCircleOutlined,
-  PlusOutlined,
-} from '@ant-design/icons';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert, Button, Space, message } from 'antd';
+import { CloudOutlined, PlusOutlined } from '@ant-design/icons';
 import type { AdminConfig, BackendInfo } from '../adminApi';
-import { getBackends } from '../adminApi';
+import { getBackends, getBucketOrigins } from '../adminApi';
 import { useAdminConfig } from '../queries/config';
-import { listBuckets } from '../s3client';
 import { useCardStyles } from './shared-styles';
 import SectionHeader from './SectionHeader';
 import ApplyDialog from './ApplyDialog';
 import BucketCard from './BucketCard';
+import CreateBucketModal from './CreateBucketModal';
 import { useApplyHandler } from '../useDirtySection';
 import { useSectionEditor } from '../useSectionEditor';
-import type { BucketPolicyRow } from './bucketPolicyPayload';
-import { buildBucketPayload, freshId, policyToRow } from './bucketPolicyPayload';
-
-const { Text } = Typography;
+import type { BucketPolicyRow, BucketPolicyPatch, PrefixEntry } from './bucketPolicyPayload';
+import { DEFAULT_ROW_FIELDS, buildBucketPayload, freshId, isAllDefaultRow, policyToRow } from './bucketPolicyPayload';
 
 interface Props {
   onSessionExpired?: () => void;
 }
 
-type BucketWire = { buckets: AdminConfig['bucket_policies'] };
+type PolicyGet = NonNullable<AdminConfig['bucket_policies']>[string];
+/** GET returns full policies; PUT sends the merge-patch (values may be null). */
+type BucketWire = { buckets: Record<string, PolicyGet | BucketPolicyPatch | null> };
 
 export default function BucketsPanel({ onSessionExpired }: Props) {
   const { cardStyle, inputRadius } = useCardStyles();
+
+  // Bucket names that had a policy on the server at fetch time — the
+  // baseline `buildBucketPayload` diffs against to emit `name: null`
+  // deletions. Updated inside `pick`, which runs on mount and after every
+  // successful apply (the editor refreshes from server truth).
+  const baselineNamesRef = useRef<string[]>([]);
 
   const {
     value: rows,
@@ -78,75 +75,70 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
     initial: [],
     onSessionExpired,
     noun: 'bucket policies',
-    // The fetch path also side-loads backends / availableBuckets via a
-    // separate effect below; `pick` only owns the row-editing shape.
     pick: (body) => {
-      const nextRows = Object.entries(body.buckets || {}).map(([name, p]) =>
-        policyToRow(name, p)
-      );
+      const policies = body.buckets || {};
+      baselineNamesRef.current = Object.keys(policies);
+      const nextRows = Object.entries(policies)
+        .filter((e): e is [string, PolicyGet] => e[1] != null)
+        .map(([name, p]) => policyToRow(name, p));
       nextRows.sort((a, b) => a.name.localeCompare(b.name));
       return nextRows;
     },
-    // `toPayload` re-runs the pure builder. The guarded `runApply`
-    // below blocks the apply on validation failure, so this only runs
-    // for a valid set of rows; the `{}` fallback is unreachable in
-    // practice but keeps the type non-null.
+    // The guarded `runApply` below blocks the apply on validation failure,
+    // so this only runs for a valid set of rows; the `{}` fallback is
+    // unreachable in practice but keeps the type non-null.
     toPayload: (v) => {
-      const res = buildBucketPayload(v);
+      const res = buildBucketPayload(v, baselineNamesRef.current);
       return res.ok ? res.body : { buckets: {} };
     },
   });
 
-  // Config (backends + default backend) comes from the shared cache.
+  // Config (backends + default backend + global compression) from the cache.
   const { data: cfg } = useAdminConfig();
-  // /api/admin/backends is the fallback when the config response doesn't
-  // carry a `backends` array (legacy shapes); available buckets come from
-  // the S3 list endpoint. Neither is part of the storage section body, so
-  // they're side-loaded independently of the section editor.
   const [fallbackBackends, setFallbackBackends] = useState<BackendInfo[]>([]);
-  const [availableBuckets, setAvailableBuckets] = useState<string[]>([]);
+  const [realBuckets, setRealBuckets] = useState<string[]>([]);
+  const [createOpen, setCreateOpen] = useState(false);
+  /** Expanded row: `real:<name>` for buckets, the row `_id` for drafts. */
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
 
-  // getAdminConfig resolves to `null` on a 401; surface as session-expiry.
   useEffect(() => {
     if (cfg === null) onSessionExpired?.();
   }, [cfg, onSessionExpired]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const [bs, realBuckets] = await Promise.all([
-          getBackends().then((r) => r.backends).catch(() => [] as BackendInfo[]),
-          listBuckets().catch(() => [] as Array<{ name: string }>),
-        ]);
-        if (cancelled) return;
-        setFallbackBackends(bs);
-        setAvailableBuckets(realBuckets.map((b) => b.name));
-      } catch (e) {
-        if (cancelled) return;
-        if (e instanceof Error && e.message.includes('401')) onSessionExpired?.();
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const loadSideData = useCallback(async () => {
+    try {
+      // Real buckets come from the admin origins endpoint (server-side
+      // listing) — NOT the browser's S3 client, which may not have
+      // credentials when the operator lands here directly.
+      const [bs, origins] = await Promise.all([
+        getBackends().then((r) => r.backends).catch(() => [] as BackendInfo[]),
+        getBucketOrigins().catch(() => ({ buckets: [] })),
+      ]);
+      setFallbackBackends(bs);
+      setRealBuckets(origins.buckets.map((b) => b.name));
+    } catch (e) {
+      if (e instanceof Error && e.message.includes('401')) onSessionExpired?.();
+    }
   }, [onSessionExpired]);
 
-  // Prefer the /api/admin/config response's `backends` array — it
-  // synthesises a "default" entry on the singleton-backend path, so the
-  // per-bucket encryption badge works uniformly regardless of YAML shape.
-  // Fall back to /api/admin/backends when the primary endpoint doesn't
-  // carry backends (legacy response shapes).
+  useEffect(() => {
+    void loadSideData();
+  }, [loadSideData]);
+
+  // Prefer the /api/admin/config `backends` array — it synthesises a
+  // "default" entry on the singleton path so encryption badges resolve
+  // uniformly. Fall back to /api/admin/backends for legacy shapes.
   const backends =
     cfg?.backends && cfg.backends.length > 0 ? cfg.backends : fallbackBackends;
   const defaultBackend = cfg?.default_backend ?? null;
+  const globalRatio = cfg?.max_delta_ratio ?? 0.75;
+  const globalCompressionOn = globalRatio > 0;
 
-  // Guarded apply: run the client-side duplicate-name check first and
-  // surface the error, otherwise delegate to the section editor's
-  // validate → ApplyDialog → PUT flow (which re-derives the same body
-  // via `toPayload`, keeping the validate/PUT body byte-identical).
+  // Guarded apply: client-side validation first, then the editor's
+  // validate → ApplyDialog → PUT flow (which re-derives the same body via
+  // `toPayload`, keeping the validate/PUT body byte-identical).
   const runApply = useCallback(async () => {
-    const res = buildBucketPayload(rows);
+    const res = buildBucketPayload(rows, baselineNamesRef.current);
     if (!res.ok) {
       message.error(res.error);
       return;
@@ -154,50 +146,85 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
     await editorRunApply();
   }, [rows, editorRunApply]);
 
-  // ⌘S routes through the guard (registered after the hook's own
-  // handler, so this most-recently-mounted one wins the dispatch).
   useApplyHandler('configuration/storage/buckets', runApply, dirty);
 
-  const updateRow = (id: string, patch: Partial<BucketPolicyRow>) => {
-    setRows((cur) => cur.map((r) => (r._id === id ? { ...r, ...patch } : r)));
-  };
-
-  const addRow = () => {
-    setRows((cur) => [
-      ...cur,
-      {
-        _id: freshId(),
-        name: '',
-        compression: null,
-        max_delta_ratio: null,
-        backend: '',
-        alias: '',
-        publicMode: 'none',
-        public_prefixes: [],
-        quota_bytes: null,
-      },
-    ]);
-  };
-
-  const deleteRow = (id: string, name: string) => {
-    Modal.confirm({
-      title: `Remove bucket policy for "${name || '(unnamed)'}"?`,
-      icon: <ExclamationCircleOutlined />,
-      content: (
-        <Text type="secondary" style={{ fontSize: 13 }}>
-          The bucket itself is not deleted. Only the per-bucket policy
-          overrides go away — compression / quota / public-read
-          settings revert to the defaults.
-        </Text>
-      ),
-      okText: 'Remove',
-      okButtonProps: { danger: true },
-      cancelText: 'Cancel',
-      onOk: () => {
-        setRows((cur) => cur.filter((r) => r._id !== id));
-      },
+  // ── Row mutation: name-keyed for real buckets (materialises the row on
+  //    first edit), id-keyed for drafts. ──
+  //
+  // `pruneNoops` drops rows that are back to ALL-DEFAULT for a REAL bucket
+  // with no server-side policy: such a row serialises to nothing, so keeping
+  // it would only flip the dirty indicator for a guaranteed no-op apply
+  // ("Unsaved changes" that apply to nothing erodes trust in the dot).
+  // Drafts (un-named / not-real) and baseline buckets (reset-to-defaults =
+  // a real deletion) are kept.
+  const pruneNoops = (cur: BucketPolicyRow[]): BucketPolicyRow[] =>
+    cur.filter(
+      (r) =>
+        !isAllDefaultRow(r) ||
+        baselineNamesRef.current.includes(r.name) ||
+        !r.name ||
+        !realBuckets.includes(r.name)
+    );
+  const patchBucket = (name: string, patch: Partial<BucketPolicyRow>) => {
+    setRows((cur) => {
+      const existing = cur.find((r) => r.name === name);
+      const next = existing
+        ? cur.map((r) => (r.name === name ? { ...r, ...patch } : r))
+        : [...cur, { _id: freshId(), name, ...DEFAULT_ROW_FIELDS, ...patch }];
+      return pruneNoops(next);
     });
   };
+  const prefixChangeFor = (name: string) => (fn: (prev: PrefixEntry[]) => PrefixEntry[]) => {
+    setRows((cur) => {
+      const existing = cur.find((r) => r.name === name);
+      const next = existing
+        ? cur.map((r) =>
+            r.name === name ? { ...r, public_prefixes: fn(r.public_prefixes) } : r
+          )
+        : [...cur, { _id: freshId(), name, ...DEFAULT_ROW_FIELDS, public_prefixes: fn([]) }];
+      return pruneNoops(next);
+    });
+  };
+  const patchDraft = (id: string, patch: Partial<BucketPolicyRow>) => {
+    setRows((cur) => cur.map((r) => (r._id === id ? { ...r, ...patch } : r)));
+  };
+  // Draft renaming, guarded: naming a draft after an EXISTING bucket folds
+  // into that bucket's row (expand it, drop the draft) instead of creating a
+  // shadow duplicate; naming it after another draft/policy row is rejected
+  // (the duplicate would only surface as a cryptic validation error later).
+  const handleDraftRename = (draft: BucketPolicyRow, name: string) => {
+    if (name && realBuckets.includes(name)) {
+      message.info(`"${name}" already exists — edit it in the list above.`);
+      if (isAllDefaultRow(draft)) {
+        setRows((cur) => cur.filter((r) => r._id !== draft._id));
+        setExpandedKey(`real:${name}`);
+      }
+      return;
+    }
+    if (name && rows.some((r) => r._id !== draft._id && r.name === name)) {
+      message.warning(`"${name}" already has a settings row.`);
+      return;
+    }
+    patchDraft(draft._id, { name });
+  };
+  const prefixChangeForDraft = (id: string) => (fn: (prev: PrefixEntry[]) => PrefixEntry[]) => {
+    setRows((cur) =>
+      cur.map((r) => (r._id === id ? { ...r, public_prefixes: fn(r.public_prefixes) } : r))
+    );
+  };
+
+  const addDraft = () => {
+    const id = freshId();
+    setRows((cur) => [...cur, { _id: id, name: '', ...DEFAULT_ROW_FIELDS }]);
+    setExpandedKey(id);
+  };
+
+  // ── Display list: every real bucket (with its row when one exists), then
+  //    policy rows / drafts whose bucket doesn't exist. ──
+  const rowByName = new Map(rows.filter((r) => r.name).map((r) => [r.name, r]));
+  const sortedReal = [...realBuckets].sort((a, b) => a.localeCompare(b));
+  const orphanRows = rows.filter((r) => !r.name || !realBuckets.includes(r.name));
+  const overrideCount = rows.filter((r) => r.name && realBuckets.includes(r.name)).length;
 
   if (error) {
     return <Alert type="error" showIcon message="Failed to load" description={error} />;
@@ -219,19 +246,14 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
           type="warning"
           showIcon
           message="Unsaved changes"
-          description="Bucket policies are storage config. Review the section diff before applying."
+          description="Review the diff before applying — nothing is live yet."
           action={
             <Space>
               <Button size="small" onClick={discard} disabled={applying}>
                 Discard
               </Button>
-              <Button
-                type="primary"
-                size="small"
-                onClick={runApply}
-                loading={applying}
-              >
-                Review apply
+              <Button type="primary" size="small" onClick={runApply} loading={applying}>
+                Review &amp; apply
               </Button>
             </Space>
           }
@@ -241,50 +263,82 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
       <div style={cardStyle}>
         <SectionHeader
           icon={<CloudOutlined />}
-          title="Per-bucket policies"
+          title="Buckets"
           description={
             loading
               ? 'Loading...'
-              : rows.length === 0
-                ? 'No overrides. Buckets use the global compression default and are not publicly readable.'
-                : `${rows.length} bucket${rows.length === 1 ? '' : 's'} with custom policies.`
+              : `${sortedReal.length} bucket${sortedReal.length === 1 ? '' : 's'}` +
+                (overrideCount > 0
+                  ? ` · ${overrideCount} with custom settings`
+                  : ' — all on defaults') +
+                '. Click a bucket to edit its settings.'
           }
         />
 
-        <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {rows.map((row) => (
+        <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {sortedReal.map((name) => {
+            const row = rowByName.get(name) ?? null;
+            const key = `real:${name}`;
+            return (
+              <BucketCard
+                key={key}
+                name={name}
+                row={row}
+                real
+                expanded={expandedKey === key}
+                onToggle={() => setExpandedKey((k) => (k === key ? null : key))}
+                backends={backends}
+                defaultBackend={defaultBackend}
+                globalCompressionOn={globalCompressionOn}
+                globalRatio={globalRatio}
+                onPatch={(patch) => patchBucket(name, patch)}
+                onPrefixesChange={prefixChangeFor(name)}
+                inputRadius={inputRadius}
+              />
+            );
+          })}
+
+          {orphanRows.map((row) => (
             <BucketCard
               key={row._id}
+              name={row.name}
               row={row}
+              real={false}
+              expanded={expandedKey === row._id}
+              onToggle={() => setExpandedKey((k) => (k === row._id ? null : row._id))}
               backends={backends}
               defaultBackend={defaultBackend}
-              availableBuckets={availableBuckets.filter(
-                (b) => !rows.some((r) => r._id !== row._id && r.name === b)
-              )}
-              onChange={(patch) => updateRow(row._id, patch)}
-              onPrefixesChange={(fn) =>
-                setRows((cur) =>
-                  cur.map((r) =>
-                    r._id === row._id
-                      ? { ...r, public_prefixes: fn(r.public_prefixes) }
-                      : r
-                  )
-                )
+              globalCompressionOn={globalCompressionOn}
+              globalRatio={globalRatio}
+              onPatch={(patch) => patchDraft(row._id, patch)}
+              onPrefixesChange={prefixChangeForDraft(row._id)}
+              onDraftNameChange={(name) => handleDraftRename(row, name)}
+              onRemoveDraft={() =>
+                setRows((cur) => cur.filter((r) => r._id !== row._id))
               }
-              onDelete={() => deleteRow(row._id, row.name)}
+              availableBuckets={sortedReal.filter((b) => !rowByName.has(b))}
               inputRadius={inputRadius}
             />
           ))}
 
-          <Button
-            icon={<PlusOutlined />}
-            onClick={addRow}
-            style={{ marginTop: 4, borderRadius: 8, fontFamily: 'var(--font-ui)' }}
-            block
-            type="dashed"
-          >
-            Add bucket policy
-          </Button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
+            <Button
+              icon={<PlusOutlined />}
+              onClick={() => setCreateOpen(true)}
+              style={{ borderRadius: 8, fontFamily: 'var(--font-ui)' }}
+              type="dashed"
+            >
+              Create bucket
+            </Button>
+            <Button
+              type="link"
+              size="small"
+              style={{ fontSize: 11, padding: 0 }}
+              onClick={addDraft}
+            >
+              Pre-provision settings for a bucket that doesn&rsquo;t exist yet
+            </Button>
+          </div>
         </div>
 
         {dirty && (
@@ -295,11 +349,20 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
             style={{ marginTop: 16, borderRadius: 8, fontWeight: 600 }}
             block
           >
-            Review {rows.filter((r) => r.name.trim()).length} bucket polic
-            {rows.filter((r) => r.name.trim()).length === 1 ? 'y' : 'ies'}
+            Review &amp; apply changes
           </Button>
         )}
       </div>
+
+      <CreateBucketModal
+        open={createOpen}
+        canAdmin
+        onClose={() => setCreateOpen(false)}
+        onCreated={(name) => {
+          void loadSideData();
+          setExpandedKey(`real:${name}`);
+        }}
+      />
 
       <ApplyDialog
         open={applyOpen}
@@ -309,15 +372,6 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
         onCancel={cancelApply}
         loading={applying}
       />
-
-      {/* Informational footer about secret bucket policy mechanics */}
-      <Text type="secondary" style={{ fontSize: 11, lineHeight: 1.6 }}>
-        Per-bucket policies are written to <code>storage.buckets.&lt;name&gt;.*</code> in
-        YAML. Entire-bucket public read uses the <code>public: true</code>
-        {' '}shorthand; specific prefixes serialise as{' '}
-        <code>public_prefixes: [&quot;...&quot;]</code>. The backend round-trips between
-        the two forms losslessly.
-      </Text>
     </div>
   );
 }

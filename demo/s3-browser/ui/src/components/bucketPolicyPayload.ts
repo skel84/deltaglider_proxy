@@ -12,10 +12,23 @@
  * not array index. Those ids are NEVER serialised — `rowToPolicy`
  * strips them on the way to the wire.
  *
- * `buildBucketPayload` mirrors the old in-component `buildPayload`:
- * it validates (duplicate bucket names) and produces the exact
- * `{ buckets }` body sent to /validate and PUT. The body is
- * byte-identical to the pre-refactor builder for the same input.
+ * ## Merge-patch semantics (the part that bit us)
+ *
+ * The storage-section PUT applies RFC 7396 JSON Merge Patch RECURSIVELY:
+ * per-bucket entries deep-merge, `null` deletes a key, and an ABSENT key
+ * preserves the server's old value. The original builder only emitted an
+ * explicit `null` for `compression` — so every other "unset" (clearing a
+ * route/alias/quota/ratio, switching a public bucket back to private,
+ * deleting a whole policy) silently no-opped server-side: the UI said
+ * "applied", the YAML kept the old value, and the row resurrected on the
+ * next load. Un-publicking a bucket not taking effect is the security-
+ * relevant case.
+ *
+ * The contract now: `rowToPolicy` emits EVERY clearable field explicitly
+ * (value or `null`), and `buildBucketPayload` takes the BASELINE bucket
+ * names (what the server had at fetch time) so removed/reset policies
+ * serialise as `name: null` — the merge-patch spelling of "delete this
+ * policy".
  */
 import type { AdminConfig } from '../adminApi';
 
@@ -45,6 +58,34 @@ export interface BucketPolicyRow {
   public_prefixes: PrefixEntry[];
   quota_bytes: number | null;
 }
+
+/** One bucket's merge-patch: every clearable field present (value or null). */
+export interface BucketPolicyPatch {
+  compression: boolean | null;
+  max_delta_ratio: number | null;
+  backend: string | null;
+  alias: string | null;
+  /** Always emitted as null — the [""]-sentinel in `public_prefixes` is the
+   *  single wire spelling for "entire bucket"; nulling `public` clears a
+   *  stored `public: true` shorthand when leaving that mode. */
+  public: null;
+  public_prefixes: string[] | null;
+  quota_bytes: number | null;
+}
+
+/** The storage-section merge body: per-bucket patch, or `null` = delete policy. */
+type BucketsPatchBody = { buckets: Record<string, BucketPolicyPatch | null> };
+
+/** Default (no-override) field values — what a bucket without a policy means. */
+export const DEFAULT_ROW_FIELDS: Omit<BucketPolicyRow, '_id' | 'name'> = Object.freeze({
+  compression: null,
+  max_delta_ratio: null,
+  backend: '',
+  alias: '',
+  publicMode: 'none' as const,
+  public_prefixes: [],
+  quota_bytes: null,
+});
 
 let rowIdCounter = 0;
 
@@ -86,59 +127,95 @@ export function policyToRow(
   };
 }
 
-function rowToPolicy(row: BucketPolicyRow): {
-  /** Omitted or explicit bool; JSON `null` clears inherit (RFC 7396 merge removes key). */
-  compression?: boolean | null;
-  max_delta_ratio?: number;
-  backend?: string;
-  alias?: string;
-  public_prefixes?: string[];
-  quota_bytes?: number;
-} {
-  // Serialise the tri-state back to the wire shape the backend
-  // accepts. `entire` uses the empty-string sentinel `[""]` — the
-  // backend's `BucketPolicyConfig::normalize` collapses it to
-  // `public: true` on re-serialisation, lossless round-trip.
-  const out: ReturnType<typeof rowToPolicy> = {};
-  // Section storage merge is RFC 7396 per nested object: omitting `compression`
-  // leaves the previous value; JSON `null` removes the key → inherit default.
-  out.compression = row.compression === null ? null : row.compression;
-  if (row.max_delta_ratio != null) out.max_delta_ratio = row.max_delta_ratio;
-  if (row.backend) out.backend = row.backend;
-  if (row.alias) out.alias = row.alias;
-  if (row.quota_bytes != null) out.quota_bytes = row.quota_bytes;
+/** The row's non-blank public prefixes (what would actually serialise). */
+function cleanedPrefixes(row: BucketPolicyRow): string[] {
+  return row.public_prefixes.map((p) => p.value.trim()).filter((p) => p.length > 0);
+}
+
+/**
+ * True when the row overrides NOTHING — i.e. the bucket behaves exactly as
+ * if it had no policy. Such rows serialise as policy deletion (when the
+ * server has a policy) or nothing at all (when it doesn't): a policy exists
+ * iff something is overridden.
+ */
+export function isAllDefaultRow(row: BucketPolicyRow): boolean {
+  return (
+    row.compression === null &&
+    row.max_delta_ratio === null &&
+    row.backend === '' &&
+    row.alias === '' &&
+    row.quota_bytes === null &&
+    (row.publicMode === 'none' ||
+      (row.publicMode === 'prefixes' && cleanedPrefixes(row).length === 0))
+  );
+}
+
+function rowToPolicy(row: BucketPolicyRow): BucketPolicyPatch {
+  // Serialise the tri-state back to the wire shape the backend accepts.
+  // `entire` uses the empty-string sentinel `[""]` — the backend's
+  // `BucketPolicyConfig::normalize` collapses it to `public: true` on
+  // re-serialisation, lossless round-trip.
+  //
+  // EVERY clearable field is emitted explicitly: a concrete value, or
+  // `null` so the RFC 7396 merge deletes the old key. Omission would
+  // PRESERVE the server's previous value — the silent-no-op bug class
+  // described in the module header.
+  let public_prefixes: string[] | null = null;
   if (row.publicMode === 'entire') {
-    out.public_prefixes = [''];
+    public_prefixes = [''];
   } else if (row.publicMode === 'prefixes') {
-    const cleaned = row.public_prefixes
-      .map((p) => p.value.trim())
-      .filter((p) => p.length > 0);
-    if (cleaned.length > 0) out.public_prefixes = cleaned;
+    const cleaned = cleanedPrefixes(row);
+    if (cleaned.length > 0) public_prefixes = cleaned;
   }
-  return out;
+  return {
+    compression: row.compression === null ? null : row.compression,
+    max_delta_ratio: row.max_delta_ratio ?? null,
+    backend: row.backend || null,
+    alias: row.alias || null,
+    public: null,
+    public_prefixes,
+    quota_bytes: row.quota_bytes ?? null,
+  };
 }
 
 type BucketPayloadResult =
-  | { ok: true; body: { buckets: AdminConfig['bucket_policies'] } }
+  | { ok: true; body: BucketsPatchBody }
   | { ok: false; error: string };
 
 /**
- * Validate the rows + build the `{ buckets }` storage-section body.
+ * Validate the rows + build the `{ buckets }` storage-section merge body.
  *
  * Validation: bucket names must be non-empty (empty rows are
- * genuinely-unfilled and dropped); duplicate names abort with an
- * error. Identical to the pre-refactor in-component `buildPayload`.
+ * genuinely-unfilled and dropped); duplicate names abort with an error.
+ *
+ * `baselineNames` is the set of bucket names that HAD a policy on the
+ * server at fetch time. Any baseline bucket that is now absent from the
+ * rows — or present but all-default — serialises as `name: null`, the
+ * merge-patch deletion. Without it, removing a policy is a server-side
+ * no-op (see module header).
  */
-export function buildBucketPayload(rows: BucketPolicyRow[]): BucketPayloadResult {
+export function buildBucketPayload(
+  rows: BucketPolicyRow[],
+  baselineNames: readonly string[] = []
+): BucketPayloadResult {
   const cleaned = rows.filter((r) => r.name.trim());
   const names = cleaned.map((r) => r.name);
   const dupes = names.filter((n, i) => names.indexOf(n) !== i);
   if (dupes.length > 0) {
     return { ok: false, error: `Duplicate bucket name: ${dupes[0]}` };
   }
-  const bp: AdminConfig['bucket_policies'] = {};
+  const bp: Record<string, BucketPolicyPatch | null> = {};
   for (const row of cleaned) {
-    bp[row.name] = rowToPolicy(row);
+    if (isAllDefaultRow(row)) {
+      // No overrides → no policy. Delete the server's policy if one exists;
+      // otherwise emit nothing (a brand-new all-default row is a no-op).
+      if (baselineNames.includes(row.name)) bp[row.name] = null;
+    } else {
+      bp[row.name] = rowToPolicy(row);
+    }
+  }
+  for (const name of baselineNames) {
+    if (!cleaned.some((r) => r.name === name)) bp[name] = null;
   }
   return { ok: true, body: { buckets: bp } };
 }

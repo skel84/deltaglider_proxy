@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { qk } from '../queries/keys';
-import { Button, Input, Radio, Switch, Typography, Space, Alert, Spin } from 'antd';
-import { PlusOutlined, DeleteOutlined, DatabaseOutlined, CloudOutlined, CheckCircleOutlined, ApiOutlined, FolderOutlined } from '@ant-design/icons';
+import { Button, Input, Modal, Radio, Switch, Typography, Space, Alert, Spin } from 'antd';
+import { PlusOutlined, DeleteOutlined, DatabaseOutlined, CloudOutlined, CheckCircleOutlined, ApiOutlined } from '@ant-design/icons';
 import type { BackendInfo, CreateBackendRequest } from '../adminApi';
 import { createBackend, deleteBackend, testS3Connection, updateAdminConfig, putSection } from '../adminApi';
 import { useAdminConfig } from '../queries/config';
 import { useBackends, useBucketOrigins } from '../queries/backends';
 import CreateBucketModal from './CreateBucketModal';
 import { useColors } from '../ThemeContext';
-import { useNavigation } from '../NavigationContext';
 import { useCardStyles } from './shared-styles';
 import SectionHeader from './SectionHeader';
 import FormField from './FormField';
@@ -29,7 +28,6 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
   // Query client lets mutations close the loop with `invalidateQueries`
   // instead of the local `refresh()` having to coordinate with siblings.
   const qc = useQueryClient();
-  const { navigate } = useNavigation();
 
   // Backends + config are read from the shared cache; mutations below invalidate
   // `qk.backends.list()` + `qk.config()` (via refresh()) so all readers refresh.
@@ -118,9 +116,38 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
       if (formSecretKey) req.secret_access_key = formSecretKey;
     }
     try {
+      // S3 backends: prove the credentials work BEFORE saving anything —
+      // creating a backend blind and discovering a typo'd secret later (via
+      // failing uploads) is the worse failure mode.
+      if (formType === 's3') {
+        if (!formAccessKey || !formSecretKey) {
+          setSaveResult({
+            ok: false,
+            message: 'S3 backends need both an Access Key ID and a Secret Access Key.',
+          });
+          return;
+        }
+        const probe = await testS3Connection({
+          endpoint: req.endpoint,
+          region: req.region,
+          force_path_style: req.force_path_style,
+          access_key_id: req.access_key_id,
+          secret_access_key: req.secret_access_key,
+        });
+        if (!probe.success) {
+          setSaveResult({
+            ok: false,
+            message: `Connection test failed — backend not created: ${probe.error || 'unknown error'}`,
+          });
+          return;
+        }
+      }
       const result = await createBackend(req);
       if (result.success) {
-        setSaveResult({ ok: true, message: `Backend '${formName.trim()}' created` });
+        setSaveResult({
+          ok: true,
+          message: `Backend '${formName.trim()}' created${formType === 's3' ? ' (connection verified)' : ''} — use "Create bucket here" on its card to start using it`,
+        });
         setShowForm(false);
         resetForm();
         await refresh();
@@ -134,19 +161,40 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
     }
   };
 
-  const handleDelete = async (name: string) => {
-    if (!window.confirm(`Delete backend "${name}"? This cannot be undone.`)) return;
-    try {
-      const result = await deleteBackend(name);
-      if (result.success) {
-        setSaveResult({ ok: true, message: `Backend '${name}' removed` });
-        await refresh();
-      } else {
-        setSaveResult({ ok: false, message: result.error || 'Failed to delete' });
-      }
-    } catch (e) {
-      setSaveResult({ ok: false, message: e instanceof Error ? e.message : 'Network error' });
-    }
+  const handleDelete = (name: string) => {
+    const routedHere = countByBackend[name] ?? 0;
+    Modal.confirm({
+      title: `Remove backend "${name}"?`,
+      okText: 'Remove backend',
+      okButtonProps: { danger: true },
+      content: (
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          {routedHere > 0 ? (
+            <>
+              <strong>{routedHere} bucket{routedHere === 1 ? '' : 's'}</strong> currently route
+              {routedHere === 1 ? 's' : ''} here — their objects stay on disk but become
+              unreachable until re-routed or migrated.{' '}
+            </>
+          ) : (
+            'No buckets route here. '
+          )}
+          The stored data itself is not deleted.
+        </Text>
+      ),
+      onOk: async () => {
+        try {
+          const result = await deleteBackend(name);
+          if (result.success) {
+            setSaveResult({ ok: true, message: `Backend '${name}' removed` });
+            await refresh();
+          } else {
+            setSaveResult({ ok: false, message: result.error || 'Failed to delete' });
+          }
+        } catch (e) {
+          setSaveResult({ ok: false, message: e instanceof Error ? e.message : 'Network error' });
+        }
+      },
+    });
   };
 
   const handleTestConnection = async (b: BackendInfo) => {
@@ -225,12 +273,6 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
   };
 
   const globalCompressionOn = (config?.max_delta_ratio ?? 0.75) > 0;
-  const bucketPolicyEntries = Object.entries(config?.bucket_policies || {});
-  const routedPolicies = bucketPolicyEntries.filter(([, policy]) => Boolean(policy.backend));
-  const publicPolicies = bucketPolicyEntries.filter(
-    ([, policy]) => policy.public === true || (policy.public_prefixes && policy.public_prefixes.length > 0)
-  );
-  const quotaPolicies = bucketPolicyEntries.filter(([, policy]) => policy.quota_bytes != null);
 
   if (loading) {
     return <div style={{ display: 'flex', justifyContent: 'center', padding: 64 }}><Spin /></div>;
@@ -259,33 +301,7 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
           <Alert type="error" message={error} showIcon style={{ borderRadius: 8, marginBottom: 12 }} />
         )}
 
-        {/* Default compression policy */}
-        <div style={cardStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <Switch
-              checked={globalCompressionOn}
-              onChange={async (on) => {
-                try {
-                  await updateAdminConfig({ max_delta_ratio: on ? 0.75 : 0 });
-                  await refresh();
-                } catch { /* non-blocking: user sees the toggle revert */ }
-              }}
-            />
-            <div>
-              <Text style={{ fontSize: 14, fontWeight: 700, fontFamily: 'var(--font-ui)', color: colors.TEXT_PRIMARY }}>
-                Default compression: <span style={{ color: globalCompressionOn ? colors.ACCENT_GREEN : colors.ACCENT_AMBER }}>{globalCompressionOn ? 'ON' : 'OFF'}</span>
-              </Text>
-              <Text type="secondary" style={{ fontSize: 12, fontFamily: 'var(--font-ui)', display: 'block', marginTop: 2, lineHeight: 1.6 }}>
-                {globalCompressionOn
-                  ? 'New buckets compress by default. Versioned binaries are stored as xdelta3 deltas (30-70% savings). GETs reconstruct transparently. Already-compressed formats (images, video) are skipped automatically.'
-                  : 'New buckets store files as-is by default. You can still enable compression for individual buckets below.'}
-                {' '}Per-bucket overrides always take precedence.
-              </Text>
-            </div>
-          </div>
-        </div>
-
-        {/* Storage Backends */}
+        {/* Storage Backends — the page's subject, first. */}
         <div style={cardStyle}>
           <SectionHeader
             icon={<DatabaseOutlined />}
@@ -346,7 +362,9 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
                   Create bucket here
                 </Button>
                 {b.backend_type === 's3' && (
-                  <Button size="small" icon={<ApiOutlined />} loading={testingBackend === b.name} onClick={() => handleTestConnection(b)} title="Test connection" />
+                  <Button size="small" icon={<ApiOutlined />} loading={testingBackend === b.name} onClick={() => handleTestConnection(b)} title="Test the S3 connection">
+                    Test
+                  </Button>
                 )}
                 {!b.is_synthesized && (
                   <Button size="small" icon={<DeleteOutlined />} danger onClick={() => handleDelete(b.name)} title="Remove backend" />
@@ -401,9 +419,14 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
                   <FormField label="Region" yamlPath="storage.backends[].region">
                     <Input value={formRegion} onChange={(e) => setFormRegion(e.target.value)} placeholder="us-east-1" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
                   </FormField>
-                  <div style={{ marginBottom: 20, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <Switch checked={formForcePathStyle} onChange={setFormForcePathStyle} size="small" />
-                    <Text style={{ fontSize: 13, fontFamily: 'var(--font-ui)' }}>Force path-style URLs</Text>
+                  <div style={{ marginBottom: 20 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Switch checked={formForcePathStyle} onChange={setFormForcePathStyle} size="small" />
+                      <Text style={{ fontSize: 13, fontFamily: 'var(--font-ui)' }}>Force path-style URLs</Text>
+                    </div>
+                    <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                      Keep ON for S3-compatibles (MinIO, Hetzner, Ceph). Turn OFF for AWS S3.
+                    </Text>
                   </div>
                   <FormField label="Access Key ID" yamlPath="storage.backends[].access_key_id">
                     <Input value={formAccessKey} onChange={(e) => setFormAccessKey(e.target.value)} placeholder="AKIAIOSFODNN7EXAMPLE" style={{ ...inputRadius, fontFamily: 'var(--font-mono)', fontSize: 13 }} />
@@ -433,45 +456,37 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
           </div>
         )}
 
-        {/* Bucket policy summary — Buckets owns the editor. */}
+        {/* Defaults — global knobs new buckets inherit. Demoted below the
+            backends themselves (the page's subject); per-bucket overrides
+            live on the Buckets page. */}
         <div style={cardStyle}>
           <SectionHeader
-            icon={<FolderOutlined />}
-            title="Bucket policy routing"
-            description="Per-bucket routing, compression, aliases, quotas, and public read live in the Buckets page."
+            icon={<CheckCircleOutlined />}
+            title="Defaults"
+            description="What new buckets inherit. Per-bucket overrides on the Buckets page always win."
           />
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
-            {[
-              ['Policies', bucketPolicyEntries.length, 'custom bucket rows'],
-              ['Routed', routedPolicies.length, 'non-default backend'],
-              ['Public', publicPolicies.length, 'anonymous read'],
-              ['Quotas', quotaPolicies.length, 'quota limits'],
-            ].map(([label, value, hint]) => (
-              <div
-                key={label}
-                style={{
-                  border: `1px solid ${colors.BORDER}`,
-                  borderRadius: 8,
-                  padding: '10px 12px',
-                  background: colors.BG_ELEVATED,
-                }}
-              >
-                <div style={{ fontSize: 18, fontWeight: 700, color: colors.TEXT_PRIMARY }}>{value}</div>
-                <div style={{ fontSize: 11, fontWeight: 700, color: colors.TEXT_MUTED, textTransform: 'uppercase', letterSpacing: 0.6 }}>{label}</div>
-                <div style={{ fontSize: 11, color: colors.TEXT_MUTED, marginTop: 2 }}>{hint}</div>
-              </div>
-            ))}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
+            <Switch
+              checked={globalCompressionOn}
+              onChange={async (on) => {
+                try {
+                  await updateAdminConfig({ max_delta_ratio: on ? 0.75 : 0 });
+                  await refresh();
+                } catch { /* non-blocking: user sees the toggle revert */ }
+              }}
+            />
+            <div>
+              <Text style={{ fontSize: 13, fontWeight: 700, fontFamily: 'var(--font-ui)', color: colors.TEXT_PRIMARY }}>
+                Delta compression: <span style={{ color: globalCompressionOn ? colors.ACCENT_GREEN : colors.ACCENT_AMBER }}>{globalCompressionOn ? 'ON' : 'OFF'}</span>
+                <span style={{ fontWeight: 400, color: colors.TEXT_MUTED, marginLeft: 8, fontSize: 12 }}>applies immediately</span>
+              </Text>
+              <Text type="secondary" style={{ fontSize: 12, fontFamily: 'var(--font-ui)', display: 'block', marginTop: 2, lineHeight: 1.6 }}>
+                {globalCompressionOn
+                  ? 'Versioned binaries are stored as xdelta3 deltas (30-70% smaller); reads reconstruct transparently. Already-compressed formats (images, video) are skipped.'
+                  : 'Files are stored as-is. Compression can still be enabled per bucket.'}
+              </Text>
+            </div>
           </div>
-          <Button
-            type="primary"
-            ghost
-            icon={<FolderOutlined />}
-            onClick={() => navigate('admin/configuration/storage/buckets')}
-            style={{ marginTop: 12, borderRadius: 8, fontWeight: 600 }}
-            block
-          >
-            Open bucket policies
-          </Button>
         </div>
 
       </Space>

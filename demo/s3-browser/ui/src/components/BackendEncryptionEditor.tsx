@@ -167,9 +167,11 @@ export default function BackendEncryptionEditor({ backendName, current, onApply 
   // Header row: current status + top-level action.
   const statusLine = (() => {
     if (current.mode === 'none') {
+      // Same vocabulary as the mode select beside it ("None (plaintext)") —
+      // one fact, one wording.
       return (
         <Text style={{ fontSize: 13, color: colors.TEXT_MUTED, fontFamily: 'var(--font-ui)' }}>
-          Encryption: <strong style={{ color: colors.TEXT_MUTED }}>DISABLED</strong>
+          Encryption: <strong style={{ color: colors.TEXT_MUTED }}>None (plaintext)</strong>
         </Text>
       );
     }
