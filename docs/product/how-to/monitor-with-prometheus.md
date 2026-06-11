@@ -1,12 +1,10 @@
-# Monitoring and alerts
+# How to monitor with Prometheus and Grafana
 
-*Wire Prometheus + Grafana up to DeltaGlider Proxy and set up the alerts you actually want to be paged on.*
+This guide shows you how to scrape DeltaGlider Proxy with Prometheus, build the Grafana panels that matter, and install the alert rules you actually want to be paged on. The full metrics catalog lives in the [metrics reference](../reference/metrics.md).
 
-The full metrics catalog lives at [reference/metrics.md](reference/metrics.md). This page is the operational task sheet: how to scrape, what to graph, what to alert on.
+Three always-on endpoints are exempt from SigV4 auth so monitoring systems can hit them without credentials: `GET /_/health` (status + cache/RSS gauges), `GET /_/stats` (aggregate storage stats, 10s server-side cache), and `GET /_/metrics` (Prometheus text format). The version is intentionally **not** in `/_/health` (anti-fingerprinting); the authenticated `GET /_/api/whoami` returns it.
 
-## Scrape configuration
-
-### Prometheus
+## 1. Configure the scrape
 
 ```yaml
 # validate
@@ -15,10 +13,10 @@ scrape_configs:
     metrics_path: /_/metrics
     scrape_interval: 15s
     static_configs:
-      - targets: ["dgp.example.com:9000"]
+      - targets: ["s3.acme.example:9000"]
 ```
 
-For multiple instances behind a load balancer, use service discovery or list each target directly:
+For multiple instances, use service discovery or list each target directly:
 
 ```yaml
 scrape_configs:
@@ -32,9 +30,9 @@ scrape_configs:
           - "dgp-3:9000"
 ```
 
-The `/_/metrics` endpoint is exempt from SigV4 auth, so Prometheus doesn't need credentials. Bare `/metrics` is part of the S3-compatible namespace and must not be used for Prometheus scraping.
+The `/_/metrics` endpoint is exempt from SigV4 auth, so Prometheus doesn't need credentials. Bare `/metrics` is part of the S3-compatible namespace — do not scrape it.
 
-### Docker Compose starter (Prometheus + Grafana)
+If you don't have a Prometheus + Grafana stack yet, this starter compose gets you one:
 
 ```yaml
 services:
@@ -58,19 +56,17 @@ volumes:
   grafana-data:
 ```
 
-`docker compose up -d`, open `http://localhost:3000` (admin/admin), add Prometheus as a data source at `http://prometheus:9090`, import the panels below.
+`docker compose up -d`, open `http://localhost:3000` (admin/admin), add Prometheus as a data source at `http://prometheus:9090`, then import the panels below.
 
-## Dashboard panels (PromQL)
+## 2. Build the dashboard panels
 
-### Request rate by operation
+**Request rate by operation** — time series, stacked; shows which S3 operations dominate:
 
 ```promql
 sum by (operation) (rate(deltaglider_http_requests_total[5m]))
 ```
 
-Time series, stacked. Shows which S3 operations dominate.
-
-### Latency p50 / p95 / p99
+**Latency p50 / p95 / p99** — three queries on one panel, unit seconds:
 
 ```promql
 histogram_quantile(0.50, sum by (le) (rate(deltaglider_http_request_duration_seconds_bucket[5m])))
@@ -78,17 +74,13 @@ histogram_quantile(0.95, sum by (le) (rate(deltaglider_http_request_duration_sec
 histogram_quantile(0.99, sum by (le) (rate(deltaglider_http_request_duration_seconds_bucket[5m])))
 ```
 
-Three queries on one panel. Unit: seconds.
-
-### Latency by operation (p95)
+**Latency by operation (p95)** — spots slow operations; GET (delta decode) vs HEAD (cache read) have very different profiles:
 
 ```promql
 histogram_quantile(0.95, sum by (le, operation) (rate(deltaglider_http_request_duration_seconds_bucket[5m])))
 ```
 
-Useful for spotting slow operations — GET (delta decode) vs HEAD (cache read) have very different profiles.
-
-### Error rate
+**Error rate** — stat panel, unit percent (0–1):
 
 ```promql
 sum(rate(deltaglider_http_requests_total{status=~"5.."}[5m]))
@@ -96,9 +88,7 @@ sum(rate(deltaglider_http_requests_total{status=~"5.."}[5m]))
 sum(rate(deltaglider_http_requests_total[5m]))
 ```
 
-Stat panel. Unit: percent (0–1).
-
-### Delta compression effectiveness
+**Delta compression effectiveness**:
 
 ```promql
 # Bytes saved per second
@@ -111,15 +101,13 @@ deltaglider_delta_bytes_saved_total
 histogram_quantile(0.50, rate(deltaglider_delta_compression_ratio_bucket[1h]))
 ```
 
-### Storage decisions mix
+**Storage decisions mix** — pie chart; delta vs passthrough vs reference split:
 
 ```promql
 sum by (decision) (rate(deltaglider_delta_decisions_total[5m]))
 ```
 
-Pie chart. Shows delta vs passthrough vs reference split.
-
-### Cache hit ratio
+**Cache hit ratio** — gauge, target > 90%:
 
 ```promql
 rate(deltaglider_cache_hits_total[5m])
@@ -127,47 +115,39 @@ rate(deltaglider_cache_hits_total[5m])
 (rate(deltaglider_cache_hits_total[5m]) + rate(deltaglider_cache_misses_total[5m]))
 ```
 
-Gauge. Target: > 90%.
-
-### Cache headroom
+**Cache headroom** — compare `cache_size_bytes` against `DGP_CACHE_MB * 1048576`:
 
 ```promql
 deltaglider_cache_size_bytes
 deltaglider_cache_entries
 ```
 
-Compare `cache_size_bytes` against `DGP_CACHE_MB * 1048576` to see utilisation.
-
-### Codec pressure
+**Codec pressure** — gauge; at 0, all xdelta3 permits are in use and encode/decode queue (raise `DGP_CODEC_CONCURRENCY`):
 
 ```promql
 deltaglider_codec_semaphore_available
 ```
 
-Gauge. When it drops to 0, xdelta3 permits are all in use and encode/decode queue. Increase `DGP_CODEC_CONCURRENCY`.
-
-### Encode + decode latency (p95)
+**Encode + decode latency (p95)**:
 
 ```promql
 histogram_quantile(0.95, rate(deltaglider_delta_encode_duration_seconds_bucket[5m]))
 histogram_quantile(0.95, rate(deltaglider_delta_decode_duration_seconds_bucket[5m]))
 ```
 
-### Auth failure rate
+**Auth failure rate** — a spike in `invalid_signature` = client misconfiguration; a spike in `missing_header` = unauthenticated probes:
 
 ```promql
 sum by (reason) (rate(deltaglider_auth_failures_total[5m]))
 ```
 
-A spike in `invalid_signature` = client misconfiguration. A spike in `missing_header` = unauthenticated probes.
-
-### Uptime
+**Uptime**:
 
 ```promql
 time() - process_start_time_seconds
 ```
 
-## Alerting rules
+## 3. Install the alerting rules
 
 Drop these into your Prometheus `rules.yml`. Tune thresholds to your SLO.
 
@@ -226,12 +206,26 @@ groups:
           summary: "DeltaGlider instance unreachable"
 ```
 
-## Built-in admin dashboard
+## The built-in admin dashboard
 
-The admin UI ships a live monitoring page at `/_/admin/dashboard` — same metrics, auto-refreshed every 5s, with a storage-analytics tab that surfaces per-bucket savings and estimated cost. It's not a substitute for a proper Grafana setup in production (no historical retention, no alerting), but it's enough to answer "is the proxy healthy right now?" without leaving the UI.
+![Built-in analytics dashboard](/_/screenshots/analytics.jpg)
+
+The admin UI ships a live monitoring page at `/_/admin/dashboard` — same metrics, auto-refreshed every 5s, with a storage-analytics tab that surfaces per-bucket savings and estimated cost. It's not a substitute for Grafana in production (no historical retention, no alerting), but it answers "is the proxy healthy right now?" without leaving the UI.
+
+## Verify
+
+```bash
+# The endpoint serves Prometheus text format
+curl -s https://s3.acme.example/_/metrics | grep deltaglider_ | head
+
+# Prometheus sees the target as up
+curl -s 'http://localhost:9090/api/v1/query?query=up{job="deltaglider"}' | jq '.data.result[].value'
+```
+
+In Grafana, the request-rate panel should show data within one scrape interval of real traffic. To test the alert pipeline, stop the proxy and confirm `DeltaGliderDown` fires after 2 minutes.
 
 ## Related
 
-- [Metrics reference](reference/metrics.md) — full catalog, labels, buckets.
-- [Production deployment](20-production-deployment.md) — cache sizing, codec concurrency, log levels.
-- [Troubleshooting](41-troubleshooting.md) — symptom → metric mapping when something misbehaves.
+- [Metrics reference](../reference/metrics.md) — full catalog, labels, buckets
+- [How to take a proxy to production](go-to-production.md) — cache sizing and codec concurrency knobs
+- [Troubleshooting](troubleshooting.md) — symptom → metric mapping when something misbehaves

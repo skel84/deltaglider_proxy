@@ -43,9 +43,9 @@ Proxy-AES on a named S3 backend, key supplied by env var:
 storage:
   backends:
     - name: hetzner-fsn1
-      s3:
-        endpoint: https://fsn1.your-objectstorage.com
-        region: fsn1
+      type: s3
+      endpoint: https://fsn1.your-objectstorage.com
+      region: fsn1
       encryption:
         mode: aes256-gcm-proxy
         key_id: hetzner-2026-06
@@ -77,8 +77,8 @@ SSE-KMS on an AWS backend:
 storage:
   backends:
     - name: aws-dr
-      s3:
-        region: eu-west-1
+      type: s3
+      region: eu-west-1
       encryption:
         mode: sse-kms
         kms_key_id: arn:aws:kms:eu-west-1:123456789012:key/abcd-ef01
@@ -91,8 +91,8 @@ SSE-S3 on an AWS backend:
 storage:
   backends:
     - name: aws-dr
-      s3:
-        region: eu-west-1
+      type: s3
+      region: eu-west-1
       encryption:
         mode: sse-s3
 ```

@@ -113,7 +113,7 @@ The canonical exporter redacts every secret on the way out — a YAML pulled fro
 - `iam_users[*].secret_access_key` → `""`
 - `auth_providers[*].client_secret` → `null`
 
-Secrets in the YAML file are stored verbatim; there is no env-var substitution for IAM secrets (any placeholder-looking string in `secret_access_key` or `client_secret` becomes the secret). The persist-variant serializer keeps whatever YAML carries on disk across admin-API round-trips.
+Secrets in YAML applied through `config apply` or loaded from disk pass through `${env:NAME}` expansion first (see [Configuration](configuration.md)); a raw admin-API document body is NOT expanded — any placeholder-looking string sent that way becomes the literal secret. The persist-variant serializer keeps whatever YAML carries on disk across admin-API round-trips.
 
 ## The empty-YAML gate
 

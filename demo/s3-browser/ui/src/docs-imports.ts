@@ -15,19 +15,35 @@
 
 import README from '../../../../docs/product/README.md?raw';
 import QUICKSTART from '../../../../docs/product/01-quickstart.md?raw';
-import FIRST_BUCKET from '../../../../docs/product/10-first-bucket.md?raw';
-import PROD_DEPLOY from '../../../../docs/product/20-production-deployment.md?raw';
 import PROD_SECURITY from '../../../../docs/product/20-production-security-checklist.md?raw';
-import UPGRADE_GUIDE from '../../../../docs/product/21-upgrade-guide.md?raw';
 import KUBERNETES_HELM from '../../../../docs/product/22-kubernetes-helm.md?raw';
-import DOCKER_COMPOSE from '../../../../docs/product/23-docker-compose.md?raw';
-import OAUTH_SETUP from '../../../../docs/product/auth/30-oauth-setup.md?raw';
-import SIGV4_IAM from '../../../../docs/product/auth/31-sigv4-and-iam.md?raw';
-import IAM_CONDITIONS from '../../../../docs/product/auth/32-iam-conditions.md?raw';
 import REF_RATE_LIMITS from '../../../../docs/product/reference/rate-limits.md?raw';
-import MONITORING from '../../../../docs/product/40-monitoring-and-alerts.md?raw';
-import TROUBLESHOOTING from '../../../../docs/product/41-troubleshooting.md?raw';
 import FAQ from '../../../../docs/product/42-faq.md?raw';
+import HT_GO_TO_PRODUCTION from '../../../../docs/product/how-to/go-to-production.md?raw';
+import HT_DEPLOY_WITH_DOCKER_COMPOSE from '../../../../docs/product/how-to/deploy-with-docker-compose.md?raw';
+import HT_DEPLOY_ON_KUBERNETES from '../../../../docs/product/how-to/deploy-on-kubernetes.md?raw';
+import HT_SERVE_TLS from '../../../../docs/product/how-to/serve-tls.md?raw';
+import HT_UPGRADE from '../../../../docs/product/how-to/upgrade.md?raw';
+import HT_BACK_UP_AND_RESTORE from '../../../../docs/product/how-to/back-up-and-restore.md?raw';
+import HT_RUN_MULTIPLE_INSTANCES from '../../../../docs/product/how-to/run-multiple-instances.md?raw';
+import HT_MONITOR_WITH_PROMETHEUS from '../../../../docs/product/how-to/monitor-with-prometheus.md?raw';
+import HT_TRACE_REQUESTS from '../../../../docs/product/how-to/trace-requests.md?raw';
+import HT_TROUBLESHOOTING from '../../../../docs/product/how-to/troubleshooting.md?raw';
+import HT_ROUTE_A_BUCKET_TO_A_BACKEND from '../../../../docs/product/how-to/route-a-bucket-to-a-backend.md?raw';
+import HT_MIGRATE_EXISTING_DATA_INTO_THE_PROXY from '../../../../docs/product/how-to/migrate-existing-data-into-the-proxy.md?raw';
+import HT_MOVE_A_BUCKET_BETWEEN_BACKENDS from '../../../../docs/product/how-to/move-a-bucket-between-backends.md?raw';
+import HT_SET_BUCKET_COMPRESSION_AND_QUOTAS from '../../../../docs/product/how-to/set-bucket-compression-and-quotas.md?raw';
+import HT_REPLICATE_A_BUCKET from '../../../../docs/product/how-to/replicate-a-bucket.md?raw';
+import HT_EXPIRE_AND_ARCHIVE_OBJECTS from '../../../../docs/product/how-to/expire-and-archive-objects.md?raw';
+import HT_ENCRYPT_DATA_AT_REST from '../../../../docs/product/how-to/encrypt-data-at-rest.md?raw';
+import HT_ROTATE_ENCRYPTION_KEYS from '../../../../docs/product/how-to/rotate-encryption-keys.md?raw';
+import HT_SEND_EVENT_NOTIFICATIONS from '../../../../docs/product/how-to/send-event-notifications.md?raw';
+import HT_CREATE_IAM_USERS from '../../../../docs/product/how-to/create-iam-users.md?raw';
+import HT_RESTRICT_ACCESS_WITH_CONDITIONS from '../../../../docs/product/how-to/restrict-access-with-conditions.md?raw';
+import HT_SET_UP_SSO from '../../../../docs/product/how-to/set-up-sso.md?raw';
+import HT_MANAGE_IAM_AS_CODE from '../../../../docs/product/how-to/manage-iam-as-code.md?raw';
+import HT_GATE_REQUESTS_WITH_ADMISSION_RULES from '../../../../docs/product/how-to/gate-requests-with-admission-rules.md?raw';
+import HT_PUBLISH_A_PUBLIC_FOLDER from '../../../../docs/product/how-to/publish-a-public-folder.md?raw';
 import REF_CONFIGURATION from '../../../../docs/product/reference/configuration.md?raw';
 import REF_ADMIN_API from '../../../../docs/product/reference/admin-api.md?raw';
 import REF_AUTHENTICATION from '../../../../docs/product/reference/authentication.md?raw';
@@ -61,19 +77,35 @@ import manifest from '../../../../docs/product/manifest.json';
 const CONTENT_BY_PATH: Record<string, string> = {
   'README': README,
   '01-quickstart': QUICKSTART,
-  '10-first-bucket': FIRST_BUCKET,
-  '20-production-deployment': PROD_DEPLOY,
   '20-production-security-checklist': PROD_SECURITY,
-  '21-upgrade-guide': UPGRADE_GUIDE,
   '22-kubernetes-helm': KUBERNETES_HELM,
-  '23-docker-compose': DOCKER_COMPOSE,
-  'auth/30-oauth-setup': OAUTH_SETUP,
-  'auth/31-sigv4-and-iam': SIGV4_IAM,
-  'auth/32-iam-conditions': IAM_CONDITIONS,
   'reference/rate-limits': REF_RATE_LIMITS,
-  '40-monitoring-and-alerts': MONITORING,
-  '41-troubleshooting': TROUBLESHOOTING,
   '42-faq': FAQ,
+  'how-to/go-to-production': HT_GO_TO_PRODUCTION,
+  'how-to/deploy-with-docker-compose': HT_DEPLOY_WITH_DOCKER_COMPOSE,
+  'how-to/deploy-on-kubernetes': HT_DEPLOY_ON_KUBERNETES,
+  'how-to/serve-tls': HT_SERVE_TLS,
+  'how-to/upgrade': HT_UPGRADE,
+  'how-to/back-up-and-restore': HT_BACK_UP_AND_RESTORE,
+  'how-to/run-multiple-instances': HT_RUN_MULTIPLE_INSTANCES,
+  'how-to/monitor-with-prometheus': HT_MONITOR_WITH_PROMETHEUS,
+  'how-to/trace-requests': HT_TRACE_REQUESTS,
+  'how-to/troubleshooting': HT_TROUBLESHOOTING,
+  'how-to/route-a-bucket-to-a-backend': HT_ROUTE_A_BUCKET_TO_A_BACKEND,
+  'how-to/migrate-existing-data-into-the-proxy': HT_MIGRATE_EXISTING_DATA_INTO_THE_PROXY,
+  'how-to/move-a-bucket-between-backends': HT_MOVE_A_BUCKET_BETWEEN_BACKENDS,
+  'how-to/set-bucket-compression-and-quotas': HT_SET_BUCKET_COMPRESSION_AND_QUOTAS,
+  'how-to/replicate-a-bucket': HT_REPLICATE_A_BUCKET,
+  'how-to/expire-and-archive-objects': HT_EXPIRE_AND_ARCHIVE_OBJECTS,
+  'how-to/encrypt-data-at-rest': HT_ENCRYPT_DATA_AT_REST,
+  'how-to/rotate-encryption-keys': HT_ROTATE_ENCRYPTION_KEYS,
+  'how-to/send-event-notifications': HT_SEND_EVENT_NOTIFICATIONS,
+  'how-to/create-iam-users': HT_CREATE_IAM_USERS,
+  'how-to/restrict-access-with-conditions': HT_RESTRICT_ACCESS_WITH_CONDITIONS,
+  'how-to/set-up-sso': HT_SET_UP_SSO,
+  'how-to/manage-iam-as-code': HT_MANAGE_IAM_AS_CODE,
+  'how-to/gate-requests-with-admission-rules': HT_GATE_REQUESTS_WITH_ADMISSION_RULES,
+  'how-to/publish-a-public-folder': HT_PUBLISH_A_PUBLIC_FOLDER,
   'reference/configuration': REF_CONFIGURATION,
   'reference/admin-api': REF_ADMIN_API,
   'reference/authentication': REF_AUTHENTICATION,

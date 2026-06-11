@@ -1,6 +1,6 @@
-# Upgrade guide
+# How to upgrade the proxy
 
-*How to move between DeltaGlider Proxy versions safely, plus the TOML → YAML migration.*
+This guide shows you how to move between DeltaGlider Proxy versions safely, including the TOML → YAML config migration and the v0.9 encryption-config change.
 
 ## Standard upgrade workflow
 
@@ -10,11 +10,11 @@ The proxy is a single stateful binary. Upgrades are "backup, swap, verify."
 
    ```bash
    curl -b /tmp/admin.cookies \
-     "https://dgp.example.com/_/api/admin/backup" \
+     "https://s3.acme.example/_/api/admin/backup" \
      -o dgp-backup-$(date +%Y%m%d-%H%M%S).zip
    ```
 
-   The zip is atomic and sha256-verified on restore — see [reference/admin-api.md](reference/admin-api.md#full-backup-wave-111). Store it somewhere the upgrade process itself can't break.
+   The zip is atomic and sha256-verified on restore — see [Admin API reference](../reference/admin-api.md). Store it somewhere the upgrade process itself can't break.
 
 2. **Roll the image/binary.** For Docker:
 
@@ -33,16 +33,16 @@ The proxy is a single stateful binary. Upgrades are "backup, swap, verify."
 
    ```bash
    # Health
-   curl -s https://dgp.example.com/_/health
+   curl -s https://s3.acme.example/_/health
 
    # Version matches the image you deployed
-   curl -s -b cookies https://dgp.example.com/_/api/whoami | jq .version
+   curl -s -b cookies https://s3.acme.example/_/api/whoami | jq .version
 
    # A read against an existing object (regression test)
-   aws --endpoint-url https://dgp.example.com s3 ls s3://my-bucket
+   aws --endpoint-url https://s3.acme.example s3 ls s3://releases
 
    # Admin session still works
-   curl -b cookies https://dgp.example.com/_/api/admin/users | jq '.[] | .name'
+   curl -b cookies https://s3.acme.example/_/api/admin/users | jq '.[] | .name'
    ```
 
 4. **If something broke**, the backup zip from step 1 imports atomically:
@@ -51,7 +51,7 @@ The proxy is a single stateful binary. Upgrades are "backup, swap, verify."
    curl -b cookies -X POST \
      -H "Content-Type: application/zip" \
      --data-binary @dgp-backup-...zip \
-     https://dgp.example.com/_/api/admin/backup
+     https://s3.acme.example/_/api/admin/backup
    ```
 
 ## Version compatibility
@@ -85,12 +85,7 @@ deltaglider_proxy config migrate /etc/deltaglider_proxy/config.toml \
   --out /etc/deltaglider_proxy/config.yaml
 ```
 
-Emits one file per section if you pass `--split`, useful for GitOps setups:
-
-```bash
-deltaglider_proxy config migrate config.toml --split --out-dir ./config.d/
-# writes: admission.yaml, access.yaml, storage.yaml, advanced.yaml
-```
+Without `--out`, the YAML is written to stdout — pipe it wherever you like. `${env:NAME}` placeholders are not expanded; they migrate verbatim.
 
 **2. Inspect the output.** Canonical YAML uses the four-section shape:
 
@@ -115,7 +110,7 @@ advanced:
   session_ttl_hours: 4
 ```
 
-All secrets come through redacted (`null`) — the migrator intentionally doesn't copy them. Inject them via env vars or the admin UI (see step 4).
+SigV4 credentials (`access.access_key_id` / `secret_access_key` and storage backend creds) are **kept**, so the output is drop-in usable. Only infra secrets — the bootstrap password hash and any encryption keys — are stripped; feed those back in via env vars (see step 5).
 
 **3. Validate before applying.** The `config lint` subcommand parses + validates without touching the server:
 
@@ -138,12 +133,12 @@ Wire this into CI so drift is caught in PR.
 
 If you keep both `.toml` and `.yaml` in the same directory, `.yaml` wins.
 
-**5. Feed secrets back in.** The migrator redacts:
+**5. Feed the stripped secrets back in.** The migrator strips infra secrets only:
 
-- `access.access_key_id` / `access.secret_access_key` → inject via `DGP_ACCESS_KEY_ID` / `DGP_SECRET_ACCESS_KEY` or use the admin UI.
-- Storage backend creds → `DGP_BE_AWS_ACCESS_KEY_ID` / `DGP_BE_AWS_SECRET_ACCESS_KEY` or the admin UI.
 - `advanced.bootstrap_password_hash` → `DGP_BOOTSTRAP_PASSWORD_HASH` env var (base64-wrapped form avoids `$` escaping issues in Docker).
-- OAuth `client_secret` values — restore via the admin UI, or via a Full Backup zip import (see [reference/admin-api.md](reference/admin-api.md#full-backup-wave-111)).
+- Per-backend encryption keys → `DGP_ENCRYPTION_KEY` (singleton backend) or `DGP_BACKEND_<NAME>_ENCRYPTION_KEY` (named backends).
+
+OAuth `client_secret` values live in the encrypted config DB, not the YAML — they are untouched by the migration.
 
 **6. Silence the deprecation warning on stragglers.** If you can't migrate immediately (e.g. third-party Ansible using TOML):
 
@@ -153,7 +148,7 @@ DGP_SILENCE_TOML_DEPRECATION=1 deltaglider_proxy
 
 ## The S3-synced IAM database
 
-Entirely separate from the YAML config. `deltaglider_config.db` (SQLCipher-encrypted SQLite) holds users, groups, OAuth providers, mapping rules. The YAML config never carries IAM state.
+Entirely separate from the YAML config. `deltaglider_config.db` (SQLCipher-encrypted SQLite) holds users, groups, OAuth providers, mapping rules. The YAML config never carries IAM state (unless you run [declarative IAM](../reference/declarative-iam.md)).
 
 When upgrading across instances with `DGP_CONFIG_SYNC_BUCKET` set, the *newer* binary uploads after any mutation; *older* binaries (still running during a rolling upgrade) download but won't understand post-migration schema changes. Either:
 
@@ -162,13 +157,13 @@ When upgrading across instances with `DGP_CONFIG_SYNC_BUCKET` set, the *newer* b
 
 ## Common gotchas
 
-- **`$` in Docker env.** Bcrypt hashes contain `$`. Use base64-wrapped form (`DGP_BOOTSTRAP_PASSWORD_HASH=JDJ5JDEyJGV...`) or single-quote the value in compose files.
+- **`$` in Docker env.** Bcrypt hashes contain `$`. Use the base64-wrapped form (`DGP_BOOTSTRAP_PASSWORD_HASH=JDJ5JDEyJGV...`) or single-quote the value in compose files.
 - **`force_path_style`.** MinIO needs `true`; AWS S3 needs `false`. The migrator preserves whatever the TOML had.
 - **Implicit defaults.** Fields absent from YAML take their default. Don't port fields that were already default in TOML — it clutters the canonical shape.
 - **Admission chain order.** Admission blocks are order-significant. The migrator preserves order; review `admission:` carefully.
 - **`iam_mode: declarative`.** YAML becomes authoritative for IAM users, groups, OAuth providers, and mapping rules. Admin-API IAM mutations return 403; `/config/apply` reconciles the encrypted DB to YAML atomically. Seed from an existing DB with `GET /_/api/admin/config/declarative-iam-export`, or author IAM directly in YAML.
 
-### v0.9: per-backend encryption (breaking)
+## v0.9: per-backend encryption (breaking)
 
 v0.9 replaced the single global `advanced.encryption_key` field with per-backend encryption blocks. If you're upgrading from a pre-0.9 pre-release, the old field is no longer recognized — any YAML still carrying it silently drops the key.
 
@@ -201,23 +196,26 @@ storage:
 
 With `DGP_ENCRYPTION_KEY` in the environment unchanged.
 
-**On-disk objects are unaffected.** v0.9 reads pre-v0.9 encrypted objects without ceremony — the wire format didn't change, only the config location. The `dg-encryption-key-id` stamp is new as of v0.9 but OPTIONAL — historical objects without the stamp still decrypt as long as the key material matches.
+**On-disk objects are unaffected.** v0.9 reads pre-v0.9 encrypted objects without ceremony — the wire format didn't change, only the config location. The `dg-encryption-key-id` stamp is new as of v0.9 but optional — historical objects without the stamp still decrypt as long as the key material matches.
 
 **If you had no encryption configured pre-0.9:** nothing to do. Your backends default to `encryption: none`.
 
-**If you want to move from proxy-AES to SSE-KMS as part of the upgrade:** do the upgrade first (keep your existing key), then configure the decrypt-only shim to migrate. See [reference/encryption-at-rest.md §Rotation recipes](reference/encryption-at-rest.md#rotation-recipes) recipe (C).
+**If you want to move from proxy-AES to SSE-KMS as part of the upgrade:** do the upgrade first (keep your existing key), then configure the decrypt-only shim to migrate. See [Encryption reference](../reference/encryption.md).
 
-## Verification checklist (after any upgrade or migration)
+## Verify
+
+After any upgrade or migration:
 
 - [ ] `/_/health` returns HTTP 200.
 - [ ] `/_/api/whoami` reports the expected `version`.
-- [ ] An existing object downloads byte-identical: `aws s3 cp s3://bucket/known-file ./out && sha256sum out` matches the known checksum.
+- [ ] An existing object downloads byte-identical: `aws s3 cp s3://releases/known-file ./out && sha256sum out` matches the known checksum.
 - [ ] The admin UI logs in with the bootstrap password (or OAuth) on the first try.
 - [ ] `/_/admin/diagnostics/audit` shows recent entries — the audit ring is populating.
 - [ ] Prometheus scrape returns valid metrics (if monitoring is wired up).
 
 ## Related
 
-- [reference/configuration.md](reference/configuration.md) — the complete YAML field reference.
-- [reference/admin-api.md](reference/admin-api.md) — Full Backup export/import.
-- [20-production-deployment.md](20-production-deployment.md) — the ops side of running the server.
+- [How to back up and restore](back-up-and-restore.md) — the backup you take in step 1
+- [Configuration reference](../reference/configuration.md) — the complete YAML field reference
+- [CLI reference](../reference/cli.md) — `config migrate` / `config lint` exit codes
+- [Admin API reference](../reference/admin-api.md) — Full Backup export/import

@@ -1,14 +1,12 @@
 # Troubleshooting
 
-*Symptoms you'll see in the wild, mapped to the fix.*
-
-If your symptom isn't here, the audit log at `/_/admin/diagnostics/audit` and the structured logs (`tracing`) are almost always where the real error lives.
+This guide maps the symptoms you'll see in the wild to their fixes. If your symptom isn't here, the audit log at `/_/admin/diagnostics/audit` and the structured logs (`tracing`) are almost always where the real error lives — see [How to trace and audit requests](trace-requests.md).
 
 ## Client gets 403 AccessDenied
 
 **Check the audit log first.** `/_/admin/diagnostics/audit` shows every IAM denial with the user, action, bucket, and path. The most common causes:
 
-1. **Wrong prefix.** The user has `Allow read on my-bucket/public/*` but tried `my-bucket/private/foo.zip`. Prefix ABAC is exact — a trailing `/` matters.
+1. **Wrong prefix.** The user has `Allow read on releases/public/*` but tried `releases/private/foo.zip`. Prefix ABAC is exact — a trailing `/` matters.
 2. **User disabled.** Access → Users → confirm the row is `Enabled`.
 3. **Deny rule wins.** Any matching Deny rule in the user's permissions (or any group they're in) wins over an Allow. Grep the user's permissions + the groups'.
 4. **`iam_mode: declarative`** and you're trying to mutate IAM via the admin API. Expected behaviour — the API returns `403 { "error": "iam_declarative" }`. Edit YAML and apply the document.
@@ -27,7 +25,7 @@ The bootstrap password verification uses bcrypt. Usually one of:
 
    Fix: restart with the correct hash, then rotate via the admin UI once logged in (that path re-encrypts the DB atomically).
 
-2. **Rate limiter lockout.** 100 failed attempts / 5-minute window / per-IP, with a 10-minute lockout after. `/_/metrics` → `deltaglider_auth_failures_total`. Wait it out or reduce `DGP_RATE_LIMIT_MAX_ATTEMPTS` tests.
+2. **Rate limiter lockout.** 100 failed attempts / 5-minute window / per-IP, with a 10-minute lockout after. `/_/metrics` → `deltaglider_auth_failures_total`. Wait it out, or see [Rate limits](../reference/rate-limits.md) for the knobs.
 
 3. **Session IP binding.** If you log in from one IP and the admin cookie ends up used from a different IP (NAT flip, VPN change), the session is rejected. Log in again. Disable `DGP_TRUST_PROXY_HEADERS` if you're not behind a reverse proxy — otherwise clients can spoof IPs.
 
@@ -46,29 +44,18 @@ Fix: mount `DGP_DATA_DIR` on a supporting filesystem, or switch to the S3 backen
 
 The encryption key doesn't match the DB file. Usually:
 
-1. You restored a Full Backup zip on a fresh instance but didn't feed the corresponding `bootstrap_password_hash` back in. The zip's `secrets.json` carries it — re-import the zip, or inject `DGP_BOOTSTRAP_PASSWORD_HASH` before the restore.
+1. You restored a Full Backup zip on a fresh instance but didn't feed the corresponding `bootstrap_password_hash` back in. The zip's `secrets.json` carries it — re-import the zip, or inject `DGP_BOOTSTRAP_PASSWORD_HASH` before the restore. See [How to back up and restore](back-up-and-restore.md).
 2. You rotated the bootstrap password outside the admin UI (edited env, restarted). The admin UI's `PUT /_/api/admin/password` is the only safe path — it re-encrypts the DB atomically.
 
 Recovery path: `POST /_/api/admin/recover-db` with the correct password. The endpoint is public but rate-limited.
 
 ## 502 Bad Gateway / 504 Gateway Timeout on large uploads
 
-**Symptom:** Multipart uploads of files >50 MB fail with `502` (Traefik)
-or `504` (Caddy / nginx). The embedded UI shows "Upload object … failed
-(502): Gateway returned 502 Bad Gateway." The proxy logs show
-`tower_http::trace::on_response: finished processing request
-latency=60000 ms status=400` (latency is exactly 60 000 ms).
+**Symptom:** Multipart uploads of files >50 MB fail with `502` (Traefik) or `504` (Caddy / nginx). The embedded UI shows "Upload object … failed (502): Gateway returned 502 Bad Gateway." The proxy logs show `tower_http::trace::on_response: finished processing request latency=60000 ms status=400` (latency is exactly 60 000 ms).
 
-**Cause:** Reverse-proxy default request read-timeout is **60 seconds**.
-A 16 MB multipart part over a typical home upload link (1–5 MB/s,
-shared between concurrent parts) takes longer than that. The reverse
-proxy closes the upstream connection mid-body; hyper raises a body-read
-error; axum's `Bytes` extractor returns `400 BAD_REQUEST` with body
-"Failed to buffer the request body"; the reverse proxy translates the
-broken upstream response into 502 / 504 to the client.
+**Cause:** Reverse-proxy default request read-timeout is **60 seconds**. A 16 MB multipart part over a typical home upload link (1–5 MB/s, shared between concurrent parts) takes longer than that. The reverse proxy closes the upstream connection mid-body; hyper raises a body-read error; axum's `Bytes` extractor returns `400 BAD_REQUEST` with body "Failed to buffer the request body"; the reverse proxy translates the broken upstream response into 502 / 504 to the client.
 
-**Fix:** extend the reverse-proxy read-timeout. Concrete examples in
-[Production deployment → Reverse-proxy read-timeout](20-production-deployment.md#reverse-proxy-read-timeout--required-for-large-uploads).
+**Fix:** extend the reverse-proxy read-timeout. Per-proxy settings table and examples in [How to serve TLS](serve-tls.md#raise-the-reverse-proxy-read-timeout--mandatory-for-large-uploads).
 
 For Coolify users specifically:
 
@@ -81,11 +68,7 @@ sudo $EDITOR /data/coolify/proxy/docker-compose.yml
 sudo docker compose -f /data/coolify/proxy/docker-compose.yml up -d
 ```
 
-**Quick mitigation without operator access:** the embedded uploader
-since v0.9.18 caps concurrent files at 1 so each part gets fair
-share of the upload pipe and completes within the 60 s default
-window for typical workloads. For very slow links or larger parts,
-the reverse-proxy timeout still has to be raised.
+**Quick mitigation without operator access:** the embedded uploader since v0.9.18 caps concurrent files at 1 so each part gets fair share of the upload pipe and completes within the 60 s default window for typical workloads. For very slow links or larger parts, the reverse-proxy timeout still has to be raised.
 
 ## 503 SlowDown on PUT
 
@@ -98,13 +81,7 @@ Check `/_/metrics` → `deltaglider_codec_semaphore_available` (`0` = saturated)
 
 ## Writes to one bucket return 503 SlowDown
 
-A maintenance job (re-encryption or migration) is running on that bucket.
-Writes are intentionally gated while the job rewrites objects — SDKs retry
-automatically and succeed once the job finishes. Reads are unaffected. Check
-**Settings → Jobs** (or `GET /_/api/admin/jobs`) for the job's progress; cancel
-it if it shouldn't be running. If a job is stuck, it survives restarts by
-design — cancel it via `POST /_/api/admin/jobs/maintenance:<id>/cancel` rather
-than restarting the proxy.
+A maintenance job (re-encryption or migration) is running on that bucket. Writes are intentionally gated while the job rewrites objects — SDKs retry automatically and succeed once the job finishes. Reads are unaffected. Check **Settings → Jobs** (or `GET /_/api/admin/jobs`) for the job's progress; cancel it if it shouldn't be running. If a job is stuck, it survives restarts by design — cancel it via `POST /_/api/admin/jobs/maintenance:<id>/cancel` rather than restarting the proxy. See [Jobs reference](../reference/jobs.md).
 
 ## Cache miss storm on GET
 
@@ -121,16 +98,18 @@ Very rare: a write burst is pushing fresh references in and evicting the hot set
 ```yaml
 storage:
   buckets:
-    releases:
+    downloads:
       public_prefixes:
-        - builds/public/       # note the trailing /
+        - public/        # note the trailing /
 ```
 
 Checks in order:
 
-1. **Trailing slash on the prefix.** `builds/public/` matches `builds/public/foo.zip` but **not** `builds/publicish/bar.zip`. Always end prefixes with `/`.
+1. **Trailing slash on the prefix.** `public/` matches `public/foo.zip` but **not** `publicish/bar.zip`. Always end prefixes with `/`.
 2. **Bucket policy actually applied.** `/_/api/admin/config/section/storage` should show the `public_prefixes` array. If it's empty, the YAML didn't land — re-check `config apply` response.
-3. **Reverse proxy stripping the path.** If Traefik / Caddy is rewriting the URL (e.g. `/releases/builds/public/*` → `/builds/public/*`), the proxy sees a different bucket than the client intends. Point the reverse proxy at the proxy 1:1.
+3. **Reverse proxy stripping the path.** If Traefik / Caddy is rewriting the URL (e.g. `/downloads/public/*` → `/public/*`), the proxy sees a different bucket than the client intends. Point the reverse proxy at the proxy 1:1.
+
+Confirm which layer denies with a synthetic trace — see [How to trace and audit requests](trace-requests.md).
 
 ## Object goes to the wrong backend
 
@@ -138,7 +117,7 @@ Per-bucket backend routing lives in `storage.buckets[name].backend`. Quickest de
 
 ```bash
 # Confirm the per-bucket routing
-curl -b cookies https://dgp.example.com/_/api/admin/config/section/storage?format=yaml
+curl -b cookies "https://s3.acme.example/_/api/admin/config/section/storage?format=yaml"
 ```
 
 If the routing looks right but the object still went somewhere unexpected:
@@ -146,6 +125,10 @@ If the routing looks right but the object still went somewhere unexpected:
 - Did the PUT hit the proxy or the backend directly? Traefik/ALB misrouting can skip the proxy entirely.
 - Was the request signed? An unauthenticated request (no auth configured) hits whatever the default backend is.
 - `alias:` in effect? The UI shows the virtual bucket name; the real name on the backend is the alias.
+
+### Startup warning: "bucket 'X' routes to unknown backend 'Y' — route will be ignored"
+
+`storage.buckets[X].backend` references a name that's not in the `backends[]` list (e.g. a backend was renamed or removed). Subsequent requests to bucket X land on the default backend instead. Update the routing or restore the backend. Note that objects already written to the old backend stay there — "route will be ignored" only affects future requests.
 
 ## S3 config sync ETag mismatch
 
@@ -155,7 +138,7 @@ Expected when two instances mutate within the 5-minute poll window — the race 
 
 Continuous mismatch usually means two instances are **both writing** via `DGP_CONFIG_SYNC_BUCKET`. Sync is not multi-master — one instance is the writer; others read. If you have multiple active writers, the "loudest" one wins and the others lose mutations.
 
-Fix: run only one instance as the IAM administration surface and point the others at the same sync bucket read-only. Or switch to `iam_mode: declarative` and manage IAM via YAML + GitOps (takes both writes out of the picture).
+Fix: run only one instance as the IAM administration surface and point the others at the same sync bucket read-only (see [How to run multiple instances](run-multiple-instances.md)). Or switch to `iam_mode: declarative` and manage IAM via YAML + GitOps (takes both writes out of the picture).
 
 ## Audit ring is empty after a restart
 
@@ -170,29 +153,33 @@ Increase `DGP_AUDIT_RING_SIZE` (default 500) if you want a larger in-memory wind
 If everything is `passthrough`, usually:
 
 1. **Bucket has `compression: false`.** Check `/_/api/admin/config/section/storage`.
-2. **File extension isn't in the delta allow-list.** Images, video, already-compressed archives skip delta entirely — by design. See [reference/how-delta-works.md](reference/how-delta-works.md).
+2. **File extension isn't in the delta allow-list.** Images, video, already-compressed archives skip delta entirely — by design. See [Delta compression](../explanation/delta-compression.md).
 3. **`max_delta_ratio`** too strict. Default 0.75. Lowering it (0.5, 0.3) rejects more deltas; raising it (0.9) accepts more. The default is a reasonable balance.
 4. **First upload in a deltaspace** is always the `reference` — no delta yet. Only the second and subsequent uploads in the same prefix generate deltas.
 
-## Encryption-at-rest — symptoms and fixes
+## Encryption at rest — symptoms and fixes
 
-The full catalogue lives in [reference/encryption-at-rest.md §Troubleshooting](reference/encryption-at-rest.md#troubleshooting). High-frequency symptoms:
+Background and mode mechanics: [Encryption at rest](../explanation/encryption-at-rest.md) and the [encryption reference](../reference/encryption.md).
 
 ### Reads return 500 with "object is encrypted but no key is configured"
 
-The object's metadata has `dg-encrypted` set but the backend currently has no key (mode was flipped to `none`, or proxy-AES mode is missing the `key`). Restore the key — via `DGP_*_ENCRYPTION_KEY` env var, YAML, or the admin GUI's Backends panel.
+The object's metadata carries `dg-encrypted` (it was encrypted) but the backend currently has no key — mode was flipped to `none`, or proxy-AES mode is missing the `key`. Restore the key — via `DGP_*_ENCRYPTION_KEY` env var, YAML, or the admin GUI's Backends panel. If the key is genuinely lost, the object is unrecoverable.
 
 ### Reads return 500 with "object was encrypted with key id 'X', but this backend is configured with key id 'Y'"
 
-Rotation without a shim, OR a bucket routed to the wrong backend, OR two backends sharing storage with different keys. Add `legacy_key: <old-hex>` + `legacy_key_id: <X>` to the backend's encryption block to let historical reads go through (shim-assisted rotation). See [reference/encryption-at-rest.md §Rotation recipes](reference/encryption-at-rest.md#rotation-recipes).
+Rotation without a shim, OR a bucket routed to the wrong backend, OR two backends sharing storage with different keys. Most commonly: restore the old key as `legacy_key: <old-hex>` + `legacy_key_id: <X>` on the backend's encryption block to let historical reads go through (shim-assisted rotation — see the [encryption reference](../reference/encryption.md)). If the mismatch is a routing error, fix `storage.buckets[*].backend`. If two backends share physical storage with different keys, that's a config bug — pick one.
 
 ### Reads return 500 with "xattrs may have been stripped during backup/restore"
 
-The object body starts with `DGE1` but has no `dg-encrypted` metadata marker — classic sign of a backup tool that preserved contents but not extended attributes. Re-run the backup with xattr support (older `rsync` needs `-X`), or rebuild the metadata from a known-good source.
+The object body starts with `DGE1` (proxy-AES chunked wire format) but has no `dg-encrypted` metadata marker — classic sign of a backup/restore round-trip that preserved file contents but dropped extended attributes. On filesystem backends, per-object metadata lives in the `user.dg.metadata` xattr; older `rsync` without `-X` and some S3 sync tools strip it. Re-run the backup with xattr support, or rebuild the metadata from a known-good source. See [How to back up and restore](back-up-and-restore.md).
 
 ### Startup fails: "backends X and Y share key_id but declare DIFFERENT keys"
 
-Two backends pinned the same explicit `key_id` but the `key` values differ. This is almost always a copy-paste error. Make the ids distinct, OR make the keys identical (the documented "portability" escape hatch for two aliases of the same physical bucket).
+Two backends pinned the same explicit `key_id` but the `key` values differ — the server refuses to start at engine construction. This is almost always a copy-paste error. Make the ids distinct, OR make the keys identical (the documented "portability" escape hatch for two aliases of the same physical bucket).
+
+### Startup warning: "backend 'X' has encryption mode aes256-gcm-proxy but no key is configured"
+
+YAML declares proxy-AES mode but there's no `key` in YAML and no `DGP_*_ENCRYPTION_KEY` in the environment — writes to this backend land as plaintext despite the declared mode. Set the env var, or put the hex key into YAML (treated as an infra secret — stripped by canonical exports so it doesn't leak via `/config/export`).
 
 ### Startup warning: "backend 'X' encryption key was loaded from config file (not DGP_*_ENCRYPTION_KEY)"
 
@@ -209,9 +196,14 @@ The AWS KMS key is disabled, deleted, or the proxy's IAM role lacks `kms:Generat
 
 Expected if you removed the key entirely. The decrypt path errors explicitly (it won't serve ciphertext as plaintext). If you need the objects back, restore the key. If not, delete them. Note that `mode: none` with `legacy_key: <hex>` + `legacy_key_id: <id>` is a valid shape — this lets you disable new-write encryption while keeping historical reads working.
 
-## Need more detail?
+### Reads succeed but return garbage
 
-- Set `RUST_LOG=deltaglider_proxy=trace` for maximum verbosity.
+GET returns 200 with an object that looks like random bytes, no error. This shouldn't happen in v0.9+ — every backend is always wrapped, and a missing key produces an explicit error. If you see it, it's a bug; file a report with the config + the first 16 bytes of the object body.
+
+## Where to look next
+
+- **Trace it.** Dry-run the failing request through the admission chain and read the audit log: [How to trace and audit requests](trace-requests.md).
+- Set `RUST_LOG=deltaglider_proxy=trace` for maximum verbosity (`RUST_LOG` beats `DGP_LOG_LEVEL` beats `--verbose`). To change the level without a restart, use the admin UI: Settings → System → Logging.
 - Hit the audit log API: `GET /_/api/admin/audit?limit=500` for a JSON dump of recent mutations + denials.
-- `curl /_/metrics | grep deltaglider_` — 20+ Prometheus metrics, most tell a story.
-- [reference/admin-api.md](reference/admin-api.md) — every debug-friendly admin endpoint.
+- `curl /_/metrics | grep deltaglider_` — 20+ Prometheus metrics, most tell a story. Mapping: [How to monitor with Prometheus and Grafana](monitor-with-prometheus.md).
+- [Admin API reference](../reference/admin-api.md) — every debug-friendly admin endpoint.
