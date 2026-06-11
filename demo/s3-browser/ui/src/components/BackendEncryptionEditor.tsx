@@ -256,6 +256,24 @@ export default function BackendEncryptionEditor({ backendName, current, onApply 
       {/* Per-mode edit surface. Renders only when `pending` is set. */}
       {pending && (
         <div style={{ marginTop: 10 }}>
+          {/* The single most-misunderstood fact about at-rest encryption:
+              enabling it does NOT rewrite existing objects. Say so up front. */}
+          {pending.mode !== 'none' && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ borderRadius: 6, fontSize: 12, marginBottom: 8 }}
+              message="Applies to newly written objects only"
+              description={
+                <span>
+                  Objects already stored on <code>{backendName}</code> are NOT
+                  re-encrypted — they stay on disk exactly as they are until
+                  rewritten (re-upload them, or move them to another folder and
+                  back). Reads work transparently for both old and new objects.
+                </span>
+              }
+            />
+          )}
           {pending.mode === 'none' && (
             <Alert
               type="warning"
