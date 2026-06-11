@@ -24,6 +24,7 @@
 //! process died. This is what makes the server-side state "stable":
 //! a restart pauses the job, never loses it.
 
+use crate::config_db::job_store;
 use crate::config_db::{ConfigDb, ConfigDbError};
 use rusqlite::{params, OptionalExtension};
 
@@ -45,6 +46,9 @@ pub struct MaintenanceJob {
     pub continuation_token: Option<String>,
     pub last_error: Option<String>,
     pub triggered_by: Option<String>,
+    /// Kind-specific JSON parameters (e.g. migrate: target backend,
+    /// delete_source, transient route key). None for reencrypt.
+    pub params: Option<String>,
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
@@ -90,16 +94,17 @@ fn row_to_job(r: &rusqlite::Row<'_>) -> rusqlite::Result<MaintenanceJob> {
         continuation_token: r.get(10)?,
         last_error: r.get(11)?,
         triggered_by: r.get(12)?,
-        created_at: r.get(13)?,
-        started_at: r.get(14)?,
-        finished_at: r.get(15)?,
-        updated_at: r.get(16)?,
+        params: r.get(13)?,
+        created_at: r.get(14)?,
+        started_at: r.get(15)?,
+        finished_at: r.get(16)?,
+        updated_at: r.get(17)?,
     })
 }
 
 const JOB_COLUMNS: &str = "id, kind, bucket, status, phase, objects_total, objects_done, \
      objects_skipped, objects_failed, bytes_done, continuation_token, last_error, \
-     triggered_by, created_at, started_at, finished_at, updated_at";
+     triggered_by, params, created_at, started_at, finished_at, updated_at";
 
 impl ConfigDb {
     /// Create a queued job for `bucket`. Returns `Ok(None)` when the
@@ -107,16 +112,27 @@ impl ConfigDb {
     /// the caller turns that into a 409. Returns the new job id otherwise.
     pub fn maintenance_create_job(
         &self,
+        kind: &str,
         bucket: &str,
+        initial_phase: &str,
+        params_json: Option<&str>,
         triggered_by: &str,
         now: i64,
     ) -> Result<Option<i64>, ConfigDbError> {
         use crate::config_db::{classify_sqlite_error, SqliteErrorClass};
         match self.conn.execute(
             "INSERT INTO maintenance_jobs
-                (kind, bucket, status, phase, triggered_by, created_at, updated_at)
-             VALUES ('reencrypt', ?, 'queued', 'counting', ?, ?, ?)",
-            params![bucket, triggered_by, now, now],
+                (kind, bucket, status, phase, params, triggered_by, created_at, updated_at)
+             VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)",
+            params![
+                kind,
+                bucket,
+                initial_phase,
+                params_json,
+                triggered_by,
+                now,
+                now
+            ],
         ) {
             Ok(_) => Ok(Some(self.conn.last_insert_rowid())),
             Err(e) if classify_sqlite_error(&e) == SqliteErrorClass::Conflict => Ok(None),
@@ -181,6 +197,31 @@ impl ConfigDb {
         Ok(rows)
     }
 
+    /// Transient route keys (`__dgmigrate_*`) referenced by ACTIVE migrate
+    /// jobs — the boot reconcile must leave these in the config for the
+    /// resumed job to reuse; anything else `__dgmigrate_*` is an orphan.
+    pub fn maintenance_active_transient_keys(&self) -> Result<Vec<String>, ConfigDbError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT params FROM maintenance_jobs
+              WHERE kind = 'migrate' AND status IN {ACTIVE_STATUSES}"
+        ))?;
+        let rows: Vec<Option<String>> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .flatten()
+            .filter_map(|p| {
+                serde_json::from_str::<serde_json::Value>(&p)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("transient_key")
+                            .and_then(|t| t.as_str().map(String::from))
+                    })
+            })
+            .collect())
+    }
+
     /// Claim the oldest queued job: set it `running`, stamp `started_at`
     /// (first claim only — a resumed job keeps the original), and take
     /// the leader lease. Returns the claimed job.
@@ -227,7 +268,8 @@ impl ConfigDb {
         Ok(Some(job))
     }
 
-    /// Renew the running job's lease.
+    /// Renew the running job's lease (canonical semantics in
+    /// `config_db::job_store`: a lapsed lease never resurrects).
     pub fn maintenance_heartbeat(
         &self,
         job_id: i64,
@@ -235,11 +277,14 @@ impl ConfigDb {
         now: i64,
         lease_ttl_secs: i64,
     ) -> Result<(), ConfigDbError> {
-        self.conn.execute(
-            "UPDATE maintenance_jobs
-                SET leader_expires_at = ?, updated_at = ?
-              WHERE id = ? AND leader_instance_id = ?",
-            params![now + lease_ttl_secs.max(1), now, job_id, instance_id],
+        job_store::renew_leader_lease(
+            &self.conn,
+            "maintenance_jobs",
+            "id",
+            &job_id,
+            instance_id,
+            now,
+            lease_ttl_secs,
         )?;
         Ok(())
     }
@@ -354,14 +399,12 @@ impl ConfigDb {
              VALUES (?, ?, ?, ?)",
             params![job_id, object_key, error, current_unix_seconds()],
         )?;
-        self.conn.execute(
-            "DELETE FROM maintenance_failures
-              WHERE job_id = ?
-                AND id NOT IN (
-                    SELECT id FROM maintenance_failures
-                     WHERE job_id = ? ORDER BY id DESC LIMIT ?
-                )",
-            params![job_id, job_id, max_retained as i64],
+        job_store::prune_failure_ring(
+            &self.conn,
+            "maintenance_failures",
+            "job_id",
+            &job_id,
+            max_retained as u32,
         )?;
         Ok(())
     }
@@ -422,7 +465,7 @@ mod tests {
     fn create_and_load_active_job() {
         let db = db();
         let id = db
-            .maintenance_create_job("pippo", "admin", 100)
+            .maintenance_create_job("reencrypt", "pippo", "counting", None, "admin", 100)
             .unwrap()
             .unwrap();
         let job = db
@@ -440,9 +483,11 @@ mod tests {
     #[test]
     fn second_active_job_for_same_bucket_conflicts() {
         let db = db();
-        db.maintenance_create_job("b", "admin", 1).unwrap().unwrap();
+        db.maintenance_create_job("reencrypt", "b", "counting", None, "admin", 1)
+            .unwrap()
+            .unwrap();
         assert!(
-            db.maintenance_create_job("b", "admin", 2)
+            db.maintenance_create_job("reencrypt", "b", "counting", None, "admin", 2)
                 .unwrap()
                 .is_none(),
             "active job must block a second one"
@@ -451,7 +496,7 @@ mod tests {
         let job = db.maintenance_active_job_for_bucket("b").unwrap().unwrap();
         db.maintenance_finish(job.id, "completed", None).unwrap();
         assert!(db
-            .maintenance_create_job("b", "admin", 3)
+            .maintenance_create_job("reencrypt", "b", "counting", None, "admin", 3)
             .unwrap()
             .is_some());
     }
@@ -459,7 +504,10 @@ mod tests {
     #[test]
     fn claim_marks_running_and_takes_lease() {
         let db = db();
-        let id = db.maintenance_create_job("b", "admin", 1).unwrap().unwrap();
+        let id = db
+            .maintenance_create_job("reencrypt", "b", "counting", None, "admin", 1)
+            .unwrap()
+            .unwrap();
         let job = db
             .maintenance_claim_next_job("worker-1", 10, 60)
             .unwrap()
@@ -477,7 +525,10 @@ mod tests {
     #[test]
     fn progress_and_cursor_round_trip() {
         let db = db();
-        let id = db.maintenance_create_job("b", "admin", 1).unwrap().unwrap();
+        let id = db
+            .maintenance_create_job("reencrypt", "b", "counting", None, "admin", 1)
+            .unwrap()
+            .unwrap();
         db.maintenance_claim_next_job("w", 2, 60).unwrap().unwrap();
         db.maintenance_update_progress(id, "objects", Some(100), 40, 10, 1, 12345, Some("tok"))
             .unwrap();
@@ -494,12 +545,18 @@ mod tests {
     #[test]
     fn cancel_queued_is_immediate_running_is_deferred() {
         let db = db();
-        let q = db.maintenance_create_job("a", "admin", 1).unwrap().unwrap();
+        let q = db
+            .maintenance_create_job("reencrypt", "a", "counting", None, "admin", 1)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             db.maintenance_request_cancel(q).unwrap(),
             CancelOutcome::CancelledImmediately
         );
-        let r = db.maintenance_create_job("b", "admin", 2).unwrap().unwrap();
+        let r = db
+            .maintenance_create_job("reencrypt", "b", "counting", None, "admin", 2)
+            .unwrap()
+            .unwrap();
         db.maintenance_claim_next_job("w", 3, 60).unwrap().unwrap();
         assert_eq!(
             db.maintenance_request_cancel(r).unwrap(),
@@ -518,7 +575,10 @@ mod tests {
     #[test]
     fn reconcile_on_boot_requeues_with_cursor_preserved() {
         let db = db();
-        let id = db.maintenance_create_job("b", "admin", 1).unwrap().unwrap();
+        let id = db
+            .maintenance_create_job("reencrypt", "b", "counting", None, "admin", 1)
+            .unwrap()
+            .unwrap();
         db.maintenance_claim_next_job("w", 2, 60).unwrap().unwrap();
         db.maintenance_update_progress(id, "objects", Some(50), 20, 5, 0, 999, Some("page-3"))
             .unwrap();
@@ -541,7 +601,10 @@ mod tests {
     #[test]
     fn failures_ring_is_bounded() {
         let db = db();
-        let id = db.maintenance_create_job("b", "admin", 1).unwrap().unwrap();
+        let id = db
+            .maintenance_create_job("reencrypt", "b", "counting", None, "admin", 1)
+            .unwrap()
+            .unwrap();
         for i in 0..10 {
             db.maintenance_record_failure(id, &format!("k{i}"), "boom", 3)
                 .unwrap();
@@ -552,10 +615,39 @@ mod tests {
     }
 
     #[test]
+    fn params_round_trip_and_active_transient_keys() {
+        let db = db();
+        let params = r#"{"target_backend":"hz","delete_source":false,"transient_key":"__dgmigrate_b_1","from_backend":"local"}"#;
+        let id = db
+            .maintenance_create_job("migrate", "b", "stage", Some(params), "admin", 1)
+            .unwrap()
+            .unwrap();
+        let job = db.maintenance_job_by_id(id).unwrap().unwrap();
+        assert_eq!(job.kind, "migrate");
+        assert_eq!(job.phase, "stage");
+        assert_eq!(job.params.as_deref(), Some(params));
+        assert_eq!(
+            db.maintenance_active_transient_keys().unwrap(),
+            vec!["__dgmigrate_b_1"]
+        );
+        // Terminal job no longer counts; malformed params tolerated.
+        db.maintenance_finish(id, "completed", None).unwrap();
+        db.maintenance_create_job("migrate", "c", "stage", Some("not-json"), "admin", 2)
+            .unwrap()
+            .unwrap();
+        assert!(db.maintenance_active_transient_keys().unwrap().is_empty());
+    }
+
+    #[test]
     fn list_jobs_newest_first() {
         let db = db();
-        db.maintenance_create_job("a", "admin", 1).unwrap().unwrap();
-        let b = db.maintenance_create_job("b", "admin", 2).unwrap().unwrap();
+        db.maintenance_create_job("reencrypt", "a", "counting", None, "admin", 1)
+            .unwrap()
+            .unwrap();
+        let b = db
+            .maintenance_create_job("reencrypt", "b", "counting", None, "admin", 2)
+            .unwrap()
+            .unwrap();
         let jobs = db.maintenance_list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].id, b);

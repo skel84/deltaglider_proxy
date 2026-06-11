@@ -153,7 +153,14 @@ pub async fn start_reencrypt(
         }
         let created = {
             let db = db.lock().await;
-            db.maintenance_create_job(&key, "admin", current_unix_seconds())
+            db.maintenance_create_job(
+                "reencrypt",
+                &key,
+                "counting",
+                None,
+                "admin",
+                current_unix_seconds(),
+            )
         };
         match created {
             Ok(Some(job_id)) => {

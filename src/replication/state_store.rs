@@ -14,6 +14,7 @@
 //! alongside IAM mutations. Matches the pattern in
 //! `src/config_db/users.rs`.
 
+use crate::config_db::job_store;
 use crate::config_db::{ConfigDb, ConfigDbError};
 use rusqlite::{params, OptionalExtension};
 
@@ -137,31 +138,9 @@ impl ConfigDb {
     /// clears stale leader leases.
     pub fn replication_reconcile_on_boot(&self) -> Result<usize, ConfigDbError> {
         let now = current_unix_seconds();
-
-        let mut stmt = self.conn.prepare(
-            "SELECT id, rule_name, started_at
-             FROM replication_run_history
-             WHERE status = 'running'",
-        )?;
-        let rows: Vec<(i64, String, i64)> = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(stmt);
-
-        let mut count = 0usize;
-        for (id, rule_name, started_at) in &rows {
-            self.conn.execute(
-                "UPDATE replication_run_history
-                    SET status = 'failed', finished_at = ?
-                  WHERE id = ?",
-                params![now, id],
-            )?;
+        let zombies = job_store::find_zombie_runs(&self.conn, "replication_run_history")?;
+        for (id, rule_name, started_at) in &zombies {
+            job_store::mark_run_failed(&self.conn, "replication_run_history", *id, now)?;
             self.conn.execute(
                 "INSERT INTO replication_failures
                     (rule_name, run_id, occurred_at, source_key, dest_key, error_message)
@@ -176,18 +155,9 @@ impl ConfigDb {
                     )
                 ],
             )?;
-            count += 1;
         }
-
-        self.conn.execute(
-            "UPDATE replication_state
-                SET leader_instance_id = NULL,
-                    leader_expires_at  = NULL
-              WHERE leader_expires_at IS NOT NULL AND leader_expires_at < ?",
-            params![now],
-        )?;
-
-        Ok(count)
+        job_store::clear_stale_leases(&self.conn, "replication_state", now)?;
+        Ok(zombies.len())
     }
 
     /// Load the state row for a given rule.
@@ -249,20 +219,15 @@ impl ConfigDb {
         now: i64,
         ttl_secs: i64,
     ) -> Result<bool, ConfigDbError> {
-        let expires_at = now.saturating_add(ttl_secs.max(1));
-        let n = self.conn.execute(
-            "UPDATE replication_state
-                SET leader_instance_id = ?,
-                    leader_expires_at  = ?
-              WHERE rule_name = ?
-                AND (
-                    leader_instance_id IS NULL
-                    OR leader_expires_at IS NULL
-                    OR leader_expires_at <= ?
-                )",
-            params![owner, expires_at, rule_name, now],
-        )?;
-        Ok(n > 0)
+        job_store::try_acquire_leader_lease(
+            &self.conn,
+            "replication_state",
+            "rule_name",
+            &rule_name,
+            owner,
+            now,
+            ttl_secs,
+        )
     }
 
     /// Release the per-rule run lease if this owner still holds it.
@@ -274,22 +239,23 @@ impl ConfigDb {
         rule_name: &str,
         owner: &str,
     ) -> Result<bool, ConfigDbError> {
-        let n = self.conn.execute(
-            "UPDATE replication_state
-                SET leader_instance_id = NULL,
-                    leader_expires_at  = NULL
-              WHERE rule_name = ?
-                AND leader_instance_id = ?",
-            params![rule_name, owner],
-        )?;
-        Ok(n > 0)
+        job_store::release_leader_lease(
+            &self.conn,
+            "replication_state",
+            "rule_name",
+            &rule_name,
+            owner,
+        )
     }
 
     /// Extend the per-rule run lease if this owner still holds it.
     ///
     /// Returns false when another process has stolen/expired the lease or the
     /// rule row disappeared. Callers should stop work before starting another
-    /// object/page when renewal fails.
+    /// object/page when renewal fails. Canonical semantics (see
+    /// `config_db::job_store`): a lease that has ALREADY lapsed cannot be
+    /// renewed — the lapsed worker must stop rather than resurrect a lease
+    /// another instance may have stolen.
     pub fn replication_renew_lease(
         &self,
         rule_name: &str,
@@ -297,15 +263,15 @@ impl ConfigDb {
         now: i64,
         ttl_secs: i64,
     ) -> Result<bool, ConfigDbError> {
-        let expires_at = now.saturating_add(ttl_secs.max(1));
-        let n = self.conn.execute(
-            "UPDATE replication_state
-                SET leader_expires_at = ?
-              WHERE rule_name = ?
-                AND leader_instance_id = ?",
-            params![expires_at, rule_name, owner],
-        )?;
-        Ok(n > 0)
+        job_store::renew_leader_lease(
+            &self.conn,
+            "replication_state",
+            "rule_name",
+            &rule_name,
+            owner,
+            now,
+            ttl_secs,
+        )
     }
 
     /// Begin a new run. Returns the newly-assigned history row id.
@@ -449,16 +415,12 @@ impl ConfigDb {
                 failure.error_message
             ],
         )?;
-        self.conn.execute(
-            "DELETE FROM replication_failures
-              WHERE rule_name = ?
-                AND id NOT IN (
-                    SELECT id FROM replication_failures
-                    WHERE rule_name = ?
-                    ORDER BY occurred_at DESC
-                    LIMIT ?
-                )",
-            params![rule_name, rule_name, max_retained],
+        job_store::prune_failure_ring(
+            &self.conn,
+            "replication_failures",
+            "rule_name",
+            &rule_name,
+            max_retained,
         )?;
         Ok(())
     }

@@ -25,11 +25,12 @@ pub struct ConfigDb {
 }
 
 /// Schema version — bump when adding migrations.
-const SCHEMA_VERSION: i32 = 13;
+const SCHEMA_VERSION: i32 = 14;
 
 pub(crate) mod auth_providers;
 mod declarative;
 mod groups;
+pub(crate) mod job_store;
 mod users;
 
 /// Compute the path to the IAM config database file.
@@ -52,7 +53,7 @@ pub fn config_db_path() -> PathBuf {
 /// defense-in-depth contract: identifiers MUST match this pattern and are
 /// never sourced from external input. Refactors that would feed a non-literal
 /// here will fail loudly via `ConfigDbError::Other` rather than risk injection.
-fn is_safe_sql_ident(ident: &str) -> bool {
+pub(crate) fn is_safe_sql_ident(ident: &str) -> bool {
     let mut chars = ident.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -84,6 +85,33 @@ fn rename_column_if_exists(
             [],
         )?;
     }
+    Ok(())
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<(), ConfigDbError> {
+    for ident in [table, column] {
+        if !is_safe_sql_ident(ident) {
+            return Err(ConfigDbError::Other(format!(
+                "refusing to interpolate unsafe SQL identifier: {ident:?}"
+            )));
+        }
+    }
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.iter().any(|c| c == column) {
+        return Ok(());
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+        [],
+    )?;
     Ok(())
 }
 
@@ -567,6 +595,27 @@ impl ConfigDb {
             )?;
             info!(
                 "Migrated config DB schema from v{} to v13 (added maintenance job tables)",
+                version
+            );
+        }
+
+        if version < 14 {
+            // v14: one-job-model consolidation groundwork.
+            //  * lifecycle gains a resumable cursor + a pause flag (parity
+            //    with replication — a crash no longer re-runs a whole rule
+            //    from page 0, and operators can pause a rule).
+            //  * maintenance jobs gain kind-specific JSON `params`
+            //    (migrate: target backend / delete_source / transient key).
+            add_column_if_missing(conn, "lifecycle_state", "continuation_token", "TEXT")?;
+            add_column_if_missing(
+                conn,
+                "lifecycle_state",
+                "paused",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            add_column_if_missing(conn, "maintenance_jobs", "params", "TEXT")?;
+            info!(
+                "Migrated config DB schema from v{} to v14 (lifecycle cursor/pause + job params)",
                 version
             );
         }

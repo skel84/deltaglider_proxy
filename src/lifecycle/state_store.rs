@@ -5,6 +5,7 @@
 //! Rules are YAML-owned. The config DB stores only scheduler state,
 //! execution history, per-object failures, and per-rule leases.
 
+use crate::config_db::job_store;
 use crate::config_db::{ConfigDb, ConfigDbError};
 use rusqlite::{params, OptionalExtension};
 
@@ -16,6 +17,8 @@ pub struct LifecycleState {
     pub last_status: String,
     pub objects_affected_lifetime: i64,
     pub bytes_affected_lifetime: i64,
+    pub paused: bool,
+    pub continuation_token: Option<String>,
     pub leader_instance_id: Option<String>,
     pub leader_expires_at: Option<i64>,
 }
@@ -99,32 +102,17 @@ impl ConfigDb {
         Ok(removed)
     }
 
+    /// Boot reconcile: zombie runs are marked failed (honest reporting),
+    /// but the rule's `continuation_token` is deliberately PRESERVED — the
+    /// next periodic tick resumes mid-bucket instead of re-listing from
+    /// page 0. Correct because `expire_before` is recomputed at the resumed
+    /// run's start (a later cutoff only ever adds candidates) and every
+    /// plan decision is per-object.
     pub fn lifecycle_reconcile_on_boot(&self) -> Result<usize, ConfigDbError> {
         let now = crate::lifecycle::current_unix_seconds();
-        let mut stmt = self.conn.prepare(
-            "SELECT id, rule_name, started_at
-             FROM lifecycle_run_history
-             WHERE status = 'running'",
-        )?;
-        let rows: Vec<(i64, String, i64)> = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(stmt);
-
-        let mut count = 0usize;
-        for (id, rule_name, started_at) in &rows {
-            self.conn.execute(
-                "UPDATE lifecycle_run_history
-                    SET status = 'failed', finished_at = ?
-                  WHERE id = ?",
-                params![now, id],
-            )?;
+        let zombies = job_store::find_zombie_runs(&self.conn, "lifecycle_run_history")?;
+        for (id, rule_name, started_at) in &zombies {
+            job_store::mark_run_failed(&self.conn, "lifecycle_run_history", *id, now)?;
             self.conn.execute(
                 "INSERT INTO lifecycle_failures
                     (rule_name, run_id, occurred_at, bucket, object_key, error_message)
@@ -146,18 +134,9 @@ impl ConfigDb {
                   WHERE rule_name = ?",
                 params![now, rule_name],
             )?;
-            count += 1;
         }
-
-        self.conn.execute(
-            "UPDATE lifecycle_state
-                SET leader_instance_id = NULL,
-                    leader_expires_at  = NULL
-              WHERE leader_expires_at IS NOT NULL AND leader_expires_at < ?",
-            params![now],
-        )?;
-
-        Ok(count)
+        job_store::clear_stale_leases(&self.conn, "lifecycle_state", now)?;
+        Ok(zombies.len())
     }
 
     pub fn lifecycle_load_state(
@@ -169,6 +148,7 @@ impl ConfigDb {
             .query_row(
                 "SELECT rule_name, last_run_at, next_due_at, last_status,
                         objects_affected_lifetime, bytes_affected_lifetime,
+                        paused, continuation_token,
                         leader_instance_id, leader_expires_at
                  FROM lifecycle_state WHERE rule_name = ?",
                 params![rule_name],
@@ -180,8 +160,10 @@ impl ConfigDb {
                         last_status: r.get(3)?,
                         objects_affected_lifetime: r.get(4)?,
                         bytes_affected_lifetime: r.get(5)?,
-                        leader_instance_id: r.get(6)?,
-                        leader_expires_at: r.get(7)?,
+                        paused: r.get::<_, i64>(6)? != 0,
+                        continuation_token: r.get(7)?,
+                        leader_instance_id: r.get(8)?,
+                        leader_expires_at: r.get(9)?,
                     })
                 },
             )
@@ -196,20 +178,15 @@ impl ConfigDb {
         now: i64,
         ttl_secs: i64,
     ) -> Result<bool, ConfigDbError> {
-        let expires_at = now.saturating_add(ttl_secs.max(1));
-        let n = self.conn.execute(
-            "UPDATE lifecycle_state
-                SET leader_instance_id = ?,
-                    leader_expires_at  = ?
-              WHERE rule_name = ?
-                AND (
-                    leader_instance_id IS NULL
-                    OR leader_expires_at IS NULL
-                    OR leader_expires_at <= ?
-                )",
-            params![owner, expires_at, rule_name, now],
-        )?;
-        Ok(n > 0)
+        job_store::try_acquire_leader_lease(
+            &self.conn,
+            "lifecycle_state",
+            "rule_name",
+            &rule_name,
+            owner,
+            now,
+            ttl_secs,
+        )
     }
 
     pub fn lifecycle_release_lease(
@@ -217,15 +194,39 @@ impl ConfigDb {
         rule_name: &str,
         owner: &str,
     ) -> Result<bool, ConfigDbError> {
+        job_store::release_leader_lease(
+            &self.conn,
+            "lifecycle_state",
+            "rule_name",
+            &rule_name,
+            owner,
+        )
+    }
+
+    /// Persist the operator pause flag. Returns false for unknown rules.
+    pub fn lifecycle_set_paused(
+        &self,
+        rule_name: &str,
+        paused: bool,
+    ) -> Result<bool, ConfigDbError> {
         let n = self.conn.execute(
-            "UPDATE lifecycle_state
-                SET leader_instance_id = NULL,
-                    leader_expires_at  = NULL
-              WHERE rule_name = ?
-                AND leader_instance_id = ?",
-            params![rule_name, owner],
+            "UPDATE lifecycle_state SET paused = ? WHERE rule_name = ?",
+            params![paused as i64, rule_name],
         )?;
         Ok(n > 0)
+    }
+
+    /// Persist the resumable LIST cursor (None = complete pass / reset).
+    pub fn lifecycle_set_continuation_token(
+        &self,
+        rule_name: &str,
+        token: Option<&str>,
+    ) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "UPDATE lifecycle_state SET continuation_token = ? WHERE rule_name = ?",
+            params![token, rule_name],
+        )?;
+        Ok(())
     }
 
     pub fn lifecycle_renew_lease(
@@ -235,23 +236,18 @@ impl ConfigDb {
         now: i64,
         ttl_secs: i64,
     ) -> Result<bool, ConfigDbError> {
-        let expires_at = now.saturating_add(ttl_secs.max(1));
-        // `>=` (not `>`): a renewal landing exactly on the expiry instant still
-        // belongs to the current owner, so it must succeed. Acquisition uses the
-        // mirror-image `<=` boundary (an expired lease is up for grabs at `now`),
-        // and this keeps the two sides from disagreeing about the boundary tick.
-        let n = self.conn.execute(
-            "UPDATE lifecycle_state
-                SET leader_expires_at = ?
-              WHERE rule_name = ?
-                AND leader_instance_id = ?
-                AND (
-                    leader_expires_at IS NULL
-                    OR leader_expires_at >= ?
-                )",
-            params![expires_at, rule_name, owner, now],
-        )?;
-        Ok(n > 0)
+        // Boundary semantics live in `config_db::job_store` (canonical for all
+        // three subsystems): renewal at exactly the expiry instant succeeds;
+        // a lapsed lease never resurrects.
+        job_store::renew_leader_lease(
+            &self.conn,
+            "lifecycle_state",
+            "rule_name",
+            &rule_name,
+            owner,
+            now,
+            ttl_secs,
+        )
     }
 
     pub fn lifecycle_begin_run(
@@ -342,16 +338,12 @@ impl ConfigDb {
                 failure.error_message
             ],
         )?;
-        self.conn.execute(
-            "DELETE FROM lifecycle_failures
-              WHERE rule_name = ?
-                AND id NOT IN (
-                    SELECT id FROM lifecycle_failures
-                    WHERE rule_name = ?
-                    ORDER BY occurred_at DESC
-                    LIMIT ?
-                )",
-            params![rule_name, rule_name, max_retained],
+        job_store::prune_failure_ring(
+            &self.conn,
+            "lifecycle_failures",
+            "rule_name",
+            &rule_name,
+            max_retained,
         )?;
         Ok(())
     }
@@ -425,6 +417,47 @@ mod tests {
 
     fn db() -> ConfigDb {
         ConfigDb::in_memory("testpass").expect("open in-memory db")
+    }
+
+    #[test]
+    fn paused_and_cursor_round_trip() {
+        let db = db();
+        db.lifecycle_ensure_state("r", 100).unwrap();
+        let st = db.lifecycle_load_state("r").unwrap().unwrap();
+        assert!(!st.paused);
+        assert_eq!(st.continuation_token, None);
+
+        assert!(db.lifecycle_set_paused("r", true).unwrap());
+        db.lifecycle_set_continuation_token("r", Some("page-7"))
+            .unwrap();
+        let st = db.lifecycle_load_state("r").unwrap().unwrap();
+        assert!(st.paused);
+        assert_eq!(st.continuation_token.as_deref(), Some("page-7"));
+
+        assert!(db.lifecycle_set_paused("r", false).unwrap());
+        db.lifecycle_set_continuation_token("r", None).unwrap();
+        let st = db.lifecycle_load_state("r").unwrap().unwrap();
+        assert!(!st.paused);
+        assert_eq!(st.continuation_token, None);
+        // unknown rule → false
+        assert!(!db.lifecycle_set_paused("ghost", true).unwrap());
+    }
+
+    #[test]
+    fn reconcile_preserves_continuation_token() {
+        let db = db();
+        db.lifecycle_ensure_state("r", 100).unwrap();
+        db.lifecycle_set_continuation_token("r", Some("page-3"))
+            .unwrap();
+        let run = db.lifecycle_begin_run("r", 10, "scheduler").unwrap();
+        let n = db.lifecycle_reconcile_on_boot().unwrap();
+        assert_eq!(n, 1);
+        let runs = db.lifecycle_recent_runs("r", 5).unwrap();
+        assert_eq!(runs[0].id, run);
+        assert_eq!(runs[0].status, "failed");
+        // The cursor survives — the next tick resumes mid-bucket.
+        let st = db.lifecycle_load_state("r").unwrap().unwrap();
+        assert_eq!(st.continuation_token.as_deref(), Some("page-3"));
     }
 
     #[test]
