@@ -8,6 +8,21 @@ use crate::types::FileMetadata;
 use chrono::{DateTime, Utc};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
+/// Every bucket a rule run WRITES to: the scanned bucket (deletes happen
+/// there) and, for transition rules, the destination. The maintenance
+/// write gate must defer a run when ANY of these is busy — a transition
+/// PUT landing on a bucket mid-reencrypt/migrate is exactly the racing
+/// write the gate exists to stop.
+pub fn rule_write_buckets(rule: &LifecycleRule) -> Vec<&str> {
+    let mut buckets = vec![rule.bucket.as_str()];
+    if let LifecycleAction::Transition(t) = &rule.action {
+        if !t.destination.bucket.trim().is_empty() && t.destination.bucket != rule.bucket {
+            buckets.push(t.destination.bucket.as_str());
+        }
+    }
+    buckets
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Apply { action: PlannedLifecycleAction },

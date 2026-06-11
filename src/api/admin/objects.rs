@@ -235,7 +235,30 @@ async fn run_copy_loop(s3: &Arc<AppState>, req: &CopyRequest) -> CopyResponse {
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut failures: Vec<CopyFailure> = Vec::new();
-    for it in &req.items {
+    // Register with the maintenance gate for the whole loop: the
+    // entry-check in the handler only sees jobs that existed when the
+    // request STARTED, but this loop can write for minutes. write_started
+    // makes the worker's drain wait for us; the per-item is_busy check
+    // stops us the moment a job arms mid-loop.
+    let gate = &s3.maintenance_gate;
+    gate.write_started(&req.dest_bucket);
+    for (idx, it) in req.items.iter().enumerate() {
+        if gate.is_busy(&req.dest_bucket) {
+            let remaining = req.items.len() - idx;
+            failed += remaining;
+            if failures.len() < MAX_FAILURE_ENTRIES {
+                failures.push(CopyFailure {
+                    source_key: it.source_key.clone(),
+                    dest_key: String::new(),
+                    error: format!(
+                        "a maintenance job started on bucket '{}' — {} remaining \
+                         item(s) skipped; retry after the job finishes",
+                        req.dest_bucket, remaining
+                    ),
+                });
+            }
+            break;
+        }
         let dk = dest_key(&req.dest_prefix, &it.relative);
         let result = copy_one(
             &engine,
@@ -259,6 +282,7 @@ async fn run_copy_loop(s3: &Arc<AppState>, req: &CopyRequest) -> CopyResponse {
             }
         }
     }
+    gate.write_finished(&req.dest_bucket);
     CopyResponse {
         succeeded,
         failed,
@@ -368,7 +392,20 @@ pub async fn move_objects(
     let mut skipped_self = 0usize;
     if copy_result.failed == 0 {
         let engine = s3.engine.load();
+        let gate = &s3.maintenance_gate;
+        gate.write_started(&req.source_bucket);
         for it in &req.items {
+            if gate.is_busy(&req.source_bucket) {
+                // A maintenance job armed mid-loop: stop deleting sources.
+                // The copies succeeded; leftovers are benign (same contract
+                // as a failed source delete below).
+                warn!(
+                    "bulk move: maintenance job started on '{}' — leaving remaining \
+                     source objects in place",
+                    req.source_bucket
+                );
+                break;
+            }
             // DATA-LOSS GUARD: a move whose destination key resolves to the
             // SAME bucket+key as the source is a self-copy no-op. Deleting the
             // source here would destroy the only copy. Never delete a source we
@@ -397,6 +434,7 @@ pub async fn move_objects(
                 }
             }
         }
+        gate.write_finished(&req.source_bucket);
         if skipped_self > 0 {
             warn!(
                 "bulk move: skipped deleting {} source(s) whose destination equals the source \
@@ -451,7 +489,26 @@ pub async fn bulk_delete(
     let mut deleted = 0usize;
     let mut failed = 0usize;
     let mut failures: Vec<DeleteFailure> = Vec::new();
-    for key in &req.keys {
+    // Same gate participation as run_copy_loop: visible to the worker's
+    // drain, and stops the moment a maintenance job arms mid-loop.
+    let gate = &state.s3_state.maintenance_gate;
+    gate.write_started(&req.bucket);
+    for (idx, key) in req.keys.iter().enumerate() {
+        if gate.is_busy(&req.bucket) {
+            let remaining = req.keys.len() - idx;
+            failed += remaining;
+            if failures.len() < MAX_FAILURE_ENTRIES {
+                failures.push(DeleteFailure {
+                    key: key.clone(),
+                    error: format!(
+                        "a maintenance job started on bucket '{}' — {} remaining \
+                         key(s) skipped; retry after the job finishes",
+                        req.bucket, remaining
+                    ),
+                });
+            }
+            break;
+        }
         match engine.delete(&req.bucket, key).await {
             Ok(()) => deleted += 1,
             Err(e) => {
@@ -472,6 +529,7 @@ pub async fn bulk_delete(
         }
     }
 
+    gate.write_finished(&req.bucket);
     info!(
         "bulk delete: bucket={} deleted={} failed={}",
         req.bucket, deleted, failed

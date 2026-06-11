@@ -25,7 +25,7 @@ pub struct ConfigDb {
 }
 
 /// Schema version — bump when adding migrations.
-const SCHEMA_VERSION: i32 = 14;
+const SCHEMA_VERSION: i32 = 15;
 
 pub(crate) mod auth_providers;
 mod declarative;
@@ -616,6 +616,19 @@ impl ConfigDb {
             add_column_if_missing(conn, "maintenance_jobs", "params", "TEXT")?;
             info!(
                 "Migrated config DB schema from v{} to v14 (lifecycle cursor/pause + job params)",
+                version
+            );
+        }
+
+        if version < 15 {
+            // v15: the lifecycle cursor is stamped with the `bucket|prefix`
+            // scope that produced it. A token is only valid for the listing
+            // it came from — redefining a same-named rule to a different
+            // bucket/prefix must not replay the old cursor (it would
+            // silently skip everything below it on the new listing).
+            add_column_if_missing(conn, "lifecycle_state", "cursor_scope", "TEXT")?;
+            info!(
+                "Migrated config DB schema from v{} to v15 (lifecycle cursor scope)",
                 version
             );
         }

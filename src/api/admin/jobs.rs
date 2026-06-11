@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::AdminState;
+use crate::maintenance::migrate;
 use crate::maintenance::store::MaintenanceJob;
-use crate::maintenance::{migrate, progress_percent};
 
 // ─────────────────────────── pure decision logic ───────────────────────────
 
@@ -94,6 +94,20 @@ impl JobAction {
             "preview" => Some(Self::Preview),
             "cancel" => Some(Self::Cancel),
             _ => None,
+        }
+    }
+
+    /// The wire name (inverse of [`parse`]) — used in user-facing errors,
+    /// never Debug formatting.
+    ///
+    /// [`parse`]: Self::parse
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::RunNow => "run-now",
+            Self::Preview => "preview",
+            Self::Cancel => "cancel",
         }
     }
 }
@@ -219,10 +233,7 @@ pub struct JobFailureEntry {
 }
 
 fn maintenance_job_view(j: &MaintenanceJob) -> JobView {
-    let percent = match j.status.as_str() {
-        "completed" => Some(100),
-        _ => progress_percent(&j.phase, j.objects_total, j.objects_done, j.objects_skipped),
-    };
+    let percent = crate::maintenance::display_percent(j);
     let (target, detail) = match (j.kind.as_str(), j.params.as_deref()) {
         ("migrate", Some(p)) => match migrate::parse_params(p) {
             Ok(mp) => (
@@ -577,12 +588,14 @@ pub async fn job_action(
     let action = JobAction::parse(&action)
         .ok_or((StatusCode::NOT_FOUND, format!("unknown action '{action}'")))?;
     if !supported_actions(sub).contains(&action) {
+        let available = supported_actions(sub)
+            .iter()
+            .map(|a| a.wire_name())
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "action not supported for this job kind (supported: {:?})",
-                supported_actions(sub)
-            ),
+            format!("this action isn't available for this job kind (available: {available})"),
         ));
     }
     let name = key.to_string();

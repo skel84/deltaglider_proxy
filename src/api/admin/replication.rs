@@ -66,6 +66,23 @@ pub async fn run_now(
         ));
     }
 
+    // Same deferral the scheduler and event consumer apply: run-now must
+    // not write into a destination a maintenance job is rewriting.
+    if state
+        .s3_state
+        .maintenance_gate
+        .is_busy(&rule.destination.bucket)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "destination bucket '{}' has an active maintenance job — run the rule \
+                 again when it finishes",
+                rule.destination.bucket
+            ),
+        ));
+    }
+
     let db_arc = state
         .config_db
         .as_ref()

@@ -102,15 +102,23 @@ HTTP request (axum Router; cross-cutting layers: TraceLayer, body limit, timeout
       event_consumer.rs      Consumes the event outbox for lazy/event-driven replication (defers busy-gated destinations)
       state_store.rs         ConfigDb wrapper for replication_state / run_history / failures tables (delegates to config_db/job_store.rs)
   → lifecycle/              Object lifecycle (YAML-authored, disabled by default, previewable; acts through the engine): planner/scheduler/worker/state_store.
-                            Has crash-resume cursor + pause/resume parity with replication (v14)
-  → maintenance/            One-off bucket jobs (DB-born, not YAML): store.rs (maintenance_jobs/failures, re-queue-on-boot reconcile),
-                            gate.rs (per-bucket WRITE gate middleware: 503 SlowDown on writes to busy buckets, reads pass; in-flight write drain),
-                            worker.rs (sequential runner, kind dispatch), migrate.rs (kind=migrate: stage→copy→verify→flip→cleanup, transient
-                            __dgmigrate_* routes, pre-flip cancel unwind), mod.rs (pure: resolve_desired/needs_rewrite/progress_percent)
+                            Has crash-resume cursor (scope-stamped `bucket|prefix`, v15 — a redefined same-named rule never replays the old token)
+                            + pause/resume parity with replication. Scheduler AND run-now defer when ANY rule write-bucket (source or transition
+                            destination — planner::rule_write_buckets) is maintenance-gated
+  → maintenance/            One-off bucket jobs (DB-born, not YAML): store.rs (maintenance_jobs/failures; maintenance_requeue_abandoned is
+                            LEASE-AWARE and runs at boot + every worker poll tick — a synced DB carrying a peer's LIVE job is never resurrected;
+                            maintenance_gate_arm_keys is kind/phase-aware), gate.rs (per-bucket WRITE gate middleware: 503 SlowDown on writes to
+                            busy buckets, reads pass; in-flight write drain; admin bulk copy/move/delete loops participate via
+                            write_started/finished + per-item is_busy), worker.rs (sequential runner, kind dispatch; heartbeat returns
+                            Err(LEASE_LOST) on refused renewal → phase stops, row NOT settled), migrate.rs (kind=migrate: stage→copy→verify→
+                            flip→cleanup, transient __dgmigrate_* routes — gated from creation, filtered out of all bucket listings, cleared at
+                            flip; pre-flip cancel unwind; cleanup re-checks routed_to_target PER SWEEP; cancel-in-cleanup settles completed with
+                            a note), mod.rs (pure: resolve_desired/needs_rewrite/progress_percent/display_percent)
   → config_apply.rs         ConfigMutator: mutate → rebuild engine (rollback on failure) → persist, for BACKGROUND tasks (migrate flips);
                             admin rebuild_engine delegates to rebuild_engine_only
   → job_loop.rs             THE canonical pagination state machine (Pager): token threading, resume detection, poison-token
-                            guard (one-shot restart_fresh), MAX_JOB_PAGES cap — all worker loops paginate through it
+                            guard (one-shot restart_fresh), MAX_JOB_PAGES cap, truncated_by_page_budget() — phase machines (migrate/reencrypt)
+                            MUST fail on budget truncation instead of falling through to the next phase; cursor loops may ignore it
   → config_db/job_store.rs  THE canonical job machinery (identifier-checked): leader-lease acquire/renew (lapsed never resurrects),
                             failure-ring prune (id DESC), zombie-run scan — all three subsystems delegate here
   → transfer.rs             Shared engine-routed copy primitive (retrieve→store, preserve multipart ETags, stamp provenance, retry transient) — used by replication + lifecycle

@@ -102,14 +102,16 @@ impl MaintenanceGate {
             .unwrap_or(0)
     }
 
-    fn write_started(&self, bucket: &str) {
+    /// Public because long-running ADMIN write loops (bulk copy/move/
+    /// delete) must participate in the drain alongside the S3 middleware.
+    pub fn write_started(&self, bucket: &str) {
         *self
             .inflight_writes
             .entry(bucket.to_ascii_lowercase())
             .or_insert(0) += 1;
     }
 
-    fn write_finished(&self, bucket: &str) {
+    pub fn write_finished(&self, bucket: &str) {
         let key = bucket.to_ascii_lowercase();
         if let Some(mut v) = self.inflight_writes.get_mut(&key) {
             *v -= 1;
@@ -158,8 +160,10 @@ pub async fn maintenance_gate_middleware(request: Request<Body>, next: Next) -> 
     };
 
     if gate.is_busy(&bucket) {
+        // The busy set doesn't carry the job kind — name both candidates.
         return crate::api::errors::S3Error::SlowDown(format!(
-            "bucket '{bucket}' is temporarily read-only: maintenance (re-encryption) in progress"
+            "bucket '{bucket}' is temporarily read-only while a background job \
+             (re-encryption or migration) finishes — please retry shortly"
         ))
         .into_response();
     }

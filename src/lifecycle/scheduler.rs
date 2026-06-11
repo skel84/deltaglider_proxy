@@ -121,10 +121,15 @@ async fn run_due_rules(
             continue;
         }
 
-        if state.maintenance_gate.is_busy(&rule.bucket) {
+        // Source AND transition destination: a transition PUT landing on
+        // a gated bucket is the racing write the gate exists to stop.
+        if let Some(busy) = super::planner::rule_write_buckets(rule)
+            .into_iter()
+            .find(|b| state.maintenance_gate.is_busy(b))
+        {
             info!(
                 "Lifecycle scheduler deferring rule '{}': bucket '{}' is under maintenance",
-                rule.name, rule.bucket
+                rule.name, busy
             );
             continue;
         }

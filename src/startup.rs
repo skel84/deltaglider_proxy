@@ -742,7 +742,10 @@ pub fn init_config_db(
             // Maintenance jobs are one-offs the operator explicitly started:
             // interrupted ones go back to QUEUED with their cursor preserved
             // (the worker resumes them), unlike replication's running→failed.
-            match db.maintenance_reconcile_on_boot() {
+            // Lease-aware: a freshly-crashed job's lease may still be live
+            // here; the worker loop re-runs this on every poll tick, so it
+            // becomes claimable within one lease TTL.
+            match db.maintenance_requeue_abandoned() {
                 Ok(count) if count > 0 => {
                     warn!(
                         "Re-queued {count} maintenance job(s) interrupted by a previous process — \

@@ -40,6 +40,10 @@ pub struct Pager {
     resumed: bool,
     pages_started: u32,
     max_pages: u32,
+    /// True while the last `advance` said another page follows. Lets
+    /// callers distinguish "loop ended because the listing completed"
+    /// from "loop ended because the page budget ran out mid-listing".
+    more_pending: bool,
 }
 
 impl Pager {
@@ -50,6 +54,7 @@ impl Pager {
             token: resume_token,
             pages_started: 0,
             max_pages: MAX_JOB_PAGES,
+            more_pending: false,
         }
     }
 
@@ -100,6 +105,18 @@ impl Pager {
         self.token = None;
         self.resumed = false;
         self.pages_started = 0;
+        self.more_pending = false;
+    }
+
+    /// True when the loop stopped because the page budget ran out while
+    /// the listing still had more pages. Phase-machine callers (migrate,
+    /// reencrypt) MUST treat this as fatal: falling through to the next
+    /// phase here means "verified"/"flipped"/"deleted" over a listing
+    /// that was silently truncated. Cursor-driven callers (replication,
+    /// lifecycle) may ignore it — their persisted token resumes the tail
+    /// on the next tick.
+    pub fn truncated_by_page_budget(&self) -> bool {
+        self.pages_started >= self.max_pages && self.more_pending
     }
 
     /// Thread one page result. Returns true when another page follows
@@ -113,9 +130,11 @@ impl Pager {
     pub fn advance(&mut self, is_truncated: bool, next_token: Option<String>) -> bool {
         if is_truncated && next_token.is_some() {
             self.token = next_token;
+            self.more_pending = true;
             true
         } else {
             self.token = None;
+            self.more_pending = false;
             false
         }
     }
@@ -185,6 +204,29 @@ mod tests {
         }
         assert_eq!(p.begin_page(), None, "budget exhausted");
         assert_eq!(p.begin_page(), None, "stays exhausted");
+        assert!(
+            p.truncated_by_page_budget(),
+            "budget ran out mid-listing — phase machines must fail, not fall through"
+        );
+    }
+
+    #[test]
+    fn complete_pass_is_not_budget_truncation() {
+        // Ending exactly ON the budget with a complete listing is fine.
+        let mut p = Pager::fresh().with_max_pages(2);
+        let _ = p.begin_page();
+        assert!(p.advance(true, Some("t1".into())));
+        let _ = p.begin_page();
+        assert!(!p.advance(false, None), "listing complete on the last page");
+        assert!(!p.truncated_by_page_budget());
+
+        // And a restart clears a previous truncation verdict.
+        let mut q = Pager::fresh().with_max_pages(1);
+        let _ = q.begin_page();
+        assert!(q.advance(true, Some("t1".into())));
+        assert!(q.truncated_by_page_budget());
+        q.restart_fresh();
+        assert!(!q.truncated_by_page_budget());
     }
 
     #[test]

@@ -57,7 +57,7 @@ use crate::transfer::{copy_object_with_retries, ObjectTransferRequest, TransferP
 
 use super::store::MaintenanceJob;
 use super::worker::{
-    check_cancel, drain_inflight_writes, heartbeat, persist, record_failure, CANCELLED,
+    check_cancel, drain_inflight_writes, heartbeat, persist, record_failure, LEASE_LOST,
 };
 
 pub const TRANSIENT_PREFIX: &str = "__dgmigrate_";
@@ -188,7 +188,11 @@ pub async fn execute_migrate_phases(
     let params = parse_params(job.params.as_deref().ok_or("migrate job has no params")?)?;
     let result = run_phases(mutator, db, state, instance_id, job, &params).await;
 
-    if result.is_err() {
+    let lease_lost = result.as_ref().err().is_some_and(|e| e == LEASE_LOST);
+    if result.is_err() && !lease_lost {
+        // (Lease loss is NOT an unwind: the job continues under the next
+        // claimer, which needs the staging route — and re-asserts it per
+        // page anyway.)
         // Determine the phase we died in (re-read — phases persist it).
         let phase = {
             let db = db.lock().await;
@@ -242,12 +246,19 @@ async fn run_phases(
             ),
         )
         .await?;
-        // Real bucket on the target (idempotent — tolerate "exists").
+        // Real bucket on the target (idempotent). "Already exists" must be
+        // tolerated for crash-resume, but backend error strings don't
+        // reliably contain "exist" (the AWS SDK renders a 409 as a terse
+        // "service error") — so on ANY create failure, probe the bucket
+        // through the staging route instead of string-matching.
         let engine = state.engine.load().clone();
         if let Err(e) = engine.create_bucket(&params.transient_key).await {
-            let msg = e.to_string();
-            if !msg.to_lowercase().contains("exist") {
-                return Err(format!("create bucket on target failed: {msg}"));
+            if engine
+                .list_objects(&params.transient_key, "", None, 1, None, false)
+                .await
+                .is_err()
+            {
+                return Err(format!("create bucket on target failed: {e}"));
             }
         }
         // The gate has been rejecting NEW source writes since job creation;
@@ -344,10 +355,20 @@ async fn run_phases(
                 pager.token(),
             )
             .await;
-            heartbeat(db, job.id, instance_id).await;
+            heartbeat(db, job.id, instance_id).await?;
             if !more {
                 break;
             }
+        }
+        if pager.truncated_by_page_budget() {
+            // Falling through to verify here would "verify" (and later flip
+            // + delete) over a silently truncated listing — never-copied
+            // tail objects would be lost. Fail instead; the persisted
+            // cursor resumes the tail on retry.
+            return Err("copy stopped at the page budget with more source pages \
+                 pending — bucket too large for one pass; job left resumable \
+                 in phase 'copy' (cursor persisted, source authoritative)"
+                .to_string());
         }
         phase = "verify".to_string();
         persist(db, job, &phase, None, done, skipped, failed, bytes, None).await;
@@ -397,10 +418,16 @@ async fn run_phases(
                 pager.token(),
             )
             .await;
-            heartbeat(db, job.id, instance_id).await;
+            heartbeat(db, job.id, instance_id).await?;
             if !more {
                 break;
             }
+        }
+        if pager.truncated_by_page_budget() {
+            return Err("verify stopped at the page budget with more source pages \
+                 pending — refusing to flip over an incompletely verified \
+                 listing; job left resumable in phase 'verify'"
+                .to_string());
         }
         phase = "flip".to_string();
         persist(db, job, &phase, None, done, skipped, failed, bytes, None).await;
@@ -427,8 +454,11 @@ async fn run_phases(
             )
             .await?;
         // Destination is authoritative — client writes resume NOW, not at
-        // job settle (cleanup below doesn't need the gate).
+        // job settle (cleanup below doesn't need the gate). The transient
+        // route was just removed from the config, so its gate entry goes
+        // too.
         state.maintenance_gate.clear(bucket);
+        state.maintenance_gate.clear(&params.transient_key);
         info!(
             "migrate: bucket '{}' flipped to backend '{}'",
             bucket, params.target_backend
@@ -439,25 +469,6 @@ async fn run_phases(
 
     // ── Phase: cleanup (optional delete-source; never fails the job) ──
     if phase == "cleanup" && params.delete_source {
-        // Defense-in-depth for the crash window: deleting source objects is
-        // only safe if the LIVE config genuinely routes the bucket to the
-        // target. A resumed job whose flip didn't stick (file lagged the
-        // engine, then a crash) must fail loudly instead of deleting a
-        // bucket clients are actively writing to.
-        let routed_to_target = {
-            let cfg = mutator.read().await;
-            cfg.buckets
-                .get(bucket)
-                .and_then(|p| p.backend.as_deref().map(|b| b == params.target_backend))
-                .unwrap_or(false)
-        };
-        if !routed_to_target {
-            return Err(format!(
-                "cleanup refused: bucket '{}' is not routed to '{}' in the live \
-                 config — the flip did not persist; source data left untouched",
-                bucket, params.target_backend
-            ));
-        }
         let cleanup_key = format!("{}__src", params.transient_key);
         ensure_route(
             mutator,
@@ -469,9 +480,34 @@ async fn run_phases(
         .await?;
         let mut cleanup_token: Option<String> = None;
         let mut delete_failures = 0u32;
+        let mut cancelled_mid_cleanup = false;
         'cleanup: for _ in 0..MAX_JOB_PAGES {
             if check_cancel(db, job.id).await.is_err() {
-                break 'cleanup; // flip already happened; stop deleting quietly
+                // Flip already happened; stop deleting and settle with a
+                // note below (NOT the generic cancel path — the MIGRATION
+                // itself succeeded).
+                cancelled_mid_cleanup = true;
+                break 'cleanup;
+            }
+            // Re-checked EVERY sweep (not just once): deleting source
+            // objects is only safe while the LIVE config genuinely routes
+            // the bucket to the target. A resumed job whose flip didn't
+            // stick — or an admin apply mid-cleanup that re-routes the
+            // bucket back — must stop the sweep instantly instead of
+            // deleting data clients are actively writing to.
+            let routed_to_target = {
+                let cfg = mutator.read().await;
+                cfg.buckets
+                    .get(bucket)
+                    .and_then(|p| p.backend.as_deref().map(|b| b == params.target_backend))
+                    .unwrap_or(false)
+            };
+            if !routed_to_target {
+                return Err(format!(
+                    "cleanup refused: bucket '{}' is not routed to '{}' in the live \
+                     config — source data left untouched",
+                    bucket, params.target_backend
+                ));
             }
             let engine = state.engine.load().clone();
             let page = match engine
@@ -511,7 +547,7 @@ async fn run_phases(
                 break 'cleanup;
             }
             cleanup_token = None;
-            heartbeat(db, job.id, instance_id).await;
+            heartbeat(db, job.id, instance_id).await?;
         }
         remove_routes(
             mutator,
@@ -519,22 +555,33 @@ async fn run_phases(
             "Migration source-cleanup route removed",
         )
         .await;
-        if delete_failures > 0 {
-            // Recorded, surfaced, but the MIGRATION succeeded.
+        // The MIGRATION succeeded either way; an interrupted cleanup is
+        // surfaced as a note, never as a failed/cancelled job.
+        let note = if cancelled_mid_cleanup {
+            Some(format!(
+                "source cleanup stopped by cancel{} — remaining source \
+                 objects can be removed manually",
+                if delete_failures > 0 {
+                    format!(" ({delete_failures} failure(s))")
+                } else {
+                    String::new()
+                }
+            ))
+        } else if delete_failures > 0 {
+            Some(format!(
+                "source cleanup incomplete ({delete_failures} failure(s)) — \
+                 remaining source objects can be removed manually"
+            ))
+        } else {
+            None
+        };
+        if let Some(note) = note {
             let db = db.lock().await;
-            let _ = db.maintenance_finish(
-                job.id,
-                "completed",
-                Some(&format!(
-                    "source cleanup incomplete ({delete_failures} failure(s)) — \
-                     remaining source objects can be removed manually"
-                )),
-            );
+            let _ = db.maintenance_finish(job.id, "completed", Some(&note));
             return Ok(());
         }
     }
 
-    let _ = CANCELLED; // referenced for doc-parity with reencrypt
     Ok(())
 }
 

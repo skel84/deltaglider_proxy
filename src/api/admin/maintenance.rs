@@ -17,9 +17,9 @@
 //!   response carries only status/phase/counts — no config detail.
 
 use super::AdminState;
-use crate::maintenance::migrate::{pick_transient_key, MigrateParams};
+use crate::maintenance::migrate::{parse_params, pick_transient_key, MigrateParams};
 use crate::maintenance::store::{current_unix_seconds, CancelOutcome, MaintenanceJob};
-use crate::maintenance::{progress_percent, resolve_desired};
+use crate::maintenance::{display_percent, resolve_desired};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -40,10 +40,12 @@ pub struct MaintenanceJobView {
     pub objects_skipped: i64,
     pub objects_failed: i64,
     pub bytes_done: i64,
-    /// 0-99 while running (`None` while counting); the UI shows 100 on
-    /// `completed`.
+    /// 0-99 while running (`None` while counting); 100 on `completed`.
     pub percent: Option<u8>,
-    pub last_error: Option<String>,
+    // NO `last_error` here: this view is readable by non-admin browser
+    // sessions, and worker errors can embed object keys + raw backend
+    // error strings. The busy banner needs status/phase/counts only;
+    // admins read errors via the admin-tier jobs API.
     pub triggered_by: Option<String>,
     pub created_at: i64,
     pub started_at: Option<i64>,
@@ -52,10 +54,7 @@ pub struct MaintenanceJobView {
 
 impl From<MaintenanceJob> for MaintenanceJobView {
     fn from(j: MaintenanceJob) -> Self {
-        let percent = match j.status.as_str() {
-            "completed" => Some(100),
-            _ => progress_percent(&j.phase, j.objects_total, j.objects_done, j.objects_skipped),
-        };
+        let percent = display_percent(&j);
         Self {
             id: j.id,
             kind: j.kind,
@@ -68,7 +67,6 @@ impl From<MaintenanceJob> for MaintenanceJobView {
             objects_failed: j.objects_failed,
             bytes_done: j.bytes_done,
             percent,
-            last_error: j.last_error,
             triggered_by: j.triggered_by,
             created_at: j.created_at,
             started_at: j.started_at,
@@ -304,7 +302,13 @@ pub async fn start_migrate(
 
     // Gate WRITES from creation — the source write-set freezes through the
     // flip (this is what makes migrate race-free, unlike the old handler).
+    // The transient staging route is gated too: admin copy/move endpoints
+    // could otherwise write through it mid-copy.
     state.s3_state.maintenance_gate.set_busy(&bucket_key);
+    state
+        .s3_state
+        .maintenance_gate
+        .set_busy(&params.transient_key);
     state.s3_state.maintenance_notify.notify_one();
     info!(
         "maintenance: migrate requested for '{}' → '{}' (job #{job_id})",
@@ -339,22 +343,25 @@ pub async fn cancel_job(
         .config_db
         .as_ref()
         .ok_or((StatusCode::NOT_FOUND, "config DB unavailable".to_string()))?;
-    let (outcome, bucket) = {
+    let (outcome, job) = {
         let db = db.lock().await;
-        let bucket = db
+        let job = db
             .maintenance_job_by_id(id)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .map(|j| j.bucket);
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let outcome = db
             .maintenance_request_cancel(id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        (outcome, bucket)
+        (outcome, job)
     };
     match outcome {
         CancelOutcome::CancelledImmediately => {
-            // Queued job never ran: release the gate now.
-            if let Some(b) = &bucket {
-                state.s3_state.maintenance_gate.clear(b);
+            // Queued job never ran: release the gate now (bucket AND, for
+            // migrate, the transient staging route gated at creation).
+            if let Some(j) = &job {
+                state.s3_state.maintenance_gate.clear(&j.bucket);
+                if let Some(p) = j.params.as_deref().and_then(|p| parse_params(p).ok()) {
+                    state.s3_state.maintenance_gate.clear(&p.transient_key);
+                }
             }
             super::audit_log(
                 "maintenance_job_cancel",

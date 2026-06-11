@@ -205,14 +205,33 @@ async fn run_or_preview(
     // EXECUTE runs resume from the persisted cursor (a crash/restart no
     // longer re-lists a huge bucket from page 0). Previews always start
     // fresh — they are read-only estimates of a full pass.
+    // The cursor is scope-stamped: a token issued against one
+    // bucket/prefix is meaningless (or worse, silently skips keys) on
+    // another, so a redefined same-named rule starts fresh.
+    let cursor_scope = format!("{}|{}", rule.bucket, prefix);
     let mut resume_token: Option<String> = None;
     if execute {
         if let Some(db) = db.as_ref() {
             let db = db.lock().await;
-            resume_token = db
+            let state = db
                 .lifecycle_load_state(&rule.name)
-                .map_err(|err| err.to_string())?
-                .and_then(|st| st.continuation_token);
+                .map_err(|err| err.to_string())?;
+            match state {
+                Some(st) if st.cursor_scope.as_deref() == Some(cursor_scope.as_str()) => {
+                    resume_token = st.continuation_token;
+                }
+                Some(st) if st.continuation_token.is_some() => {
+                    tracing::info!(
+                        "Lifecycle rule '{}' was redefined ({} -> {}) — dropping the \
+                         stale resume cursor",
+                        rule.name,
+                        st.cursor_scope.as_deref().unwrap_or("<none>"),
+                        cursor_scope
+                    );
+                    let _ = db.lifecycle_set_continuation_token(&rule.name, None, &cursor_scope);
+                }
+                _ => {}
+            }
         }
     }
     let mut pager = Pager::resuming(resume_token);
@@ -245,7 +264,8 @@ async fn run_or_preview(
                 if pager.poisoned_resume_token() {
                     if let Some(db) = db.as_ref() {
                         let db = db.lock().await;
-                        let _ = db.lifecycle_set_continuation_token(&rule.name, None);
+                        let _ =
+                            db.lifecycle_set_continuation_token(&rule.name, None, &cursor_scope);
                     }
                 }
                 out.errors += 1;
@@ -334,7 +354,7 @@ async fn run_or_preview(
                 // Persist the resumable cursor after every page; on a
                 // complete pass the pager normalizes it to None, which
                 // clears the cursor so the next run starts from the top.
-                db.lifecycle_set_continuation_token(&rule.name, pager.token())
+                db.lifecycle_set_continuation_token(&rule.name, pager.token(), &cursor_scope)
                     .map_err(|err| err.to_string())?;
             }
         }

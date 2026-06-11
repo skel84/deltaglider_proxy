@@ -156,6 +156,21 @@ pub fn strip_encryption_markers(user_metadata: &mut HashMap<String, String>) {
     user_metadata.remove(ENCRYPTION_KEY_ID_KEY);
 }
 
+/// Display percent for a job ROW: 100 once completed, otherwise
+/// [`progress_percent`]. The one home for the rule both admin views
+/// (jobs.rs + the session-light bucket status) share.
+pub fn display_percent(job: &store::MaintenanceJob) -> Option<u8> {
+    match job.status.as_str() {
+        "completed" => Some(100),
+        _ => progress_percent(
+            &job.phase,
+            job.objects_total,
+            job.objects_done,
+            job.objects_skipped,
+        ),
+    }
+}
+
 /// Overall progress percent for the UI, or `None` while it cannot be
 /// estimated (counting phase). Capped at 99 until the caller marks the
 /// job completed — the references phase rides in the final percent.

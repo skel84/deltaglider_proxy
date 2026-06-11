@@ -18,11 +18,12 @@
 //!
 //! Replication flips zombie `running` runs to `failed` on boot because a
 //! new periodic run will follow anyway. A maintenance job is a one-off
-//! the operator explicitly started, so [`ConfigDb::maintenance_reconcile_on_boot`]
+//! the operator explicitly started, so [`ConfigDb::maintenance_requeue_abandoned`]
 //! flips `running`/`cancelling` back to **`queued`** with the phase and
 //! continuation token preserved — the worker resumes where the previous
 //! process died. This is what makes the server-side state "stable":
-//! a restart pauses the job, never loses it.
+//! a restart pauses the job, never loses it. Only rows with a LAPSED
+//! leader lease are touched (a synced DB can carry a peer's live job).
 
 use crate::config_db::job_store;
 use crate::config_db::{ConfigDb, ConfigDbError};
@@ -186,15 +187,36 @@ impl ConfigDb {
         Ok(job)
     }
 
-    /// All buckets with an active job — the boot-time gate re-arm input.
-    pub fn maintenance_active_buckets(&self) -> Result<Vec<String>, ConfigDbError> {
+    /// Gate keys to arm for active jobs — the boot-time re-arm input.
+    /// Kind/phase-aware: a reencrypt gates its bucket; a PRE-flip migrate
+    /// gates its bucket AND its transient staging route (admin copy/move
+    /// could otherwise write through the transient mid-copy); a POST-flip
+    /// migrate (cleanup) gates NOTHING — the flipped bucket is fully live
+    /// and must not 503 client writes for the delete sweep.
+    pub fn maintenance_gate_arm_keys(&self) -> Result<Vec<String>, ConfigDbError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT bucket FROM maintenance_jobs WHERE status IN {ACTIVE_STATUSES}"
+            "SELECT bucket, kind, phase, params FROM maintenance_jobs
+              WHERE status IN {ACTIVE_STATUSES}"
         ))?;
-        let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
+        let rows: Vec<(String, String, String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        let mut keys = Vec::new();
+        for (bucket, kind, phase, params) in rows {
+            if kind == "migrate" {
+                if !super::migrate::is_pre_flip(&phase) {
+                    continue;
+                }
+                if let Some(t) = params
+                    .as_deref()
+                    .and_then(|p| super::migrate::parse_params(p).ok())
+                {
+                    keys.push(t.transient_key);
+                }
+            }
+            keys.push(bucket);
+        }
+        Ok(keys)
     }
 
     /// Transient route keys (`__dgmigrate_*`) referenced by ACTIVE migrate
@@ -238,7 +260,7 @@ impl ConfigDb {
                  WHERE status = 'queued'
                    AND (leader_instance_id IS NULL
                         OR leader_expires_at IS NULL
-                        OR leader_expires_at <= ?)
+                        OR leader_expires_at < ?)
                  ORDER BY id ASC LIMIT 1",
                 params![now],
                 |r| r.get(0),
@@ -269,14 +291,17 @@ impl ConfigDb {
     }
 
     /// Renew the running job's lease (canonical semantics in
-    /// `config_db::job_store`: a lapsed lease never resurrects).
+    /// `config_db::job_store`: a lapsed lease never resurrects). Returns
+    /// whether the renewal was granted — `false` means the lease lapsed
+    /// (or another instance took it) and the worker MUST stop: this is
+    /// the one subsystem that flips config and deletes source data.
     pub fn maintenance_heartbeat(
         &self,
         job_id: i64,
         instance_id: &str,
         now: i64,
         lease_ttl_secs: i64,
-    ) -> Result<(), ConfigDbError> {
+    ) -> Result<bool, ConfigDbError> {
         job_store::renew_leader_lease(
             &self.conn,
             "maintenance_jobs",
@@ -285,8 +310,7 @@ impl ConfigDb {
             instance_id,
             now,
             lease_ttl_secs,
-        )?;
-        Ok(())
+        )
     }
 
     /// Persist the resumable cursor + live progress. Called once per page
@@ -438,11 +462,16 @@ impl ConfigDb {
         Ok(rows)
     }
 
-    /// Boot reconciliation: jobs left `running`/`cancelling` by a dead
-    /// process go back to `queued` with phase + continuation token
-    /// PRESERVED, so the worker resumes them. Stale leases are cleared.
-    /// Returns the number of jobs re-queued.
-    pub fn maintenance_reconcile_on_boot(&self) -> Result<usize, ConfigDbError> {
+    /// Reconciliation: jobs left `running`/`cancelling` by a dead process
+    /// go back to `queued` with phase + continuation token PRESERVED, so
+    /// the worker resumes them. ONLY rows whose leader lease has lapsed
+    /// are touched: under multi-instance config sync the DB file (with
+    /// `maintenance_jobs` rows in it) is copied between instances, and a
+    /// peer's LIVE job must not be resurrected here — its heartbeats keep
+    /// the lease fresh. A genuinely dead runner's row becomes claimable
+    /// within one lease TTL because the worker loop calls this on every
+    /// poll tick, not just at boot. Returns the number re-queued.
+    pub fn maintenance_requeue_abandoned(&self) -> Result<usize, ConfigDbError> {
         let now = current_unix_seconds();
         let n = self.conn.execute(
             "UPDATE maintenance_jobs
@@ -450,8 +479,11 @@ impl ConfigDb {
                     leader_instance_id = NULL,
                     leader_expires_at = NULL,
                     updated_at = ?
-              WHERE status IN ('running','cancelling')",
-            params![now],
+              WHERE status IN ('running','cancelling')
+                AND (leader_instance_id IS NULL
+                     OR leader_expires_at IS NULL
+                     OR leader_expires_at < ?)",
+            params![now, now],
         )?;
         Ok(n)
     }
@@ -481,7 +513,30 @@ mod tests {
         assert_eq!(job.phase, "counting");
         assert_eq!(job.kind, "reencrypt");
         assert_eq!(job.objects_total, None);
-        assert_eq!(db.maintenance_active_buckets().unwrap(), vec!["pippo"]);
+        assert_eq!(db.maintenance_gate_arm_keys().unwrap(), vec!["pippo"]);
+    }
+
+    #[test]
+    fn gate_arm_keys_are_kind_and_phase_aware() {
+        let db = db();
+        // Pre-flip migrate: bucket AND transient are gated.
+        let params = r#"{"target_backend":"hz","delete_source":false,
+            "transient_key":"__dgmigrate_m_0","from_backend":"local"}"#;
+        let m = db
+            .maintenance_create_job("migrate", "m", "copy", Some(params), "admin", 1)
+            .unwrap()
+            .unwrap();
+        let mut keys = db.maintenance_gate_arm_keys().unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["__dgmigrate_m_0", "m"]);
+        // Post-flip (cleanup): the flipped bucket is live — gate NOTHING.
+        // (progress updates require a claimed job, mirroring the worker)
+        db.maintenance_claim_next_job("w", current_unix_seconds(), 60)
+            .unwrap()
+            .unwrap();
+        db.maintenance_update_progress(m, "cleanup", None, 0, 0, 0, 0, None)
+            .unwrap();
+        assert!(db.maintenance_gate_arm_keys().unwrap().is_empty());
     }
 
     #[test]
@@ -577,16 +632,26 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_on_boot_requeues_with_cursor_preserved() {
+    fn requeue_abandoned_respects_live_leases_and_preserves_cursor() {
         let db = db();
         let id = db
             .maintenance_create_job("reencrypt", "b", "counting", None, "admin", 1)
             .unwrap()
             .unwrap();
-        db.maintenance_claim_next_job("w", 2, 60).unwrap().unwrap();
+        let wall = current_unix_seconds();
+        db.maintenance_claim_next_job("w", wall, 60)
+            .unwrap()
+            .unwrap();
         db.maintenance_update_progress(id, "objects", Some(50), 20, 5, 0, 999, Some("page-3"))
             .unwrap();
-        let n = db.maintenance_reconcile_on_boot().unwrap();
+        // A LIVE lease is never resurrected — under config sync this row
+        // may describe a job currently executing on the peer that
+        // uploaded the DB.
+        assert_eq!(db.maintenance_requeue_abandoned().unwrap(), 0);
+        // Lapse the lease (renew with a tiny ttl in the past), then the
+        // row re-queues with phase + cursor preserved.
+        assert!(db.maintenance_heartbeat(id, "w", 5, 1).unwrap());
+        let n = db.maintenance_requeue_abandoned().unwrap();
         assert_eq!(n, 1);
         let job = db.maintenance_active_job_for_bucket("b").unwrap().unwrap();
         assert_eq!(job.status, "queued");
@@ -595,11 +660,11 @@ mod tests {
         assert_eq!(job.objects_done, 20);
         // And it is claimable again, keeping the original started_at.
         let claimed = db
-            .maintenance_claim_next_job("w2", 99, 60)
+            .maintenance_claim_next_job("w2", current_unix_seconds(), 60)
             .unwrap()
             .unwrap();
         assert_eq!(claimed.id, id);
-        assert_eq!(claimed.started_at, Some(2));
+        assert_eq!(claimed.started_at, Some(wall));
     }
 
     #[test]

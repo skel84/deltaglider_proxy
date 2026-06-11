@@ -19,6 +19,11 @@ pub struct LifecycleState {
     pub bytes_affected_lifetime: i64,
     pub paused: bool,
     pub continuation_token: Option<String>,
+    /// `bucket|prefix` the cursor was issued against. A token is only
+    /// valid for the listing scope that produced it — if the operator
+    /// redefines a same-named rule to a different bucket/prefix, replaying
+    /// the old token would silently skip everything below it.
+    pub cursor_scope: Option<String>,
     pub leader_instance_id: Option<String>,
     pub leader_expires_at: Option<i64>,
 }
@@ -148,7 +153,7 @@ impl ConfigDb {
             .query_row(
                 "SELECT rule_name, last_run_at, next_due_at, last_status,
                         objects_affected_lifetime, bytes_affected_lifetime,
-                        paused, continuation_token,
+                        paused, continuation_token, cursor_scope,
                         leader_instance_id, leader_expires_at
                  FROM lifecycle_state WHERE rule_name = ?",
                 params![rule_name],
@@ -162,8 +167,9 @@ impl ConfigDb {
                         bytes_affected_lifetime: r.get(5)?,
                         paused: r.get::<_, i64>(6)? != 0,
                         continuation_token: r.get(7)?,
-                        leader_instance_id: r.get(8)?,
-                        leader_expires_at: r.get(9)?,
+                        cursor_scope: r.get(8)?,
+                        leader_instance_id: r.get(9)?,
+                        leader_expires_at: r.get(10)?,
                     })
                 },
             )
@@ -216,15 +222,20 @@ impl ConfigDb {
         Ok(n > 0)
     }
 
-    /// Persist the resumable LIST cursor (None = complete pass / reset).
+    /// Persist the resumable LIST cursor (None = complete pass / reset),
+    /// stamped with the `bucket|prefix` scope that produced it. Loaders
+    /// must ignore (and clear) a token whose scope doesn't match the
+    /// rule's CURRENT scope — see [`LifecycleState::cursor_scope`].
     pub fn lifecycle_set_continuation_token(
         &self,
         rule_name: &str,
         token: Option<&str>,
+        scope: &str,
     ) -> Result<(), ConfigDbError> {
         self.conn.execute(
-            "UPDATE lifecycle_state SET continuation_token = ? WHERE rule_name = ?",
-            params![token, rule_name],
+            "UPDATE lifecycle_state SET continuation_token = ?, cursor_scope = ?
+              WHERE rule_name = ?",
+            params![token, token.is_some().then_some(scope), rule_name],
         )?;
         Ok(())
     }
@@ -428,17 +439,20 @@ mod tests {
         assert_eq!(st.continuation_token, None);
 
         assert!(db.lifecycle_set_paused("r", true).unwrap());
-        db.lifecycle_set_continuation_token("r", Some("page-7"))
+        db.lifecycle_set_continuation_token("r", Some("page-7"), "b|logs/")
             .unwrap();
         let st = db.lifecycle_load_state("r").unwrap().unwrap();
         assert!(st.paused);
         assert_eq!(st.continuation_token.as_deref(), Some("page-7"));
+        assert_eq!(st.cursor_scope.as_deref(), Some("b|logs/"));
 
         assert!(db.lifecycle_set_paused("r", false).unwrap());
-        db.lifecycle_set_continuation_token("r", None).unwrap();
+        db.lifecycle_set_continuation_token("r", None, "b|logs/")
+            .unwrap();
         let st = db.lifecycle_load_state("r").unwrap().unwrap();
         assert!(!st.paused);
         assert_eq!(st.continuation_token, None);
+        assert_eq!(st.cursor_scope, None, "cleared cursor carries no scope");
         // unknown rule → false
         assert!(!db.lifecycle_set_paused("ghost", true).unwrap());
     }
@@ -447,7 +461,7 @@ mod tests {
     fn reconcile_preserves_continuation_token() {
         let db = db();
         db.lifecycle_ensure_state("r", 100).unwrap();
-        db.lifecycle_set_continuation_token("r", Some("page-3"))
+        db.lifecycle_set_continuation_token("r", Some("page-3"), "b|")
             .unwrap();
         let run = db.lifecycle_begin_run("r", 10, "scheduler").unwrap();
         let n = db.lifecycle_reconcile_on_boot().unwrap();

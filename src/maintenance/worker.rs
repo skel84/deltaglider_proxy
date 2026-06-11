@@ -68,6 +68,12 @@ pub fn spawn_worker(
             loop {
                 let claimed = {
                     let db = db.lock().await;
+                    // Re-queue abandoned rows first (lease-aware): a job
+                    // whose runner died mid-run becomes claimable within
+                    // one lease TTL instead of waiting for the next boot.
+                    if let Err(e) = db.maintenance_requeue_abandoned() {
+                        warn!("maintenance: requeue scan failed: {}", e);
+                    }
                     db.maintenance_claim_next_job(
                         &instance_id,
                         current_unix_seconds(),
@@ -102,7 +108,33 @@ async fn run_job(
     let bucket = job.bucket.clone();
     // The gate is armed at job creation and at boot; re-assert for safety
     // (idempotent) so a lost gate can never let writes race the rewrite.
-    state.maintenance_gate.set_busy(&bucket);
+    // For migrate jobs the TRANSIENT staging route is gated too (admin
+    // copy/move endpoints could otherwise write through it mid-copy; the
+    // S3 surface can't — s3s rejects `__`-named buckets at parse time).
+    // EXCEPT: a migrate resumed post-flip (cleanup) must NOT re-arm — the
+    // flipped bucket is fully live and gating it would 503 client writes
+    // for the whole source-delete sweep.
+    let mut gated: Vec<String> = vec![bucket.clone()];
+    if job.kind == "migrate" {
+        if let Some(p) = job
+            .params
+            .as_deref()
+            .and_then(|j| super::migrate::parse_params(j).ok())
+        {
+            gated.push(p.transient_key);
+        }
+    }
+    let post_flip_migrate = job.kind == "migrate" && !super::migrate::is_pre_flip(&job.phase);
+    if post_flip_migrate {
+        // A crash can leave the gate armed from before the restart.
+        for k in &gated {
+            state.maintenance_gate.clear(k);
+        }
+    } else {
+        for k in &gated {
+            state.maintenance_gate.set_busy(k);
+        }
+    }
 
     info!(
         "maintenance: job #{} ({}) starting on bucket '{}' (phase={}, resuming={})",
@@ -129,6 +161,23 @@ async fn run_job(
         other => Err(format!("unknown maintenance job kind '{other}'")),
     };
 
+    if outcome.as_ref().err().is_some_and(|e| e == LEASE_LOST) {
+        // Do NOT settle the row: losing the lease means it lapsed (the
+        // requeue scan will hand it to the next claimer with its cursor
+        // intact) or another instance already claimed it — settling here
+        // would terminate THAT run's row out from under it. Just stop and
+        // release our gate.
+        warn!(
+            "maintenance: job #{} on '{}' lost its lease — stopping without settling \
+             (the job resumes under the next claimer)",
+            job.id, bucket
+        );
+        for k in &gated {
+            state.maintenance_gate.clear(k);
+        }
+        return;
+    }
+
     let (status, last_error) = match &outcome {
         Ok(()) => ("completed", None),
         Err(e) if e == CANCELLED => ("cancelled", None),
@@ -140,7 +189,9 @@ async fn run_job(
             warn!("maintenance: failed to settle job #{}: {}", job.id, e);
         }
     }
-    state.maintenance_gate.clear(&bucket);
+    for k in &gated {
+        state.maintenance_gate.clear(k);
+    }
     info!(
         "maintenance: job #{} on '{}' finished: {}{}",
         job.id,
@@ -218,10 +269,15 @@ async fn execute_phases(
                 .count() as i64;
             let more = pager.advance(page.is_truncated, page.next_continuation_token);
             persist(db, job, "counting", Some(count), 0, 0, 0, 0, pager.token()).await;
-            heartbeat(db, job.id, instance_id).await;
+            heartbeat(db, job.id, instance_id).await?;
             if !more {
                 break;
             }
+        }
+        if pager.truncated_by_page_budget() {
+            return Err("counting stopped at the page budget with more pages \
+                 pending — bucket too large for one pass; job left resumable"
+                .to_string());
         }
         total = Some(count);
         phase = "objects".to_string();
@@ -278,7 +334,13 @@ async fn execute_phases(
                     Ok(m) => m,
                     Err(e) => {
                         failed += 1;
-                        record_failure(db, job.id, key, &format!("head failed: {e}")).await;
+                        record_failure(
+                            db,
+                            job.id,
+                            key,
+                            &format!("could not read object metadata: {e}"),
+                        )
+                        .await;
                         continue;
                     }
                 };
@@ -322,10 +384,18 @@ async fn execute_phases(
                 pager.token(),
             )
             .await;
-            heartbeat(db, job.id, instance_id).await;
+            heartbeat(db, job.id, instance_id).await?;
             if !more {
                 break;
             }
+        }
+        if pager.truncated_by_page_budget() {
+            // Falling through would report `completed` with the tail still
+            // in the OLD encryption state — silent truncation.
+            return Err("rewrite stopped at the page budget with more pages \
+                 pending — bucket too large for one pass; job left resumable \
+                 in phase 'objects' (cursor persisted)"
+                .to_string());
         }
         phase = "references".to_string();
         persist(db, job, &phase, total, done, skipped, failed, bytes, None).await;
@@ -353,7 +423,7 @@ async fn execute_phases(
                     record_failure(db, job.id, &format!("{prefix}/.dg/reference.bin"), &e).await;
                 }
             }
-            heartbeat(db, job.id, instance_id).await;
+            heartbeat(db, job.id, instance_id).await?;
         }
         // Final counters (the per-reference failure increments above).
         persist(
@@ -440,6 +510,10 @@ pub(crate) async fn check_cancel(db: &Arc<Mutex<ConfigDb>>, job_id: i64) -> Resu
     }
 }
 pub(crate) const CANCELLED: &str = "__cancelled__";
+/// Sentinel for "this worker's lease was not renewed". The job row is
+/// left UNTOUCHED (no settle, no unwind) — it belongs to whoever holds
+/// the lease now, or to the requeue scan once it lapses.
+pub(crate) const LEASE_LOST: &str = "__lease_lost__";
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn persist(
@@ -464,9 +538,26 @@ pub(crate) async fn persist(
     }
 }
 
-pub(crate) async fn heartbeat(db: &Arc<Mutex<ConfigDb>>, job_id: i64, instance_id: &str) {
-    let db = db.lock().await;
-    let _ = db.maintenance_heartbeat(job_id, instance_id, current_unix_seconds(), LEASE_TTL_SECS);
+/// Renew the job lease; `Err(LEASE_LOST)` means the renewal was refused
+/// (lapsed, or taken by another instance) and the phase MUST stop — this
+/// is the one subsystem that flips config and deletes source data, so a
+/// lapsed worker must never keep going. DB errors are treated the same,
+/// conservatively.
+pub(crate) async fn heartbeat(
+    db: &Arc<Mutex<ConfigDb>>,
+    job_id: i64,
+    instance_id: &str,
+) -> Result<(), String> {
+    let renewed = {
+        let db = db.lock().await;
+        db.maintenance_heartbeat(job_id, instance_id, current_unix_seconds(), LEASE_TTL_SECS)
+            .unwrap_or(false)
+    };
+    if renewed {
+        Ok(())
+    } else {
+        Err(LEASE_LOST.to_string())
+    }
 }
 
 pub(crate) async fn record_failure(db: &Arc<Mutex<ConfigDb>>, job_id: i64, key: &str, error: &str) {

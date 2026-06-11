@@ -116,6 +116,14 @@ impl RoutingBackend {
             .unwrap_or_else(|| real_bucket.to_string())
     }
 
+    /// Migration plumbing (`__dgmigrate_*` staging routes) must never
+    /// surface in bucket listings: clients can't reference such names
+    /// anyway (s3s rejects them at parse time) and the underlying real
+    /// bucket is already listed under its own name from the source side.
+    fn is_listing_plumbing(virtual_name: &str) -> bool {
+        virtual_name.starts_with(crate::maintenance::migrate::TRANSIENT_PREFIX)
+    }
+
     fn default_backend(&self) -> &dyn StorageBackend {
         self.backends[&self.default_backend].as_ref().as_ref()
     }
@@ -202,6 +210,9 @@ impl StorageBackend for RoutingBackend {
                     for real_bucket in buckets {
                         let virtual_name =
                             self.listed_bucket_virtual_name(backend_name, &real_bucket);
+                        if Self::is_listing_plumbing(&virtual_name) {
+                            continue;
+                        }
                         all_buckets.insert(virtual_name);
                     }
                 }
@@ -235,6 +246,9 @@ impl StorageBackend for RoutingBackend {
                     for (real_bucket, date) in buckets {
                         let virtual_name =
                             self.listed_bucket_virtual_name(backend_name, &real_bucket);
+                        if Self::is_listing_plumbing(&virtual_name) {
+                            continue;
+                        }
                         all_buckets.entry(virtual_name).or_insert(date);
                     }
                 }
@@ -265,6 +279,9 @@ impl StorageBackend for RoutingBackend {
                     for (real_bucket, creation_date) in buckets {
                         let virtual_name =
                             self.listed_bucket_virtual_name(backend_name, &real_bucket);
+                        if Self::is_listing_plumbing(&virtual_name) {
+                            continue;
+                        }
                         let priority = if self.reverse_lookup(backend_name, &real_bucket).is_some()
                         {
                             0
