@@ -42,6 +42,7 @@
     "test:webhook-delivery-payload": "node scripts/webhook-delivery-payload-regression-test.mjs",
     "test:keyboard": "node scripts/keyboard-regression-test.mjs",
     "test:browser-nav": "node scripts/browser-nav-regression-test.mjs",
+    "test:dropped-files": "node scripts/dropped-files-regression-test.mjs",
     "e2e": "playwright test",
     "typecheck": "tsc --noEmit",
     "knip": "knip"

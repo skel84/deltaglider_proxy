@@ -345,12 +345,13 @@ export default function App() {
     navigate(buildViewUrl('upload'));
     setSiderOpen(false);
   };
-  // Finder→Chrome drop on the browser: stage the files and open the Upload
-  // view (at the current folder) so the user confirms/adjusts the destination
-  // before committing — rather than silently uploading in place.
-  const handleBrowserDrop = useCallback((files: FileList) => {
+  // Finder→Chrome drop on the browser: stage the files (folders already
+  // flattened to real files by DropZone) and open the Upload view at the
+  // current folder so the user confirms/adjusts the destination before
+  // committing — rather than silently uploading in place.
+  const handleBrowserDrop = useCallback((files: File[]) => {
     if (!canUploadToActiveBucket || files.length === 0) return;
-    setDroppedFiles(Array.from(files));
+    setDroppedFiles(files);
     // Same prefix capture as openUpload — see the comment there.
     setUploadSeedPrefix(uploadPrefix);
     navigate(buildViewUrl('upload'));

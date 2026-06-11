@@ -9,6 +9,7 @@ import {
 } from '@ant-design/icons';
 import { getBucket } from '../s3client';
 import { formatBytes } from '../utils';
+import { collectDroppedFiles } from '../droppedFiles';
 import useUploadQueue from '../useUploadQueue';
 import { useColors } from '../ThemeContext';
 import UploadProgressList from './UploadProgressList';
@@ -122,13 +123,15 @@ export default function UploadPage({ prefix, onBack, onDone, initialFiles, onCon
       e.stopPropagation();
       dragCount = 0;
       setDragging(false);
-      if (e.dataTransfer?.files.length) {
-        // Stage dropped files (don't upload yet) so the destination can be
-        // confirmed — consistent with a Finder→browser drop. The explicit
-        // "Select files/folder" buttons commit immediately instead.
-        const dropped = Array.from(e.dataTransfer.files);
-        setPendingFiles((prev) => [...prev, ...dropped]);
-      }
+      if (!e.dataTransfer) return;
+      // Stage dropped files (don't upload yet) so the destination can be
+      // confirmed — consistent with a Finder→browser drop. Dropped FOLDERS
+      // are walked into their real files (sync call required, see
+      // droppedFiles.ts). The explicit "Select files/folder" buttons commit
+      // immediately instead.
+      collectDroppedFiles(e.dataTransfer).then((dropped) => {
+        if (dropped.length > 0) setPendingFiles((prev) => [...prev, ...dropped]);
+      });
     };
 
     el.addEventListener('dragenter', onDragEnter);

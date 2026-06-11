@@ -656,6 +656,7 @@ jobs:
           npm run test:webhook-delivery-payload
           npm run test:keyboard
           npm run test:browser-nav
+          npm run test:dropped-files
       - name: npm audit
         run: cd demo/s3-browser/ui && npm audit --audit-level=high || true  # warn-only
 

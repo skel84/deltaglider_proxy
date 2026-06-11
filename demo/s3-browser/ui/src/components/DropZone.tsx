@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react';
 import { Typography, theme } from 'antd';
 import { CloudUploadOutlined } from '@ant-design/icons';
+import { collectDroppedFiles } from '../droppedFiles';
 
 const { Text, Title } = Typography;
 
 interface Props {
-  onDrop: (files: FileList) => void;
+  onDrop: (files: File[]) => void;
   prefix: string;
 }
 
@@ -36,9 +37,13 @@ export default function DropZone({ onDrop, prefix }: Props) {
       e.preventDefault();
       dragCount = 0;
       setDragging(false);
-      if (e.dataTransfer?.files.length) {
-        onDrop(e.dataTransfer.files);
-      }
+      if (!e.dataTransfer) return;
+      // collectDroppedFiles MUST be invoked synchronously (the DataTransfer
+      // items are only readable during the event); it walks dropped FOLDERS
+      // into their real files, then resolves async.
+      collectDroppedFiles(e.dataTransfer).then((files) => {
+        if (files.length > 0) onDrop(files);
+      });
     };
 
     document.addEventListener('dragenter', onDragEnter);
