@@ -298,7 +298,18 @@ pub async fn create_bucket_on_backend(
         ));
     }
 
-    if let Err(e) = state.s3_state.engine.load().create_bucket(&bucket).await {
+    // Create using the SAME key the route is stored under (`bucket_key`,
+    // lowercased). The route is keyed lowercase, so creating with the original
+    // case would miss the explicit route in resolve_existing() and fall through
+    // to the DEFAULT backend — silently creating the bucket on the wrong backend
+    // (and, for an uppercase name + S3 default, failing with InvalidBucketName).
+    if let Err(e) = state
+        .s3_state
+        .engine
+        .load()
+        .create_bucket(&bucket_key)
+        .await
+    {
         // Roll back routing if create failed (e.g. already exists / backend error).
         if let Some(previous) = old_policy {
             cfg.buckets.insert(bucket_key.clone(), previous);
@@ -326,13 +337,15 @@ pub async fn create_bucket_on_backend(
     audit_log(
         "admin_create_bucket",
         "admin",
-        &format!("{bucket}@{backend_name}"),
+        &format!("{bucket_key}@{backend_name}"),
         &headers,
     );
 
     Ok(Json(CreateBucketOnBackendResponse {
         success: true,
-        bucket,
+        // Report the actual (normalized, lowercased) bucket name that was
+        // created and routed — not the original-case input.
+        bucket: bucket_key,
         backend_name,
     }))
 }

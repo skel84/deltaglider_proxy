@@ -125,7 +125,11 @@ export default function CreateBucketModal({
           placeholder="Bucket name"
           aria-label="Bucket name"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          // Normalize to a valid S3 bucket name as you type: lowercase, and only
+          // [a-z0-9.-]. S3 backends reject uppercase ("InvalidBucketName"), and a
+          // filesystem backend would accept it inconsistently — so we keep the
+          // name portable across backends. Mirrors BucketCard's name field.
+          onChange={(e) => setName(e.target.value.toLowerCase().replace(/[^a-z0-9.-]/g, ''))}
           onPressEnter={handleCreate}
           style={{ fontFamily: 'var(--font-mono)' }}
         />
