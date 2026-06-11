@@ -36,6 +36,7 @@
 //! instance's DB, nothing more.
 
 pub mod gate;
+pub mod migrate;
 pub mod store;
 pub mod worker;
 
@@ -166,7 +167,11 @@ pub fn progress_percent(
 ) -> Option<u8> {
     match phase {
         "counting" => None,
-        "references" => Some(99),
+        // Migrate phases: no total is ever counted (D9 — the copy must be
+        // failure-free to flip anyway), so the bar stays indeterminate
+        // until the post-flip endgame.
+        "stage" | "copy" | "verify" => None,
+        "references" | "flip" | "cleanup" => Some(99),
         _ => {
             let total = objects_total?;
             if total <= 0 {

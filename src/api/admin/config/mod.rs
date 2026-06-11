@@ -100,7 +100,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
-use crate::deltaglider::DynEngine;
 use crate::iam::{AuthConfig, IamState};
 
 use super::AdminState;
@@ -132,14 +131,7 @@ pub(super) async fn rebuild_engine(
     cfg: &crate::config::Config,
     context: &str,
 ) -> Result<(), String> {
-    match DynEngine::new(cfg, Some(state.s3_state.metrics.clone())).await {
-        Ok(new_engine) => {
-            state.s3_state.engine.store(Arc::new(new_engine));
-            tracing::info!("{}", context);
-            Ok(())
-        }
-        Err(e) => Err(format!("{}", e)),
-    }
+    crate::config_apply::rebuild_engine_only(&state.s3_state, cfg, context).await
 }
 
 /// Rebuild every hot-swappable structure derived from bucket-level config.

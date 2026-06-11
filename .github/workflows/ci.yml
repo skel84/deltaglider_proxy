@@ -427,6 +427,7 @@ jobs:
             --test iam_variables_clone_test \
             --test lifecycle_test \
             --test maintenance_reencrypt_test \
+            --test migrate_job_test \
             --test quota_test \
             --test replication_test \
             --test savings_test \

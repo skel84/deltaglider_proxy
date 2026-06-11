@@ -18,6 +18,7 @@
 //!   response carries only status/phase/counts — no config detail.
 
 use super::AdminState;
+use crate::maintenance::migrate::{pick_transient_key, MigrateParams};
 use crate::maintenance::store::{current_unix_seconds, CancelOutcome, MaintenanceJob};
 use crate::maintenance::{progress_percent, resolve_desired};
 use axum::extract::{Path, State};
@@ -196,6 +197,137 @@ pub async fn start_reencrypt(
     }
 
     Ok(Json(ReencryptResponse { started, errors }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MigrateBucketRequest {
+    pub target_backend: String,
+    /// Delete the source objects after the flip. Default false — the safe
+    /// path leaves the source copy for the operator to remove later.
+    #[serde(default)]
+    pub delete_source: bool,
+}
+
+/// POST /_/api/admin/buckets/:bucket/migrate — create a durable migrate
+/// job (replaces the old synchronous in-handler migration: that version
+/// had no progress, no resume, and no write gate — a client write racing
+/// the copy produced a stale object on the destination post-flip).
+pub async fn start_migrate(
+    State(state): State<Arc<AdminState>>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<MigrateBucketRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let bucket = bucket.trim().to_string();
+    let bucket_key = bucket.to_ascii_lowercase();
+    let target_backend = body.target_backend.trim().to_string();
+    if bucket.is_empty() || target_backend.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "bucket and target_backend are required".into(),
+        ));
+    }
+    let db = state
+        .config_db
+        .as_ref()
+        .ok_or((StatusCode::NOT_FOUND, "config DB unavailable".to_string()))?;
+
+    // The bucket must actually exist (the old handler skipped this check).
+    let engine = state.s3_state.engine.load().clone();
+    let exists = engine
+        .list_bucket_origins()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to list buckets: {e}"),
+            )
+        })?
+        .into_iter()
+        .any(|b| b.name.eq_ignore_ascii_case(&bucket_key));
+    if !exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("bucket '{bucket}' not found"),
+        ));
+    }
+
+    // Resolve source backend + validate target + pick the transient key
+    // under one config read.
+    let params = {
+        let cfg = state.config.read().await;
+        if !cfg.backends.is_empty() && !cfg.backends.iter().any(|b| b.name == target_backend) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Unknown target backend '{target_backend}'"),
+            ));
+        }
+        let from_backend = cfg
+            .buckets
+            .get(&bucket_key)
+            .and_then(|p| p.backend.clone())
+            .or_else(|| cfg.default_backend.clone())
+            .unwrap_or_else(|| "default".to_string());
+        if from_backend == target_backend {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Bucket '{bucket}' is already on backend '{target_backend}'"),
+            ));
+        }
+        MigrateParams {
+            target_backend,
+            delete_source: body.delete_source,
+            transient_key: pick_transient_key(&bucket_key, &|k| cfg.buckets.contains_key(k)),
+            from_backend,
+        }
+    };
+
+    let params_json = serde_json::to_string(&params)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let created = {
+        let db = db.lock().await;
+        db.maintenance_create_job(
+            "migrate",
+            &bucket_key,
+            "stage",
+            Some(&params_json),
+            "admin",
+            current_unix_seconds(),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    let Some(job_id) = created else {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("a maintenance job is already active for bucket '{bucket}'"),
+        ));
+    };
+
+    // Gate WRITES from creation — the source write-set freezes through the
+    // flip (this is what makes migrate race-free, unlike the old handler).
+    state.s3_state.maintenance_gate.set_busy(&bucket_key);
+    state.s3_state.maintenance_notify.notify_one();
+    info!(
+        "maintenance: migrate requested for '{}' → '{}' (job #{job_id})",
+        bucket, params.target_backend
+    );
+    super::audit_log(
+        "maintenance_migrate_requested",
+        "admin",
+        &format!("{bucket}->{}", params.target_backend),
+        &headers,
+    );
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "job_id": job_id,
+            "id": format!("maintenance:{job_id}"),
+            "bucket": bucket,
+            "from_backend": params.from_backend,
+            "to_backend": params.target_backend,
+        })),
+    ))
 }
 
 /// GET /_/api/admin/maintenance — recent jobs, newest first.

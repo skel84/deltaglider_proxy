@@ -33,6 +33,7 @@ use tracing::{info, warn};
 
 use crate::api::handlers::AppState;
 use crate::config::SharedConfig;
+use crate::config_apply::ConfigMutator;
 use crate::config_db::ConfigDb;
 use crate::storage::encrypting::{ENCRYPTION_KEY_ID_KEY, ENCRYPTION_MARKER_KEY};
 use crate::transfer::{copy_object_with_retries, ObjectTransferRequest};
@@ -50,10 +51,11 @@ const DRAIN_POLL_MS: u64 = 250;
 /// Spawn the maintenance worker loop. Wakes on `state.maintenance_notify`
 /// (job creation) or every few seconds (boot-requeued jobs, lease retry).
 pub fn spawn_worker(
-    config: SharedConfig,
+    mutator: ConfigMutator,
     db: Arc<Mutex<ConfigDb>>,
-    state: Arc<AppState>,
 ) -> tokio::task::JoinHandle<()> {
+    let config: SharedConfig = mutator.config.clone();
+    let state: Arc<AppState> = mutator.app.clone();
     let instance_id = format!("maintenance:{}", uuid::Uuid::new_v4());
     tokio::spawn(async move {
         info!("Maintenance worker started: instance_id={}", instance_id);
@@ -74,7 +76,7 @@ pub fn spawn_worker(
                 };
                 match claimed {
                     Ok(Some(job)) => {
-                        run_job(&config, &db, &state, &instance_id, job).await;
+                        run_job(&mutator, &config, &db, &state, &instance_id, job).await;
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -90,6 +92,7 @@ pub fn spawn_worker(
 /// Execute one claimed job to a terminal state. Never panics the loop:
 /// every failure path settles the row and releases the gate.
 async fn run_job(
+    mutator: &ConfigMutator,
     config: &SharedConfig,
     db: &Arc<Mutex<ConfigDb>>,
     state: &Arc<AppState>,
@@ -110,7 +113,7 @@ async fn run_job(
         job.continuation_token.is_some()
     );
     crate::audit::audit_log(
-        "maintenance_reencrypt_start",
+        &format!("maintenance_{}_start", job.kind),
         job.triggered_by.as_deref().unwrap_or("system"),
         &format!("job:{}", job.id),
         &axum::http::HeaderMap::new(),
@@ -118,7 +121,13 @@ async fn run_job(
         "",
     );
 
-    let outcome = execute_phases(config, db, state, instance_id, &job).await;
+    let outcome = match job.kind.as_str() {
+        "reencrypt" => execute_phases(config, db, state, instance_id, &job).await,
+        "migrate" => {
+            super::migrate::execute_migrate_phases(mutator, db, state, instance_id, &job).await
+        }
+        other => Err(format!("unknown maintenance job kind '{other}'")),
+    };
 
     let (status, last_error) = match &outcome {
         Ok(()) => ("completed", None),
@@ -143,7 +152,7 @@ async fn run_job(
             .unwrap_or_default()
     );
     crate::audit::audit_log(
-        &format!("maintenance_reencrypt_{status}"),
+        &format!("maintenance_{}_{status}", job.kind),
         job.triggered_by.as_deref().unwrap_or("system"),
         &format!("job:{}", job.id),
         &axum::http::HeaderMap::new(),
@@ -165,19 +174,7 @@ async fn execute_phases(
     let bucket = &job.bucket;
 
     // ── Drain in-flight writes admitted before the gate armed. ──
-    let drain_ceiling_secs: u64 =
-        crate::config::env_parse_with_default("DGP_REQUEST_TIMEOUT_SECS", 300);
-    let drain_deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(drain_ceiling_secs);
-    while state.maintenance_gate.inflight_writes(bucket) > 0 {
-        if std::time::Instant::now() > drain_deadline {
-            return Err(format!(
-                "in-flight writes to '{}' did not drain within {}s",
-                bucket, drain_ceiling_secs
-            ));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(DRAIN_POLL_MS)).await;
-    }
+    drain_inflight_writes(state, bucket).await?;
 
     let mut phase = job.phase.clone();
     let mut token = job.continuation_token.clone();
@@ -377,19 +374,43 @@ async fn rewrite_reference_if_needed(
     Ok(())
 }
 
+/// Wait for the gated bucket's in-flight S3 writes to reach zero. The
+/// gate rejects NEW writes from job creation; this waits out the ones
+/// admitted before it armed (bounded by the server request timeout — no
+/// request legitimately outlives it).
+pub(crate) async fn drain_inflight_writes(
+    state: &Arc<AppState>,
+    bucket: &str,
+) -> Result<(), String> {
+    let drain_ceiling_secs: u64 =
+        crate::config::env_parse_with_default("DGP_REQUEST_TIMEOUT_SECS", 300);
+    let drain_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(drain_ceiling_secs);
+    while state.maintenance_gate.inflight_writes(bucket) > 0 {
+        if std::time::Instant::now() > drain_deadline {
+            return Err(format!(
+                "in-flight writes to '{}' did not drain within {}s",
+                bucket, drain_ceiling_secs
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(DRAIN_POLL_MS)).await;
+    }
+    Ok(())
+}
+
 /// Cancellation check between pages. Maps "operator asked to cancel"
 /// into the Err channel so phases unwind; the caller distinguishes it.
-async fn check_cancel(db: &Arc<Mutex<ConfigDb>>, job_id: i64) -> Result<(), String> {
+pub(crate) async fn check_cancel(db: &Arc<Mutex<ConfigDb>>, job_id: i64) -> Result<(), String> {
     let db = db.lock().await;
     match db.maintenance_cancel_requested(job_id) {
         Ok(true) => Err(CANCELLED.to_string()),
         _ => Ok(()),
     }
 }
-const CANCELLED: &str = "__cancelled__";
+pub(crate) const CANCELLED: &str = "__cancelled__";
 
 #[allow(clippy::too_many_arguments)]
-async fn persist(
+pub(crate) async fn persist(
     db: &Arc<Mutex<ConfigDb>>,
     job: &MaintenanceJob,
     phase: &str,
@@ -411,12 +432,12 @@ async fn persist(
     }
 }
 
-async fn heartbeat(db: &Arc<Mutex<ConfigDb>>, job_id: i64, instance_id: &str) {
+pub(crate) async fn heartbeat(db: &Arc<Mutex<ConfigDb>>, job_id: i64, instance_id: &str) {
     let db = db.lock().await;
     let _ = db.maintenance_heartbeat(job_id, instance_id, current_unix_seconds(), LEASE_TTL_SECS);
 }
 
-async fn record_failure(db: &Arc<Mutex<ConfigDb>>, job_id: i64, key: &str, error: &str) {
+pub(crate) async fn record_failure(db: &Arc<Mutex<ConfigDb>>, job_id: i64, key: &str, error: &str) {
     let db = db.lock().await;
     if let Err(e) = db.maintenance_record_failure(job_id, key, error, MAX_FAILURES_RETAINED) {
         warn!(

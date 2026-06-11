@@ -214,7 +214,7 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         )
         .route(
             "/_/api/admin/buckets/:bucket/migrate",
-            post(admin::migrate_bucket),
+            post(admin::maintenance_start_migrate),
         )
         // Usage scanner
         .route("/_/api/admin/usage/scan", post(admin::scan_usage))

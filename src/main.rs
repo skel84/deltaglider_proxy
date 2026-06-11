@@ -643,12 +643,63 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // --- Background monitors ---
     spawn_cache_monitor(&state, &metrics);
 
+    // Resolve the authoritative config-file path ONCE, before anything that
+    // persists config (the maintenance worker's migrate jobs AND AdminState
+    // must share the same target — resolving twice risks a worker writing a
+    // different file than the operator's admin applies).
+    let config_file_path = cli.config.clone().or_else(Config::resolve_config_path);
+    let config_mutator = deltaglider_proxy::config_apply::ConfigMutator {
+        config: shared_config.clone(),
+        app: state.clone(),
+        persist_path: config_file_path
+            .clone()
+            .unwrap_or_else(|| deltaglider_proxy::config::DEFAULT_YAML_CONFIG_FILENAME.to_string()),
+    };
+
+    // Boot reconcile for migrate transients: remove `__dgmigrate_*` routes
+    // that no ACTIVE migrate job references (a crashed-then-resumed job's
+    // transient stays in place for the job to reuse). Runs before the
+    // listener serves, so clients never see an orphaned route.
+    if let Some(db) = config_db.as_ref() {
+        let active: std::collections::HashSet<String> = {
+            let db = db.lock().await;
+            db.maintenance_active_transient_keys()
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        };
+        let orphans = {
+            let cfg = shared_config.read().await;
+            deltaglider_proxy::maintenance::migrate::orphaned_transients(
+                cfg.buckets.keys().map(|k| k.as_str()),
+                &active,
+            )
+        };
+        if !orphans.is_empty() {
+            tracing::warn!(
+                "maintenance: removing {} orphaned migration route(s): {:?}",
+                orphans.len(),
+                orphans
+            );
+            let orphans_clone = orphans.clone();
+            if let Err(e) = config_mutator
+                .mutate_and_apply("Orphaned migration staging routes removed", move |cfg| {
+                    for k in &orphans_clone {
+                        cfg.buckets.remove(k);
+                    }
+                })
+                .await
+            {
+                tracing::warn!("maintenance: orphan-route cleanup failed: {e}");
+            }
+        }
+    }
+
     if !config_db_mismatch {
         if let Some(db) = config_db.as_ref() {
             deltaglider_proxy::maintenance::worker::spawn_worker(
-                shared_config.clone(),
+                config_mutator.clone(),
                 db.clone(),
-                state.clone(),
             );
         }
         deltaglider_proxy::lifecycle::scheduler::spawn_scheduler(
@@ -751,12 +802,6 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &admin_password_hash,
         );
     }
-
-    // Resolve the authoritative config-file path at startup and freeze it in
-    // AdminState. `--config` wins over `resolve_config_path()` which walks
-    // the env var + default search paths. If neither is set, the field stays
-    // None and any future persist falls back to the canonical default.
-    let config_file_path = cli.config.clone().or_else(Config::resolve_config_path);
 
     let admin_state = Arc::new(AdminState {
         password_hash: parking_lot::RwLock::new(admin_password_hash),
