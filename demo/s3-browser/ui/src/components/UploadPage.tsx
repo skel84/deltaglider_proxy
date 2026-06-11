@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Button, Typography, Input, Space, Modal } from 'antd';
+import { AutoComplete, Button, Typography, Input, Space, Modal } from 'antd';
 import {
   CloudUploadOutlined,
   FolderAddOutlined,
@@ -10,6 +10,7 @@ import {
 import { getBucket } from '../s3client';
 import { formatBytes } from '../utils';
 import { collectDroppedFiles } from '../droppedFiles';
+import { useFolderSuggestions } from '../useFolderSuggestions';
 import useUploadQueue from '../useUploadQueue';
 import { useColors } from '../ThemeContext';
 import UploadProgressList from './UploadProgressList';
@@ -83,6 +84,10 @@ export default function UploadPage({ prefix, onBack, onDone, initialFiles, onCon
 
   const normalizedDest = normalizeDestination(destination);
   const destLabel = normalizedDest ? `${normalizedDest}/` : '/ (bucket root)';
+
+  // Existing-folder suggestions for the destination autocomplete (debounced,
+  // cached per level; free text still allowed for brand-new folders).
+  const folderSuggestions = useFolderSuggestions(bucket, destination);
 
   // Finished = the queue has settled (nothing queued/uploading) AND at least one
   // file actually succeeded. A batch that ALL failed leaves pendingCount at 0
@@ -216,13 +221,17 @@ export default function UploadPage({ prefix, onBack, onDone, initialFiles, onCon
           </Text>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <Input
+          <AutoComplete
             id="upload-destination"
             value={destination}
-            onChange={(e) => setDestination(e.target.value)}
+            onChange={(v) => setDestination(v)}
+            options={folderSuggestions.map((f) => ({
+              value: f,
+              label: <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>{f}</span>,
+            }))}
             placeholder="/ (bucket root)"
-            aria-label="Destination path prefix — edit to change where files land"
-            style={{ background: 'var(--input-bg)', borderColor: BORDER, color: TEXT_PRIMARY, fontFamily: "var(--font-mono)", fontSize: 13, flex: 1, borderRadius: 8 }}
+            aria-label="Destination path prefix — type to autocomplete existing folders"
+            style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 13 }}
           />
           <Button
             icon={<FolderAddOutlined />}

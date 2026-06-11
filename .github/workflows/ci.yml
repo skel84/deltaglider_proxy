@@ -657,6 +657,7 @@ jobs:
           npm run test:keyboard
           npm run test:browser-nav
           npm run test:dropped-files
+          npm run test:destination-suggest
       - name: npm audit
         run: cd demo/s3-browser/ui && npm audit --audit-level=high || true  # warn-only
 
