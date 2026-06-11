@@ -1,31 +1,24 @@
-import { Alert, Input, InputNumber, Select, Switch, Tag, Typography } from 'antd';
-import type {
-  LifecycleRuleConfig,
-  LifecycleRuleOverview,
-} from '../adminApi';
+import { Alert, Input, InputNumber, Select, Switch } from 'antd';
+import type { LifecycleRuleConfig } from '../adminApi';
 import BucketPrefixInput from './BucketPrefixInput';
 import FormField from './FormField';
 import { AdvancedDisclosure } from './ruleEditorFields';
-import { fmtUnix, lineList, lines } from './ruleEditorHelpers';
+import { lineList, lines } from './ruleEditorHelpers';
 import { actionKind } from './lifecyclePayload';
-import { statusTone } from './lifecycleHelpers';
 
-const { Text } = Typography;
 
 /**
  * Per-rule field editor body for the Lifecycle panel. Passed as the
- * `renderDetail` content to RuleListEditor by the parent LifecyclePanel.
+ * Definition-tab content of the Jobs drawer; the parent owns state.
  */
 export default function RuleEditor({
   rule,
-  runtime,
   buckets,
   inputRadius,
   onChange,
   onRename,
 }: {
   rule: LifecycleRuleConfig;
-  runtime: LifecycleRuleOverview | null;
   buckets: string[];
   inputRadius: { borderRadius: number };
   onChange: (patch: Partial<LifecycleRuleConfig>) => void;
@@ -48,18 +41,6 @@ export default function RuleEditor({
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
-        <div>
-          <Text strong style={{ fontSize: 16 }}>{rule.name}</Text>
-          <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 2 }}>
-            Last run: {fmtUnix(runtime?.last_run_at)} · Next due: {fmtUnix(runtime?.next_due_at)}
-          </Text>
-        </div>
-        <Tag color={statusTone(runtime?.last_status || 'idle', rule.enabled)}>
-          {rule.enabled ? runtime?.last_status || 'idle' : 'disabled'}
-        </Tag>
-      </div>
-
       <Alert
         type="warning"
         showIcon

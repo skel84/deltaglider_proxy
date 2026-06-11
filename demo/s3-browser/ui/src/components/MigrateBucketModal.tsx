@@ -1,130 +1,146 @@
 /**
- * MigrateBucketModal — move an existing bucket's objects to a different
- * backend, then re-route it there. This is the honest version of changing a
- * bucket's backend: it copies the data first (re-routing alone orphans it).
+ * MigrateBucketModal — move a bucket's objects to a different backend as
+ * a DURABLE BACKGROUND JOB (write-gated, resumable; the old synchronous
+ * endpoint is gone). On 202 the modal closes and points the operator at
+ * the Jobs page; the bucket row meanwhile shows the busy chip + progress.
  *
- * Self-contained imperative action (not part of the policy-draft editor):
- * picks a target backend, optional source cleanup, confirms, and calls the
- * `migrateBucket` admin endpoint. On success it invalidates the backend
- * origin/list caches so counts and chips refresh.
+ * Two entry points: pre-targeted from a bucket card (`bucket` set), or
+ * the Jobs page's "New job → Migrate bucket…" (`bucket` null → internal
+ * bucket picker).
  */
 import { useState } from 'react';
 import { Modal, Select, Checkbox, Typography, Alert, message } from 'antd';
 import { useQueryClient } from '@tanstack/react-query';
-import { migrateBucket } from '../adminApi';
-import type { BackendInfo } from '../adminApi';
+import { createMigrateJob } from '../adminApi';
 import { qk } from '../queries/keys';
+import { useBackends, useBucketOrigins } from '../queries/backends';
 
 const { Text } = Typography;
 
 interface Props {
   open: boolean;
-  bucket: string;
-  /** The bucket's current backend (so we can exclude it from the target list). */
-  currentBackend: string | null;
-  backends: BackendInfo[];
+  /** Pre-targeted bucket, or null for the internal picker (Jobs page). */
+  bucket: string | null;
   onClose: () => void;
-  onMigrated?: () => void;
+  onStarted?: () => void;
 }
 
-export default function MigrateBucketModal({
-  open,
-  bucket,
-  currentBackend,
-  backends,
-  onClose,
-  onMigrated,
-}: Props) {
+export default function MigrateBucketModal({ open, bucket, onClose, onStarted }: Props) {
   const qc = useQueryClient();
+  const [pickedBucket, setPickedBucket] = useState<string | undefined>(undefined);
   const [target, setTarget] = useState<string | undefined>(undefined);
   const [deleteSource, setDeleteSource] = useState(false);
-  const [migrating, setMigrating] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [messageApi, contextHolder] = message.useMessage();
 
+  const backendsQuery = useBackends();
+  const originsQuery = useBucketOrigins({ enabled: open });
+  const backends = backendsQuery.data?.backends ?? [];
+  const defaultBackend = backendsQuery.data?.default_backend ?? null;
+  const origins = originsQuery.data?.buckets ?? [];
+
+  const effectiveBucket = bucket ?? pickedBucket;
+  const currentBackend =
+    origins.find((o) => o.name === effectiveBucket)?.backend_name ?? defaultBackend;
   const targets = backends.filter((b) => b.name !== currentBackend);
 
   const reset = () => {
+    setPickedBucket(undefined);
     setTarget(undefined);
     setDeleteSource(false);
   };
 
-  const handleMigrate = async () => {
-    if (!target) return;
-    setMigrating(true);
+  const handleStart = async () => {
+    if (!effectiveBucket || !target) return;
+    setStarting(true);
     try {
-      const result = await migrateBucket(bucket, target, deleteSource);
+      await createMigrateJob(effectiveBucket, target, deleteSource);
       messageApi.success(
-        `Migrated ${bucket} to ${target}: ${result.objects_copied} object(s) copied` +
-          (result.source_deleted ? ', source deleted' : ''),
+        `Migration of ${effectiveBucket} → ${target} started — track it under Admin → Jobs`
       );
+      qc.invalidateQueries({ queryKey: qk.jobs.list() });
       qc.invalidateQueries({ queryKey: qk.backends.origins() });
-      qc.invalidateQueries({ queryKey: qk.backends.list() });
       reset();
       onClose();
-      onMigrated?.();
+      onStarted?.();
     } catch (e) {
-      messageApi.error(e instanceof Error ? e.message : 'Migration failed');
+      messageApi.error(e instanceof Error ? e.message : 'Failed to start migration');
     } finally {
-      setMigrating(false);
+      setStarting(false);
     }
   };
 
   return (
-    <>
+    <Modal
+      open={open}
+      onCancel={() => {
+        reset();
+        onClose();
+      }}
+      onOk={() => void handleStart()}
+      okText="Start migration"
+      okButtonProps={{ disabled: !effectiveBucket || !target, loading: starting }}
+      title={effectiveBucket ? `Migrate ${effectiveBucket} to another backend` : 'Migrate a bucket'}
+    >
       {contextHolder}
-      <Modal
-        title={`Migrate “${bucket}” to another backend`}
-        open={open}
-        okText="Migrate"
-        onOk={handleMigrate}
-        confirmLoading={migrating}
-        okButtonProps={{ disabled: !target }}
-        onCancel={() => {
-          if (migrating) return;
-          reset();
-          onClose();
-        }}
-        destroyOnHidden
-      >
-        <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-          Copies every object to the target backend, verifies, then re-routes the
-          bucket. The bucket stays readable throughout. {currentBackend ? (
-            <>Currently on <Text code>{currentBackend}</Text>.</>
-          ) : null}
+      <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 12 }}>
+        Runs as a background job: every object is copied to the target backend, verified,
+        and only then is the bucket re-routed. The job survives restarts and resumes
+        where it left off.
+      </Text>
+      <Alert
+        type="warning"
+        showIcon
+        style={{ marginBottom: 12, borderRadius: 8 }}
+        message="While the migration runs"
+        description={
+          <span style={{ fontSize: 12 }}>
+            Reads keep working; <strong>uploads and deletes get a temporary 503</strong> until
+            the switch-over (S3 clients retry automatically).
+          </span>
+        }
+      />
+      {bucket === null && (
+        <div style={{ marginBottom: 12 }}>
+          <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 6 }}>
+            Bucket
+          </Text>
+          <Select
+            style={{ width: '100%' }}
+            placeholder="Pick a bucket"
+            value={pickedBucket}
+            onChange={setPickedBucket}
+            options={origins.map((o) => ({
+              value: o.name,
+              label: `${o.name} (on ${o.backend_name ?? defaultBackend ?? 'default'})`,
+            }))}
+          />
+        </div>
+      )}
+      <div style={{ marginBottom: 12 }}>
+        <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 6 }}>
+          Target backend
         </Text>
         <Select
-          value={target}
-          onChange={(v) => setTarget(v || undefined)}
-          placeholder="Target backend"
           style={{ width: '100%' }}
-          options={targets.map((b) => ({ value: b.name, label: b.name, sublabel: b.backend_type }))}
-          optionRender={(opt) => (
-            <div>
-              <div>{opt.data.label}</div>
-              {opt.data.sublabel && (
-                <div style={{ fontSize: 11, opacity: 0.65 }}>{opt.data.sublabel}</div>
-              )}
-            </div>
-          )}
-          showSearch
-          optionFilterProp="label"
+          placeholder={
+            targets.length === 0 ? 'No other backend available' : 'Pick the destination backend'
+          }
+          value={target}
+          onChange={setTarget}
+          disabled={targets.length === 0}
+          options={targets.map((b) => ({
+            value: b.name,
+            label: `${b.name} (${b.backend_type})`,
+          }))}
         />
-        <Checkbox
-          checked={deleteSource}
-          onChange={(e) => setDeleteSource(e.target.checked)}
-          style={{ marginTop: 12 }}
-        >
-          Delete the source copy after a verified migration
-        </Checkbox>
-        {deleteSource && (
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginTop: 8 }}
-            message="Source objects on the current backend will be deleted once the copy is verified. Leave unchecked to keep them as a backup."
-          />
-        )}
-      </Modal>
-    </>
+      </div>
+      <Checkbox checked={deleteSource} onChange={(e) => setDeleteSource(e.target.checked)}>
+        <Text style={{ fontSize: 13 }}>
+          Delete source objects after the switch-over{' '}
+          <Text type="secondary">(default keeps them as a safety copy)</Text>
+        </Text>
+      </Checkbox>
+    </Modal>
   );
 }

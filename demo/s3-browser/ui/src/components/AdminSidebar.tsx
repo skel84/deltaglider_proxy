@@ -14,19 +14,7 @@
  *
  *   /_/admin/diagnostics/dashboard
  *   /_/admin/diagnostics/trace
- *   /_/admin/configuration/admission
- *   /_/admin/configuration/access/credentials
- *   /_/admin/configuration/access/users
- *   /_/admin/configuration/access/groups
- *   /_/admin/configuration/access/ext-auth
- *   /_/admin/configuration/storage/backends
- *   /_/admin/configuration/storage/buckets
- *   /_/admin/configuration/storage/replication
- *   /_/admin/configuration/advanced/listener
- *   /_/admin/configuration/advanced/caches
- *   /_/admin/configuration/advanced/limits
- *   /_/admin/configuration/advanced/logging
- *   /_/admin/configuration/advanced/sync
+ *   /_/admin/access/users · /_/admin/storage/buckets · /_/admin/jobs · …
  *
  * ## Dirty-state indicator (§5.2)
  *

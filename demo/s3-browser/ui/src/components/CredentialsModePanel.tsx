@@ -99,7 +99,7 @@ export default function CredentialsModePanel({ onSessionExpired }: Props) {
     confirmApply,
   } = useSectionEditor<AccessSectionBody>({
     section: 'access',
-    dirtyKey: 'configuration/access/credentials',
+    dirtyKey: 'access/credentials',
     initial: EMPTY_ACCESS,
     onSessionExpired,
     noun: 'access',

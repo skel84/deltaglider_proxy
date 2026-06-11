@@ -29,6 +29,13 @@ interface Props {
    * container and needs no layout assumptions.
    */
   floating?: boolean;
+  /**
+   * Inline mode: no positioning at all — the bar renders where it sits
+   * (top of its card). Used when SEVERAL independent bars can be visible
+   * at once (the System page's stacked cards) and fixed/sticky bars
+   * would overlap.
+   */
+  inline?: boolean;
 }
 
 export default function StickyDirtyBar({
@@ -38,12 +45,15 @@ export default function StickyDirtyBar({
   onDiscard,
   onApply,
   floating = false,
+  inline = false,
 }: Props) {
   const c = useColors();
   const hasErrors = errorCount > 0;
 
-  const positionStyle: React.CSSProperties = floating
-    ? {
+  const positionStyle: React.CSSProperties = inline
+    ? { height: visible ? 'auto' : 0, marginBottom: visible ? 8 : 0 }
+    : floating
+      ? {
         // Fixed to the viewport bottom-center. Anchored right of the sidebar
         // isn't worth the complexity — centering reads fine over the content.
         position: 'fixed',

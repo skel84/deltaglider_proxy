@@ -60,20 +60,11 @@ export function phaseLabel(job: MaintenanceJobView): string {
   }
 }
 
-/** One-line banner text for the object browser. */
+/** One-line banner text for the object browser (kind-aware). */
 export function browserBannerText(job: MaintenanceJobView): string {
   const pct = activePercent(job);
   const pctPart = pct != null ? ` — ${pct}%` : '';
-  return `Re-encrypting this bucket${pctPart}. Files stay readable; uploads and deletes are temporarily unavailable.`;
+  const verb = job.kind === 'migrate' ? 'Migrating this bucket to another backend' : 'Re-encrypting this bucket';
+  return `${verb}${pctPart}. Files stay readable; uploads and deletes are temporarily unavailable.`;
 }
 
-/** Find the active job for a bucket in a job list (newest wins). */
-export function activeJobForBucket(
-  jobs: MaintenanceJobView[],
-  bucket: string
-): MaintenanceJobView | null {
-  const key = bucket.toLowerCase();
-  return (
-    jobs.find((j) => j.bucket.toLowerCase() === key && isActiveStatus(j.status)) ?? null
-  );
-}

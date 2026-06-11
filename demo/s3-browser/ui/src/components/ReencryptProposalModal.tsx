@@ -17,6 +17,7 @@ import { SyncOutlined } from '@ant-design/icons';
 import { startReencrypt } from '../adminApi';
 import { qk } from '../queries/keys';
 import { useColors } from '../ThemeContext';
+import { useBucketOrigins } from '../queries/backends';
 
 const { Text } = Typography;
 
@@ -29,6 +30,8 @@ interface Props {
   buckets: string[];
   /** Context line, e.g. the backend name. */
   backendName: string;
+  /** Jobs-page mode: ignore the preset list and pick from ALL buckets. */
+  pickBuckets?: boolean;
   onClose: () => void;
 }
 
@@ -52,18 +55,24 @@ export default function ReencryptProposalModal({
   transition,
   buckets,
   backendName,
+  pickBuckets = false,
   onClose,
 }: Props) {
   const colors = useColors();
   const qc = useQueryClient();
+  const originsQuery = useBucketOrigins({ enabled: open && pickBuckets });
+  const allBuckets = (originsQuery.data?.buckets ?? []).map((b) => b.name);
+  const candidates = pickBuckets ? allBuckets : buckets;
   const [selected, setSelected] = useState<string[]>(buckets);
   const [starting, setStarting] = useState(false);
   const [messageApi, msgCtx] = message.useMessage();
 
   useEffect(() => {
-    if (open) setSelected(buckets);
+    // Jobs-page mode starts with NOTHING selected (explicit opt-in);
+    // the post-apply proposal preselects the affected backend's buckets.
+    if (open) setSelected(pickBuckets ? [] : buckets);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, buckets.join('|')]);
+  }, [open, pickBuckets, candidates.join('|')]);
 
   const handleStart = async () => {
     if (selected.length === 0) return;
@@ -72,13 +81,13 @@ export default function ReencryptProposalModal({
       const res = await startReencrypt(selected);
       if (res.started.length > 0) {
         messageApi.success(
-          `Started for ${res.started.map((s) => s.bucket).join(', ')} — track progress on the Buckets page`
+          `Started for ${res.started.map((s) => s.bucket).join(', ')} — track progress on the Jobs page`
         );
       }
       for (const e of res.errors) {
         messageApi.error(`${e.bucket}: ${e.error}`);
       }
-      qc.invalidateQueries({ queryKey: qk.maintenance.list() });
+      qc.invalidateQueries({ queryKey: qk.jobs.list() });
       if (res.errors.length === 0) onClose();
     } catch (e) {
       messageApi.error(e instanceof Error ? e.message : 'Failed to start');
@@ -114,9 +123,10 @@ export default function ReencryptProposalModal({
     >
       {msgCtx}
       <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 12 }}>
-        {EXPLAIN[transition]} A one-off background job can rewrite them now so everything on{' '}
-        <Text code>{backendName}</Text> matches the new setting. Already-matching objects are
-        skipped, and the job resumes automatically if the proxy restarts.
+        {EXPLAIN[transition]} A one-off background job rewrites every object whose at-rest
+        state doesn't match{pickBuckets ? ' its backend setting' : <> the new setting on <Text code>{backendName}</Text></>}.
+        Already-matching objects are skipped, and the job resumes automatically if the
+        proxy restarts.
       </Text>
       <Alert
         type="warning"
@@ -131,11 +141,11 @@ export default function ReencryptProposalModal({
           </span>
         }
       />
-      {buckets.length === 0 ? (
-        <Text type="secondary">No buckets currently store data on this backend.</Text>
+      {candidates.length === 0 ? (
+        <Text type="secondary">No buckets available.</Text>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {buckets.map((b) => (
+          {candidates.map((b) => (
             <Checkbox
               key={b}
               checked={selected.includes(b)}

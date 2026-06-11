@@ -1,29 +1,25 @@
-import { Alert, Input, InputNumber, Radio, Switch, Tag, Typography } from 'antd';
-import type { ReplicationRuleConfig, ReplicationRuleOverview } from '../adminApi';
+import { Alert, Input, InputNumber, Radio, Switch, Typography } from 'antd';
+import type { ReplicationRuleConfig } from '../adminApi';
 import BucketPrefixInput from './BucketPrefixInput';
 import FormField from './FormField';
 import { AdvancedDisclosure } from './ruleEditorFields';
-import { fmtUnix, lineList, lines } from './ruleEditorHelpers';
-import { formatBytes } from '../utils';
-import { statusTone } from './replicationStatus';
+import { lineList, lines } from './ruleEditorHelpers';
 
 const { Text } = Typography;
 
 /**
  * Per-rule field editor body (name / enabled / source / destination + advanced
  * behaviour). Extracted verbatim from ReplicationPanel; the parent renders it
- * inside RuleListEditor's `renderDetail` and owns all state/handlers.
+ * inside the Jobs drawer's Definition tab; the parent owns all state.
  */
 export default function ReplicationRuleFields({
   rule,
-  runtime,
   buckets,
   inputRadius,
   onChange,
   onRename,
 }: {
   rule: ReplicationRuleConfig;
-  runtime: ReplicationRuleOverview | null;
   buckets: string[];
   inputRadius: { borderRadius: number };
   onChange: (patch: Partial<ReplicationRuleConfig>) => void;
@@ -31,19 +27,7 @@ export default function ReplicationRuleFields({
 }) {
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
-        <div>
-          <Text strong style={{ fontSize: 16 }}>{rule.name}</Text>
-          <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 2 }}>
-            Last run: {fmtUnix(runtime?.last_run_at)} · Lifetime copied: {formatBytes(runtime?.bytes_copied_lifetime || 0)}
-          </Text>
-        </div>
-        <Tag color={statusTone(runtime?.last_status || 'idle', runtime?.paused || false, rule.enabled)}>
-          {runtime?.paused ? 'paused' : rule.enabled ? runtime?.last_status || 'idle' : 'disabled'}
-        </Tag>
-      </div>
-
-      <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14 }}>
         <FormField
           label="Rule name"
           yamlPath="storage.replication.rules[].name"

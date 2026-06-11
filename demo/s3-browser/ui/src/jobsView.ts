@@ -1,0 +1,219 @@
+/**
+ * Pure view logic for the unified Jobs screen (React-free — transpiled
+ * directly by the Node regression script).
+ *
+ * The backend's GET /api/admin/jobs returns ONE row shape for every
+ * background operation (replication rules, lifecycle rules, one-off
+ * re-encrypt/migrate jobs). These helpers turn rows into UI decisions:
+ * status tones, kind labels, the per-kind action matrix, progress labels,
+ * bucket-busy lookups, and the draft-row merge for staged-but-unapplied
+ * rule definitions.
+ */
+
+export type JobKind = 'replication' | 'lifecycle' | 'reencrypt' | 'migrate' | string;
+export type JobAction = 'pause' | 'resume' | 'run-now' | 'preview' | 'cancel';
+
+export interface JobRow {
+  id: string; // "replication:<rule>" | "lifecycle:<rule>" | "maintenance:<n>"
+  kind: JobKind;
+  name: string;
+  scope: { bucket: string; prefix?: string; target?: string };
+  trigger: 'continuous' | 'scheduled' | 'oneoff' | string;
+  enabled?: boolean;
+  paused?: boolean;
+  status: string; // normalized: idle|queued|running|cancelling|succeeded|failed|cancelled
+  status_raw: string;
+  phase?: string;
+  percent?: number | null;
+  progress: { processed: number; total?: number | null; bytes: number; failed: number; skipped: number };
+  lifetime?: { objects: number; bytes: number };
+  last_run_at?: number | null;
+  next_due_at?: number | null;
+  created_at?: number | null;
+  started_at?: number | null;
+  finished_at?: number | null;
+  last_error?: string | null;
+  detail: Record<string, unknown>;
+}
+
+/** Split a job id into its subsystem + key. */
+export function parseJobId(id: string): { subsystem: string; key: string } | null {
+  const idx = id.indexOf(':');
+  if (idx <= 0 || idx === id.length - 1) return null;
+  return { subsystem: id.slice(0, idx), key: id.slice(idx + 1) };
+}
+
+/** Statuses for which a one-off job is live (busy chips, fast polling). */
+export function isActiveJobStatus(status: string): boolean {
+  return status === 'queued' || status === 'running' || status === 'cancelling';
+}
+
+/** AntD tag color for a job row. Pause/disable win over the last status. */
+export function jobStatusTone(row: Pick<JobRow, 'status' | 'paused' | 'enabled'>): string {
+  if (row.enabled === false) return 'default';
+  if (row.paused) return 'warning';
+  switch (row.status) {
+    case 'running':
+    case 'cancelling':
+      return 'processing';
+    case 'queued':
+      return 'warning';
+    case 'succeeded':
+      return 'success';
+    case 'failed':
+      return 'error';
+    case 'cancelled':
+      return 'default';
+    default:
+      return 'default'; // idle
+  }
+}
+
+/** The status word the row should display (pause/disable beat status). */
+export function jobStatusLabel(row: Pick<JobRow, 'status' | 'paused' | 'enabled'>): string {
+  if (row.enabled === false) return 'disabled';
+  if (row.paused) return 'paused';
+  return row.status;
+}
+
+export function kindLabel(kind: JobKind): string {
+  switch (kind) {
+    case 'replication':
+      return 'Replication';
+    case 'lifecycle':
+      return 'Lifecycle';
+    case 'reencrypt':
+      return 'Re-encrypt';
+    case 'migrate':
+      return 'Migrate';
+    default:
+      return kind;
+  }
+}
+
+export function triggerLabel(trigger: string): string {
+  switch (trigger) {
+    case 'continuous':
+      return 'continuous';
+    case 'scheduled':
+      return 'scheduled';
+    case 'oneoff':
+      return 'one-off';
+    default:
+      return trigger;
+  }
+}
+
+/**
+ * The uniform action matrix, contextualised by row state:
+ * - rule kinds: pause XOR resume (by current flag) + run-now (only when
+ *   enabled, not paused, not mid-run); lifecycle adds preview.
+ * - one-off kinds: cancel while active.
+ */
+export function availableActions(row: JobRow): JobAction[] {
+  const out: JobAction[] = [];
+  if (row.kind === 'replication' || row.kind === 'lifecycle') {
+    out.push(row.paused ? 'resume' : 'pause');
+    if (row.kind === 'lifecycle') out.push('preview');
+    if (row.enabled !== false && !row.paused && row.status !== 'running') out.push('run-now');
+    return out;
+  }
+  if (isActiveJobStatus(row.status) && row.status !== 'cancelling') out.push('cancel');
+  return out;
+}
+
+/** Compact progress label for the table row. */
+export function progressLabel(row: JobRow): string {
+  if (row.trigger === 'oneoff') {
+    if (row.status === 'queued') return 'waiting to start…';
+    const done = row.progress.processed + row.progress.skipped;
+    const total = row.progress.total;
+    if (row.phase === 'counting') return 'counting objects…';
+    return total != null ? `${done} / ${total} objects` : `${done} objects`;
+  }
+  const lifetime = row.lifetime?.objects ?? 0;
+  return lifetime > 0 ? `${lifetime} objects lifetime` : '—';
+}
+
+/** Active one-off job touching `bucket` (busy chips on the Buckets page). */
+export function busyJobForBucket(rows: JobRow[], bucket: string): JobRow | null {
+  const key = bucket.toLowerCase();
+  return (
+    rows.find(
+      (r) =>
+        r.trigger === 'oneoff' &&
+        r.scope.bucket.toLowerCase() === key &&
+        isActiveJobStatus(r.status)
+    ) ?? null
+  );
+}
+
+/** A rule definition as the section editors carry it (name is enough here). */
+export interface NamedRule {
+  name: string;
+}
+
+export interface JobDisplayRow {
+  row: JobRow;
+  /** Staged in the editor but not yet applied to the server. */
+  draft: boolean;
+  /** Present on the server but deleted in the editor (pending removal). */
+  pendingDelete: boolean;
+}
+
+/**
+ * Merge server job rows with the two editors' staged rule lists:
+ * editor-only rules surface as DRAFT rows (synthetic JobRow, idle); server
+ * rules absent from the editor get `pendingDelete` (they vanish on Apply).
+ * One-off jobs pass through untouched.
+ */
+export function mergeDraftRules(
+  serverRows: JobRow[],
+  replicationRules: NamedRule[],
+  lifecycleRules: NamedRule[]
+): JobDisplayRow[] {
+  const out: JobDisplayRow[] = [];
+  const editorNames = {
+    replication: new Set(replicationRules.map((r) => r.name)),
+    lifecycle: new Set(lifecycleRules.map((r) => r.name)),
+  };
+  const serverNames = { replication: new Set<string>(), lifecycle: new Set<string>() };
+
+  for (const row of serverRows) {
+    if (row.kind === 'replication' || row.kind === 'lifecycle') {
+      serverNames[row.kind].add(row.name);
+      out.push({
+        row,
+        draft: false,
+        pendingDelete: !editorNames[row.kind].has(row.name),
+      });
+    } else {
+      out.push({ row, draft: false, pendingDelete: false });
+    }
+  }
+
+  for (const kind of ['replication', 'lifecycle'] as const) {
+    const rules = kind === 'replication' ? replicationRules : lifecycleRules;
+    for (const rule of rules) {
+      if (!rule.name || serverNames[kind].has(rule.name)) continue;
+      out.push({
+        draft: true,
+        pendingDelete: false,
+        row: {
+          id: `${kind}:${rule.name}`,
+          kind,
+          name: rule.name,
+          scope: { bucket: '' },
+          trigger: kind === 'replication' ? 'continuous' : 'scheduled',
+          enabled: undefined,
+          paused: undefined,
+          status: 'idle',
+          status_raw: 'draft',
+          progress: { processed: 0, bytes: 0, failed: 0, skipped: 0 },
+          detail: {},
+        },
+      });
+    }
+  }
+  return out;
+}

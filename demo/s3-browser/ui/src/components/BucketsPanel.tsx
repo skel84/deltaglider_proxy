@@ -37,8 +37,8 @@ import CreateBucketModal from './CreateBucketModal';
 import ReencryptProposalModal from './ReencryptProposalModal';
 import { useApplyHandler } from '../useDirtySection';
 import { useSectionEditor } from '../useSectionEditor';
-import { useMaintenanceJobs } from '../queries/maintenance';
-import { activeJobForBucket } from '../maintenanceStatus';
+import { useJobs } from '../queries/jobs';
+import { busyJobForBucket } from '../jobsView';
 import type { BucketPolicyRow, BucketPolicyPatch, PrefixEntry } from './bucketPolicyPayload';
 import { DEFAULT_ROW_FIELDS, buildBucketPayload, freshId, isAllDefaultRow, policyToRow } from './bucketPolicyPayload';
 
@@ -74,7 +74,7 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
     error,
   } = useSectionEditor<BucketWire, BucketPolicyRow[]>({
     section: 'storage',
-    dirtyKey: 'configuration/storage/buckets',
+    dirtyKey: 'storage/buckets',
     initial: [],
     onSessionExpired,
     noun: 'bucket policies',
@@ -107,7 +107,7 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
   const [reencryptBucket, setReencryptBucket] = useState<string | null>(null);
   // Active jobs drive the busy chip + progress bar; the query self-polls
   // every 2s while any job is active and goes quiet otherwise.
-  const maintenanceJobs = useMaintenanceJobs().data?.jobs ?? [];
+  const maintenanceJobs = useJobs().data?.jobs ?? [];
 
   useEffect(() => {
     if (cfg === null) onSessionExpired?.();
@@ -154,7 +154,7 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
     await editorRunApply();
   }, [rows, editorRunApply]);
 
-  useApplyHandler('configuration/storage/buckets', runApply, dirty);
+  useApplyHandler('storage/buckets', runApply, dirty);
 
   // ── Row mutation: name-keyed for real buckets (materialises the row on
   //    first edit), id-keyed for drafts. ──
@@ -302,7 +302,7 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
                 onPatch={(patch) => patchBucket(name, patch)}
                 onPrefixesChange={prefixChangeFor(name)}
                 inputRadius={inputRadius}
-                maintenanceJob={activeJobForBucket(maintenanceJobs, name)}
+                maintenanceJob={busyJobForBucket(maintenanceJobs, name)}
                 onReencrypt={() => setReencryptBucket(name)}
               />
             );

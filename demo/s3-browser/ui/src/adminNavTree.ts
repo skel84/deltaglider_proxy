@@ -12,9 +12,10 @@
 
 interface NavNode<T extends NavNode<T>> {
   path: string;
-  /** The dirty-state key this entry owns (a leaf's nav path). Parents
-   *  usually have none and roll up their descendants. */
-  dirtyKey?: string;
+  /** The dirty-state keys this entry owns. A leaf may host SEVERAL
+   *  independent editors (Jobs, System); the dot lights iff ANY is
+   *  dirty. Parents usually have none and roll up their descendants. */
+  dirtyKeys?: string[];
   children?: T[];
 }
 
@@ -34,7 +35,7 @@ export function dirtyDotForEntry<T extends NavNode<T>>(
   entry: T,
   dirtyKeys: Set<string>
 ): boolean {
-  if (entry.dirtyKey && dirtyKeys.has(entry.dirtyKey)) return true;
+  if (entry.dirtyKeys?.some((k) => dirtyKeys.has(k))) return true;
   // Roll up: any descendant leaf dirty → parent shows the dot.
   if (entry.children) {
     for (const child of entry.children) {
@@ -64,12 +65,4 @@ export function findEntry<T extends NavNode<T>>(
     if (hit) return hit;
   }
   return undefined;
-}
-
-/** Direct leaf children of the entry at `sectionPath` (empty if none). */
-export function leavesUnder<T extends NavNode<T>>(
-  groups: Array<{ entries: T[] }>,
-  sectionPath: string
-): T[] {
-  return findEntry(groups, sectionPath)?.children ?? [];
 }

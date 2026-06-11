@@ -53,18 +53,14 @@ export const qk = {
   prefixUsage: (bucket: string, prefix: string) =>
     ['prefix-usage', bucket, prefix] as const,
 
-  // ── Maintenance (re-encryption jobs) ────────────────────────────
-  maintenance: {
-    list: () => ['maintenance'] as const,
-    bucket: (bucket: string) => ['maintenance', 'bucket', bucket] as const,
+  // ── Jobs (replication / lifecycle / reencrypt / migrate) ────────
+  jobs: {
+    list: () => ['jobs'] as const,
+    runs: (id: string) => ['jobs', 'runs', id] as const,
+    failures: (id: string) => ['jobs', 'failures', id] as const,
   },
-
-  // ── Replication ─────────────────────────────────────────────────
-  replication: {
-    overview: () => ['replication'] as const,
-    history: (rule: string, limit?: number) =>
-      ['replication', 'history', rule, { limit }] as const,
-    failures: (rule: string, limit?: number) =>
-      ['replication', 'failures', rule, { limit }] as const,
+  // Per-bucket busy banner (session-light endpoint).
+  maintenance: {
+    bucket: (bucket: string) => ['maintenance', 'bucket', bucket] as const,
   },
 } as const;

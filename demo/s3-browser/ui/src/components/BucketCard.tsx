@@ -32,9 +32,9 @@ import type { BucketPolicyRow, PrefixEntry } from './bucketPolicyPayload';
 import { DEFAULT_ROW_FIELDS, freshId, isAllDefaultRow } from './bucketPolicyPayload';
 import PrefixListEditor from './PrefixListEditor';
 import MigrateBucketModal from './MigrateBucketModal';
-import type { MaintenanceJobView } from '../maintenanceStatus';
-import { activePercent, phaseLabel } from '../maintenanceStatus';
-import { cancelMaintenanceJob } from '../adminApi';
+import type { JobRow } from '../jobsView';
+import { progressLabel } from '../jobsView';
+import { runJobAction } from '../adminApi';
 
 const { Text } = Typography;
 
@@ -63,7 +63,7 @@ interface CardProps {
   availableBuckets?: string[];
   inputRadius: { borderRadius: number };
   /** Active maintenance (re-encryption) job for this bucket, if any. */
-  maintenanceJob?: MaintenanceJobView | null;
+  maintenanceJob?: JobRow | null;
   /** Start the one-off re-encrypt job for this bucket (the [Later] path). */
   onReencrypt?: () => void;
 }
@@ -124,7 +124,6 @@ export default function BucketCard({
   const isPublic = eff.publicMode !== 'none';
   const publicPrefixCount = eff.public_prefixes.filter((p) => p.value.trim()).length;
   const hasOverrides = row !== null && !isAllDefaultRow(row);
-  const currentBackend = eff.backend || defaultBackend || null;
 
   const cardBorder = isPublic ? `${colors.ACCENT_AMBER}66` : colors.BORDER;
   const cardBg = isPublic ? `${colors.ACCENT_AMBER}0a` : colors.BG_ELEVATED;
@@ -166,7 +165,7 @@ export default function BucketCard({
 
   const chips: React.ReactNode[] = [];
   if (maintenanceJob) {
-    const pct = activePercent(maintenanceJob);
+    const pct = maintenanceJob.percent ?? null;
     chips.push(
       <Chip
         key="busy"
@@ -319,15 +318,15 @@ export default function BucketCard({
       {maintenanceJob && (
         <div style={{ padding: '0 14px 10px', display: 'flex', alignItems: 'center', gap: 12 }}>
           <Progress
-            percent={activePercent(maintenanceJob) ?? 100}
+            percent={maintenanceJob.percent ?? 100}
             status="active"
-            showInfo={activePercent(maintenanceJob) != null}
+            showInfo={maintenanceJob.percent != null}
             size="small"
             strokeColor={colors.ACCENT_AMBER}
             style={{ flex: 1, margin: 0 }}
           />
           <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-            {phaseLabel(maintenanceJob)}
+            {progressLabel(maintenanceJob)}
           </Text>
           {maintenanceJob.status !== 'cancelling' && (
             <Button
@@ -338,7 +337,7 @@ export default function BucketCard({
               title="Stop the job. Already-rewritten objects stay rewritten (the job is idempotent — re-running later skips them)."
               onClick={(e) => {
                 e.stopPropagation();
-                void cancelMaintenanceJob(maintenanceJob.id).catch(() => {
+                void runJobAction(maintenanceJob.id, 'cancel').catch(() => {
                   /* next poll reflects the real state either way */
                 });
               }}
@@ -464,8 +463,6 @@ export default function BucketCard({
             <MigrateBucketModal
               open={migrateOpen}
               bucket={name}
-              currentBackend={currentBackend}
-              backends={backends}
               onClose={() => setMigrateOpen(false)}
             />
           )}

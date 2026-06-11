@@ -18,14 +18,11 @@ import { findEntry } from '../adminNavTree';
 import AdmissionPanel from './AdmissionPanel';
 import CredentialsModePanel from './CredentialsModePanel';
 import BucketsPanel from './BucketsPanel';
-import ReplicationPanel from './ReplicationPanel';
-import LifecyclePanel from './LifecyclePanel';
 import SetupWizard from './SetupWizard';
 import TracePanel from './TracePanel';
 import AuditLogPanel from './AuditLogPanel';
 import DeltaEfficiencyPanel from './DeltaEfficiencyPanel';
 import EventOutboxPanel from './EventOutboxPanel';
-import RecoveryPanel from './RecoveryPanel';
 import CommandPalette, {
   FileTextOutlined as PaletteFileTextOutlined,
   ImportOutlined as PaletteImportOutlined,
@@ -33,21 +30,12 @@ import CommandPalette, {
   LogoutOutlined,
   QuestionCircleOutlined,
 } from './CommandPalette';
-import {
-  ListenerTlsPanel,
-  CachesPanel,
-  LimitsPanel,
-  LoggingPanel,
-  ConfigDbSyncPanel,
-} from './advancedPanels';
+import JobsPanel from './jobs/JobsPanel';
+import SystemPanel from './SystemPanel';
 import WebhookDeliveryPanel from './WebhookDeliveryPanel';
-import {
-  AccessOverview,
-  StorageOverview,
-  AdvancedOverview,
-} from './sectionOverviews';
 import { useAdminConfig } from '../queries/config';
 import { useNavigation } from '../NavigationContext';
+import { resolveAdminPath as remapAdminPath } from '../adminPathRemap';
 import { buildViewUrl } from '../urlState';
 import TabHeader from './TabHeader';
 import { YamlImportExportModal } from './YamlImportExportModal';
@@ -58,40 +46,6 @@ import type { AccountMenuConfigProps } from './AccountMenu';
 
 const { Text } = Typography;
 
-/**
- * Map legacy flat subPaths to the new 4-group IA subPaths (§3.1).
- *
- * Every bookmarkable URL before Wave 3 was `/_/admin/<tab>` where
- * `<tab>` is one of the TABS list below. We keep those URLs working —
- * operators may have pasted them in tickets / Slack — by normalising
- * to the new hierarchical form on read. The sidebar navigates using
- * the new form exclusively, so the legacy URLs only matter on the
- * first page load / refresh.
- */
-const LEGACY_TO_NEW: Record<string, string> = {
-  // Diagnostics — metrics keeps its own top-level route; dashboard
-  // is a new page that lives only under the new scheme.
-  'metrics': 'diagnostics/dashboard',
-  // Access sub-sections
-  'users': 'configuration/access/users',
-  'groups': 'configuration/access/groups',
-  'auth': 'configuration/access/ext-auth',
-  // Storage sub-sections — legacy 'backends' covered backend infra
-  // and bucket policy on one page. Today Backends is infra-only;
-  // Buckets owns policy. Keep old bookmarks on Backends because
-  // that's where the route originally landed.
-  'backends': 'configuration/storage/backends',
-  'backend': 'configuration/storage/backends',
-  'compression': 'configuration/storage/backends',
-  // Encryption moved per-backend in v0.9 — the dedicated panel is
-  // gone; every backend card on the Backends page owns its own
-  // encryption editor. Redirect bookmarks of the old URL.
-  'encryption': 'configuration/storage/backends',
-  // Advanced sub-sections
-  'limits': 'configuration/advanced/limits',
-  'security': 'configuration/advanced/listener',
-  'logging': 'configuration/advanced/logging',
-};
 
 /**
  * Viewport-narrow detection hook (Wave 10.1 §10.4). Returns true
@@ -102,33 +56,12 @@ const LEGACY_TO_NEW: Record<string, string> = {
  * ("sidebar collapses to drawer at <900px").
  */
 /**
- * Resolve an incoming `subPath` (anything the browser presents) to a
- * canonical path in the new 4-group scheme. Falls back to the default
- * landing page when the path is empty or unknown.
+ * Resolve an incoming `subPath` to a canonical leaf of the 7-group IA.
+ * The exhaustive old→new table lives in `adminPathRemap.ts` (regression-
+ * tested); membership in the live IA is the passthrough test.
  */
 function resolveAdminPath(subPath: string): string {
-  const path = subPath.replace(/^\/+/, '').replace(/\/+$/, '');
-  if (!path) return 'diagnostics/dashboard';
-  // v0.9: the dedicated encryption page was deleted when encryption
-  // moved per-backend. Redirect the full-depth bookmark to Backends.
-  if (path === 'configuration/storage/encryption') {
-    return 'configuration/storage/backends';
-  }
-  // Legacy flat paths (first segment only)
-  const firstSegment = path.split('/')[0];
-  if (LEGACY_TO_NEW[firstSegment]) {
-    const remaining = path.slice(firstSegment.length);
-    return LEGACY_TO_NEW[firstSegment] + remaining;
-  }
-  // Already a new-scheme path (including the standalone `setup` route).
-  if (
-    path.startsWith('diagnostics/') ||
-    path.startsWith('configuration/') ||
-    path === 'setup'
-  ) {
-    return path;
-  }
-  return 'diagnostics/dashboard';
+  return remapAdminPath(subPath, (p) => Boolean(findEntry(ADMIN_IA, p)));
 }
 
 interface AdminPageProps {
@@ -177,7 +110,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
   // The per-leaf dirty/apply key for ⌘S dispatch (panels register under this,
   // not the coarse section). `activeSection` is still used for the avatar
   // menu's section-YAML target (which IS section-scoped).
-  const activeDirtyKey = dirtyKeyForPath(adminPath);
+  const activeDirtyKey = applyKeyForPath(adminPath);
   const navigateAdmin = useCallback(
     (path: string) => {
       navigate(buildViewUrl('admin', path));
@@ -409,7 +342,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
   const navigateToGroup = useCallback(
     (groupId: number) => {
       setPendingGroupId(groupId);
-      navigateAdmin('configuration/access/groups');
+      navigateAdmin('access/groups');
     },
     [navigateAdmin]
   );
@@ -502,7 +435,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
   const renderContent = () => {
     const meta = headerForPath(adminPath);
     const header = meta ? (
-      <TabHeader icon={meta.icon} title={meta.title} description={meta.description} />
+      <TabHeader icon={meta.icon} title={meta.title} description={meta.description} saveModel={meta.saveModel} />
     ) : null;
 
     // First-run wizard (Wave 8). Reachable explicitly via
@@ -511,14 +444,14 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
     if (adminPath === 'setup') {
       return (
         <SetupWizard
-          onComplete={() => navigateAdmin('diagnostics/dashboard')}
-          onCancel={() => navigateAdmin('diagnostics/dashboard')}
+          onComplete={() => navigateAdmin('dashboard')}
+          onCancel={() => navigateAdmin('dashboard')}
         />
       );
     }
 
     // Diagnostics
-    if (adminPath === 'diagnostics/dashboard') {
+    if (adminPath === 'dashboard') {
       // Skip the outer section header — MetricsPage's toolbar
       // already carries title + live indicator + tab switcher +
       // refresh controls. Rendering both would duplicate the
@@ -549,7 +482,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         </>
       );
     }
-    if (adminPath === 'diagnostics/event-outbox') {
+    if (adminPath === 'integrations/event-outbox') {
       return (
         <>
           {header}
@@ -559,7 +492,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
     }
 
     // Configuration — Admission (Wave 4)
-    if (adminPath === 'configuration/admission') {
+    if (adminPath === 'access/admission') {
       return (
         <>
           {header}
@@ -568,39 +501,10 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
             onNavigateToBucket={(_bucket) =>
               // Wave 6 will deep-link into a specific bucket editor;
               // until then we land on the Buckets sub-tab.
-              navigateAdmin('configuration/storage/buckets')
+              navigateAdmin('storage/buckets')
             }
           />
         </>
-      );
-    }
-
-    // Configuration — group parents: render the rich overview page
-    // (hero + stat tiles + sub-section cards) instead of falling
-    // through to a Dashboard. Admission has no sub-entries so it's
-    // a leaf page handled above.
-    if (adminPath === 'configuration/access') {
-      return (
-        <AccessOverview
-          onNavigateAdmin={navigateAdmin}
-          onSessionExpired={onSessionExpired}
-        />
-      );
-    }
-    if (adminPath === 'configuration/storage') {
-      return (
-        <StorageOverview
-          onNavigateAdmin={navigateAdmin}
-          onSessionExpired={onSessionExpired}
-        />
-      );
-    }
-    if (adminPath === 'configuration/advanced') {
-      return (
-        <AdvancedOverview
-          onNavigateAdmin={navigateAdmin}
-          onSessionExpired={onSessionExpired}
-        />
       );
     }
 
@@ -610,7 +514,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
     // legacy SettingsPage `security` tab conflated Access +
     // rate-limit + session-TTL into one page; the latter two move
     // to Advanced (Wave 7).
-    if (adminPath === 'configuration/access/credentials') {
+    if (adminPath === 'access/credentials') {
       return (
         <>
           {header}
@@ -618,7 +522,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         </>
       );
     }
-    if (adminPath === 'configuration/access/users') {
+    if (adminPath === 'access/users') {
       return (
         <>
           {header}
@@ -629,7 +533,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         </>
       );
     }
-    if (adminPath === 'configuration/access/groups') {
+    if (adminPath === 'access/groups') {
       return (
         <>
           {header}
@@ -641,7 +545,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         </>
       );
     }
-    if (adminPath === 'configuration/access/ext-auth') {
+    if (adminPath === 'access/external-auth') {
       return (
         <>
           {header}
@@ -654,7 +558,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
   // Backends owns storage infrastructure. Buckets owns per-bucket
   // policy. Object replication owns source → destination movement.
   // Object lifecycle owns delete-only expiration rules.
-    if (adminPath === 'configuration/storage/backends') {
+    if (adminPath === 'storage/backends') {
       return (
         <>
           {header}
@@ -662,7 +566,7 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         </>
       );
     }
-    if (adminPath === 'configuration/storage/buckets') {
+    if (adminPath === 'storage/buckets') {
       return (
         <>
           {header}
@@ -670,81 +574,27 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         </>
       );
     }
-    if (adminPath === 'configuration/storage/replication') {
+    if (adminPath === 'jobs') {
       return (
         <>
           {header}
-          <ReplicationPanel onSessionExpired={onSessionExpired} />
+          <JobsPanel onSessionExpired={onSessionExpired} />
         </>
       );
     }
-    if (adminPath === 'configuration/storage/lifecycle') {
+    if (adminPath === 'system') {
       return (
         <>
           {header}
-          <LifecyclePanel onSessionExpired={onSessionExpired} />
-        </>
-      );
-    }
-    if (adminPath === 'configuration/recovery') {
-      return (
-        <>
-          {header}
-          <RecoveryPanel
+          <SystemPanel
+            onSessionExpired={onSessionExpired}
             onExportBackup={handleExportFullBackup}
             onImportBackup={handleImportFullBackup}
           />
         </>
       );
     }
-    // Encryption config lives on each backend card in BackendsPanel
-    // as of v0.9 — per-backend-scoped via `BackendEncryptionEditor`.
-    // No top-level "encryption" route.
-
-    // Configuration — Advanced (Wave 7). Five dedicated sub-panels,
-    // each edits a different slice of `advanced.*` through the
-    // section API (or for Limits, read-only env-var display).
-    if (adminPath === 'configuration/advanced/listener') {
-      return (
-        <>
-          {header}
-          <ListenerTlsPanel onSessionExpired={onSessionExpired} />
-        </>
-      );
-    }
-    if (adminPath === 'configuration/advanced/caches') {
-      return (
-        <>
-          {header}
-          <CachesPanel onSessionExpired={onSessionExpired} />
-        </>
-      );
-    }
-    if (adminPath === 'configuration/advanced/limits') {
-      return (
-        <>
-          {header}
-          <LimitsPanel onSessionExpired={onSessionExpired} />
-        </>
-      );
-    }
-    if (adminPath === 'configuration/advanced/logging') {
-      return (
-        <>
-          {header}
-          <LoggingPanel onSessionExpired={onSessionExpired} />
-        </>
-      );
-    }
-    if (adminPath === 'configuration/advanced/sync') {
-      return (
-        <>
-          {header}
-          <ConfigDbSyncPanel onSessionExpired={onSessionExpired} />
-        </>
-      );
-    }
-    if (adminPath === 'configuration/advanced/event-delivery') {
+    if (adminPath === 'integrations/event-delivery') {
       return (
         <>
           {header}
@@ -1057,10 +907,12 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
  * (no section scope).
  */
 function sectionForPath(path: string): SectionName | undefined {
-  if (path.startsWith('configuration/admission')) return 'admission';
-  if (path.startsWith('configuration/access')) return 'access';
-  if (path.startsWith('configuration/storage')) return 'storage';
-  if (path.startsWith('configuration/advanced')) return 'advanced';
+  // ORDER MATTERS: admission lives under access/ in the IA but maps to
+  // its own YAML section — match it before the access/ prefix.
+  if (path === 'access/admission') return 'admission';
+  if (path.startsWith('access/')) return 'access';
+  if (path.startsWith('storage/') || path === 'jobs') return 'storage';
+  if (path === 'system' || path.startsWith('integrations/')) return 'advanced';
   return undefined;
 }
 
@@ -1072,6 +924,6 @@ function sectionForPath(path: string): SectionName | undefined {
  * per-leaf key (not the coarse `SectionName`). Returns undefined when the path
  * isn't a dirty-capable config leaf (Diagnostics, immediate-save CRUD, etc.).
  */
-function dirtyKeyForPath(path: string): string | undefined {
-  return findEntry(ADMIN_IA, path)?.dirtyKey;
+function applyKeyForPath(path: string): string | undefined {
+  return findEntry(ADMIN_IA, path)?.applyKey;
 }

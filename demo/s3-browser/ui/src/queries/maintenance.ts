@@ -7,24 +7,11 @@
  * conditional cadence is expressed in react-query v5.
  */
 import { useQuery } from '@tanstack/react-query';
-import { getBucketMaintenance, getMaintenanceJobs } from '../adminApi';
-import { isActiveStatus } from '../maintenanceStatus';
+import { getBucketMaintenance } from '../adminApi';
 import { qk } from './keys';
 
 const POLL_MS = 2000;
 
-/** All recent jobs (admin tier). Polls while any job is active. */
-export function useMaintenanceJobs(opts?: { enabled?: boolean }) {
-  return useQuery({
-    queryKey: qk.maintenance.list(),
-    queryFn: getMaintenanceJobs,
-    enabled: opts?.enabled ?? true,
-    refetchInterval: (query) => {
-      const jobs = query.state.data?.jobs ?? [];
-      return jobs.some((j) => isActiveStatus(j.status)) ? POLL_MS : false;
-    },
-  });
-}
 
 /**
  * One bucket's active job (session-light — works for non-admin browser

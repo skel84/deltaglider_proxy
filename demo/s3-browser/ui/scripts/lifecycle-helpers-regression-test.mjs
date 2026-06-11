@@ -18,18 +18,9 @@ const { outputText } = ts.transpileModule(source, {
   fileName: 'lifecycleHelpers.ts',
 });
 
-const { fmtDate, statusTone } = await import(dataUrl(outputText));
+const { fmtDate } = await import(dataUrl(outputText));
 
-// --- statusTone --------------------------------------------------------------
-// disabled rule -> warning regardless of status
-assert.equal(statusTone('succeeded', false), 'warning');
-assert.equal(statusTone('failed', false), 'warning');
-assert.equal(statusTone('idle', false), 'warning');
-// enabled rule maps status -> tone
-assert.equal(statusTone('failed', true), 'error');
-assert.equal(statusTone('succeeded', true), 'success');
-assert.equal(statusTone('idle', true), 'default');
-assert.equal(statusTone('running', true), 'default'); // unknown status -> default
+// statusTone moved to jobsView.ts (jobStatusTone) — covered by test:jobs-view.
 
 // --- fmtDate -----------------------------------------------------------------
 // valid ISO timestamp -> locale string (matches Date#toLocaleString)

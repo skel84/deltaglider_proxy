@@ -19,135 +19,81 @@ async function loadModule(relPath, fileName) {
 }
 
 const treeUrl = await loadModule('../src/adminNavTree.ts', 'adminNavTree.ts');
-const { findEntry, leavesUnder, dirtyDotForEntry } = await import(treeUrl);
+const { findEntry, dirtyDotForEntry } = await import(treeUrl);
 
-// A plain-data stand-in for ADMIN_IA: same shape (groups -> entries ->
-// children), no JSX. The exact strings mirror the real IA so the test
-// documents the invariants a reader expects.
+// A plain-data stand-in for ADMIN_IA: same shape (groups → entries, flat —
+// the 7-group IA has NO children arrays), no JSX. The strings mirror the
+// real IA so the test documents the invariants a reader expects.
 const IA = [
   {
-    group: 'Diagnostics',
+    group: 'Overview',
+    entries: [{ path: 'dashboard', label: 'Dashboard' }],
+  },
+  {
+    group: 'Access',
     entries: [
-      { path: 'diagnostics/dashboard', label: 'Dashboard' },
-      { path: 'diagnostics/trace', label: 'Trace' },
+      { path: 'access/credentials', label: 'Credentials & mode', dirtyKeys: ['access/credentials'] },
+      { path: 'access/users', label: 'Users' },
+      { path: 'access/admission', label: 'Admission rules', dirtyKeys: ['admission'] },
     ],
   },
   {
-    group: 'Configuration',
+    group: 'Jobs',
     entries: [
-      { path: 'configuration/admission', label: 'Admission' },
+      { path: 'jobs', label: 'Jobs', dirtyKeys: ['jobs/replication', 'jobs/lifecycle'] },
+    ],
+  },
+  {
+    group: 'System',
+    entries: [
       {
-        path: 'configuration/access',
-        label: 'Access',
-        children: [
-          { path: 'configuration/access/credentials', label: 'Credentials & mode' },
-          { path: 'configuration/access/users', label: 'Users' },
-          { path: 'configuration/access/groups', label: 'Groups' },
-          { path: 'configuration/access/ext-auth', label: 'External authentication' },
-        ],
-      },
-      { path: 'configuration/recovery', label: 'Backup' },
-      {
-        path: 'configuration/advanced',
-        label: 'Advanced',
-        children: [
-          { path: 'configuration/advanced/listener', label: 'Listener & TLS' },
-          { path: 'configuration/advanced/sync', label: 'Config DB sync' },
-        ],
+        path: 'system',
+        label: 'System',
+        dirtyKeys: ['system/listener', 'system/caches', 'system/logging', 'system/sync'],
       },
     ],
   },
 ];
 
-// --- findEntry ---------------------------------------------------------------
-// Top-level leaf in the first group.
-assert.equal(findEntry(IA, 'diagnostics/dashboard')?.label, 'Dashboard');
-// Top-level leaf in a later group.
-assert.equal(findEntry(IA, 'configuration/admission')?.label, 'Admission');
-assert.equal(findEntry(IA, 'configuration/recovery')?.label, 'Backup');
-// A parent node is itself findable (drives the overview pages).
-assert.equal(findEntry(IA, 'configuration/access')?.label, 'Access');
-// Nested leaf (the depth-first descent into children).
-assert.equal(findEntry(IA, 'configuration/access/groups')?.label, 'Groups');
-assert.equal(findEntry(IA, 'configuration/advanced/sync')?.label, 'Config DB sync');
-// Unknown path -> undefined (header/overview helpers degrade gracefully).
-assert.equal(findEntry(IA, 'configuration/access/nope'), undefined);
-assert.equal(findEntry(IA, 'setup'), undefined);
-assert.equal(findEntry(IA, ''), undefined);
+// ── findEntry ────────────────────────────────────────────────────────────────
+assert.equal(findEntry(IA, 'dashboard')?.label, 'Dashboard');
+assert.equal(findEntry(IA, 'access/users')?.label, 'Users');
+assert.equal(findEntry(IA, 'jobs')?.label, 'Jobs');
+assert.equal(findEntry(IA, 'nope'), undefined);
+assert.equal(findEntry(IA, 'access'), undefined, 'group prefixes are not entries');
 
-// --- leavesUnder -------------------------------------------------------------
-// Children of a parent, in declared order (drives overview card order).
-assert.deepEqual(
-  leavesUnder(IA, 'configuration/access').map((e) => e.path),
-  [
-    'configuration/access/credentials',
-    'configuration/access/users',
-    'configuration/access/groups',
-    'configuration/access/ext-auth',
-  ]
-);
-assert.deepEqual(
-  leavesUnder(IA, 'configuration/advanced').map((e) => e.label),
-  ['Listener & TLS', 'Config DB sync']
-);
-// A leaf (no children) yields an empty list, never throws.
-assert.deepEqual(leavesUnder(IA, 'configuration/admission'), []);
-assert.deepEqual(leavesUnder(IA, 'diagnostics/dashboard'), []);
-// Unknown parent -> empty list.
-assert.deepEqual(leavesUnder(IA, 'configuration/nope'), []);
+// ── dirtyDotForEntry: multi-key leaves ───────────────────────────────────────
+const jobs = findEntry(IA, 'jobs');
+const system = findEntry(IA, 'system');
+const credentials = findEntry(IA, 'access/credentials');
+const users = findEntry(IA, 'access/users');
+const admission = findEntry(IA, 'access/admission');
 
-// ── dirtyDotForEntry: the sibling-bleed fix ──────────────────────────────────
-// A Storage tree with per-leaf dirtyKeys (mirrors the real ADMIN_IA).
-const storage = {
-  path: 'configuration/storage',
-  // parent has NO dirtyKey — it only rolls up.
-  children: [
-    { path: 'configuration/storage/backends' }, // immediate-save: NO dirtyKey, never lights
-    { path: 'configuration/storage/buckets', dirtyKey: 'configuration/storage/buckets' },
-    { path: 'configuration/storage/replication', dirtyKey: 'configuration/storage/replication' },
-    { path: 'configuration/storage/lifecycle', dirtyKey: 'configuration/storage/lifecycle' },
-  ],
-};
-const access = {
-  path: 'configuration/access',
-  children: [{ path: 'configuration/access/credentials', dirtyKey: 'configuration/access/credentials' }],
-};
+// ANY of a leaf's keys lights it.
+assert.equal(dirtyDotForEntry(jobs, new Set(['jobs/lifecycle'])), true, 'one of two keys lights Jobs');
+assert.equal(dirtyDotForEntry(jobs, new Set(['jobs/replication'])), true);
+assert.equal(dirtyDotForEntry(jobs, new Set(['jobs/replication', 'jobs/lifecycle'])), true);
+assert.equal(dirtyDotForEntry(system, new Set(['system/caches'])), true, 'one card lights System');
 
-// THE bug: editing ONLY lifecycle must light lifecycle + the Storage parent
-// roll-up — and NOTHING else (not the sibling leaves, not the Access tree).
-{
-  const dirty = new Set(['configuration/storage/lifecycle']);
-  assert.equal(dirtyDotForEntry(storage.children[3], dirty), true, 'lifecycle leaf lights');
-  assert.equal(dirtyDotForEntry(storage, dirty), true, 'Storage parent rolls up');
-  // Siblings stay OFF — this is the regression.
-  assert.equal(dirtyDotForEntry(storage.children[0], dirty), false, 'backends stays off');
-  assert.equal(dirtyDotForEntry(storage.children[1], dirty), false, 'buckets stays off');
-  assert.equal(dirtyDotForEntry(storage.children[2], dirty), false, 'replication stays off');
-  // Other groups stay off.
-  assert.equal(dirtyDotForEntry(access, dirty), false, 'Access tree stays off');
-  assert.equal(dirtyDotForEntry(access.children[0], dirty), false, 'credentials stays off');
-}
+// Keys never bleed across leaves.
+assert.equal(dirtyDotForEntry(jobs, new Set(['system/caches'])), false);
+assert.equal(dirtyDotForEntry(system, new Set(['jobs/lifecycle'])), false);
+assert.equal(dirtyDotForEntry(credentials, new Set(['jobs/lifecycle'])), false);
 
-// A leaf with no dirtyKey never lights, even if some unrelated key is dirty.
-assert.equal(
-  dirtyDotForEntry({ path: 'configuration/storage/backends' }, new Set(['configuration/storage/lifecycle'])),
-  false
-);
+// Admission's dirty key is the section name (its panel's historical default).
+assert.equal(dirtyDotForEntry(admission, new Set(['admission'])), true);
+
+// Keyless (immediate-save) leaves never light, whatever is dirty.
+assert.equal(dirtyDotForEntry(users, new Set(['admission', 'jobs/replication'])), false);
 
 // Empty dirty set → nothing lights anywhere.
-{
-  const none = new Set();
-  assert.equal(dirtyDotForEntry(storage, none), false);
-  assert.equal(dirtyDotForEntry(storage.children[3], none), false);
+for (const leaf of [jobs, system, credentials, users, admission]) {
+  assert.equal(dirtyDotForEntry(leaf, new Set()), false);
 }
 
-// Two dirty leaves → both leaves + parent light; the clean sibling does not.
-{
-  const dirty = new Set(['configuration/storage/buckets', 'configuration/storage/lifecycle']);
-  assert.equal(dirtyDotForEntry(storage.children[1], dirty), true);
-  assert.equal(dirtyDotForEntry(storage.children[3], dirty), true);
-  assert.equal(dirtyDotForEntry(storage.children[2], dirty), false, 'replication still clean');
-  assert.equal(dirtyDotForEntry(storage, dirty), true);
-}
+// Children roll-up still works (kept generic even though the live IA is flat).
+const parent = { path: 'p', children: [{ path: 'p/a', dirtyKeys: ['k'] }, { path: 'p/b' }] };
+assert.equal(dirtyDotForEntry(parent, new Set(['k'])), true, 'parent rolls up');
+assert.equal(dirtyDotForEntry(parent.children[1], new Set(['k'])), false, 'sibling stays off');
 
 console.log('admin nav tree regression checks passed');

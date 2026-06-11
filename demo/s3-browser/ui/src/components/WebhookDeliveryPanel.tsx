@@ -179,7 +179,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
     confirmApply,
   } = useSectionEditor<AdvancedSectionWebhookBody, WebhookFormState>({
     section: 'advanced',
-    dirtyKey: 'configuration/advanced/event-delivery',
+    dirtyKey: 'integrations/event-delivery',
     initial: EMPTY_FORM,
     onSessionExpired,
     noun: 'webhook delivery',
@@ -290,7 +290,7 @@ export default function WebhookDeliveryPanel({ onSessionExpired }: Props) {
                 type="link"
                 size="small"
                 style={{ padding: 0 }}
-                onClick={() => nav.navigate('admin/diagnostics/event-outbox')}
+                onClick={() => nav.navigate('admin/integrations/event-outbox')}
               >
                 View event outbox →
               </Button>

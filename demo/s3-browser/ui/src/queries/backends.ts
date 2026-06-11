@@ -31,3 +31,9 @@ export function useBucketOrigins(opts?: { enabled?: boolean }) {
     enabled: opts?.enabled ?? true,
   });
 }
+
+/** Real bucket names (derived from the origins map) — selector options. */
+export function useBucketNames(): string[] {
+  const origins = useBucketOrigins();
+  return (origins.data?.buckets ?? []).map((b) => b.name);
+}

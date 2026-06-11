@@ -1,300 +1,241 @@
 import {
+  ApiOutlined,
+  CloudOutlined,
+  CloudServerOutlined,
   DashboardOutlined,
+  DatabaseOutlined,
   ExperimentOutlined,
   FileTextOutlined,
-  DownloadOutlined,
-  SecurityScanOutlined,
-  TeamOutlined,
-  SafetyOutlined,
-  FolderOutlined,
-  DatabaseOutlined,
-  CloudServerOutlined,
-  CloudOutlined,
-  ClockCircleOutlined,
   LockOutlined,
-  SettingOutlined,
-  ThunderboltOutlined,
-  SyncOutlined,
+  SecurityScanOutlined,
   SendOutlined,
+  SettingOutlined,
+  SyncOutlined,
+  TeamOutlined,
+  ThunderboltOutlined,
+  UserOutlined,
 } from '@ant-design/icons';
 import type { ReactNode } from 'react';
 import type { SectionName } from '../adminApi';
-import { findEntry, leavesUnder } from '../adminNavTree';
+import { findEntry } from '../adminNavTree';
+
+export type SaveModel = 'immediate' | 'review';
 
 export interface SidebarEntry {
-  /** Path sub-segment: `diagnostics/dashboard`, `configuration/admission/...` */
+  /** Path sub-segment: `dashboard`, `access/users`, `jobs`, `system`. */
   path: string;
   /** Plain-English label shown in the nav. */
   label: string;
   /** Icon rendered to the left of the label. */
   icon: ReactNode;
-  /**
-   * One-sentence explanation of what this page does. Single source of
-   * truth for the page `TabHeader` (via {@link headerForPath}) and the
-   * parent-overview sub-section cards (via {@link childrenForPath}).
-   * Leaf entries carry it; parent entries that render an overview
-   * page don't need one.
-   */
+  /** One-sentence explanation — the page TabHeader's single source of truth. */
   description?: string;
   /**
    * Which configuration section this entry's content maps to — the coarse
    * server PUT target (`storage`, `advanced`, …). Diagnostics entries have none.
-   * NOTE: this is NOT the dirty-dot key — many leaves share one `section` but
-   * must light independently. See {@link dirtyKey}.
    */
   section?: SectionName;
   /**
-   * The per-leaf dirty-state key (the panel's nav path), set ONLY on
-   * dirty-capable leaves. The amber dot lights iff this key is dirty; a parent
-   * rolls up its descendants. Leaves WITHOUT a `dirtyKey` (immediate-save CRUD
-   * like Backends/Users) never light. This decoupling fixes the bug where one
-   * dirty Storage sub-section lit every sibling. See `dirtyDotForEntry`.
+   * Per-leaf dirty-state keys. A leaf may host SEVERAL independent editors
+   * (Jobs: replication + lifecycle; System: one per card) — the amber dot
+   * lights iff ANY of them is dirty. Leaves without keys (immediate-save
+   * CRUD) never light.
    */
-  dirtyKey?: string;
+  dirtyKeys?: string[];
+  /**
+   * The ⌘S dispatch key — the `useApplyHandler` registration this leaf's
+   * panel owns. Multi-editor leaves register ONE queue handler under this
+   * key; absent = ⌘S falls through to the browser.
+   */
+  applyKey?: string;
+  /** Save-model badge: 'immediate' = every click is live; 'review' = Apply flow. */
+  saveModel?: SaveModel;
   /** Child entries rendered below as a sub-nav. */
   children?: SidebarEntry[];
 }
 
 /**
- * The four-group IA. Exported so AdminPage/CommandPalette can walk the
- * tree to pick the right header title + derive quick navigation.
+ * The 7-group / 15-leaf IA — one group per control domain (see
+ * docs/plan/admin-ui-taxonomy.md): Overview, Diagnostics, Access,
+ * Storage, Jobs, Integrations, System. No parent/overview pages: every
+ * entry is a destination.
  */
 export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
   {
-    group: 'Diagnostics',
+    group: 'Overview',
     entries: [
       {
-        path: 'diagnostics/dashboard',
+        path: 'dashboard',
         label: 'Dashboard',
         icon: <DashboardOutlined />,
-        description:
-          'Health, metrics, and admission-chain preview. Landing page for the admin UI.',
+        description: 'Health, metrics, and savings at a glance.',
       },
+    ],
+  },
+  {
+    group: 'Diagnostics',
+    entries: [
       {
         path: 'diagnostics/trace',
         label: 'Trace',
         icon: <ExperimentOutlined />,
         description:
-          'Evaluate a synthetic request against the current admission chain. See which block fires and why.',
+          'Replay a synthetic request against the admission chain and see which rule fires.',
       },
       {
-        // Wave 11: in-memory audit log viewer. Read-only; backs
-        // onto the server-side ring buffer in src/audit.rs.
         path: 'diagnostics/audit',
         label: 'Audit log',
         icon: <FileTextOutlined />,
-        description:
-          'Recent authentication + mutation events from this process (in-memory ring, default 500 entries). Stdout remains authoritative for long-term audit.',
+        description: 'Recent authentication and mutation events from this process.',
       },
       {
-        // v0.9.18: per-deltaspace efficiency report. Backs onto
-        // the GET /_/api/admin/diagnostics/delta-efficiency
-        // endpoint. Surfaces prefixes whose reference baseline
-        // produces too-large deltas (the v0.9.17 1.70.0-pre5
-        // incident shape).
         path: 'diagnostics/delta-efficiency',
         label: 'Delta efficiency',
         icon: <ThunderboltOutlined />,
-        description:
-          "Scan a bucket's deltaspaces and surface prefixes where the reference baseline is producing larger deltas than expected. Read-only diagnostic; you decide what to re-upload.",
-      },
-      {
-        path: 'diagnostics/event-outbox',
-        label: 'Event outbox',
-        icon: <DatabaseOutlined />,
-        description:
-          'A durable queue of object-change events: what was delivered, what is retrying, and any deliveries that failed.',
+        description: 'Find prefixes where the delta baseline is underperforming.',
       },
     ],
   },
   {
-    group: 'Configuration',
+    group: 'Access',
     entries: [
       {
-        path: 'configuration/admission',
-        label: 'Admission',
-        icon: <SecurityScanOutlined />,
-        section: 'admission',
-        // Single-panel section: dirtyKey defaults to the section name in
-        // useSectionEditor, so the nav key matches it ('admission').
-        dirtyKey: 'admission',
-        description:
-          'Pre-auth request gating. Blocks are evaluated top to bottom; first match wins. Synthesized blocks from bucket public_prefixes fire after operator-authored ones.',
+        path: 'access/credentials',
+        label: 'Credentials & mode',
+        icon: <LockOutlined />,
+        section: 'access',
+        dirtyKeys: ['access/credentials'],
+        applyKey: 'access/credentials',
+        saveModel: 'review',
+        description: 'IAM mode, authentication mode, bootstrap credentials, admin password.',
       },
       {
-        path: 'configuration/access',
-        label: 'Access',
+        path: 'access/users',
+        label: 'Users',
+        icon: <UserOutlined />,
+        section: 'access',
+        saveModel: 'immediate',
+        description: 'IAM users and their S3 permissions.',
+      },
+      {
+        path: 'access/groups',
+        label: 'Groups',
         icon: <TeamOutlined />,
         section: 'access',
-        children: [
-          {
-            path: 'configuration/access/credentials',
-            label: 'Credentials & mode',
-            icon: <LockOutlined />,
-            section: 'access',
-            dirtyKey: 'configuration/access/credentials',
-            description:
-              'IAM mode (GUI vs. declarative), authentication mode, legacy SigV4 bootstrap credentials, admin password.',
-          },
-          {
-            path: 'configuration/access/users',
-            label: 'Users',
-            icon: <TeamOutlined />,
-            section: 'access',
-            description:
-              'IAM users with fine-grained S3 permissions. In declarative IAM mode, this panel is read-only — edit your YAML instead.',
-          },
-          {
-            path: 'configuration/access/groups',
-            label: 'Groups',
-            icon: <FolderOutlined />,
-            section: 'access',
-            description:
-              'Organize users into groups with shared permission policies.',
-          },
-          {
-            path: 'configuration/access/ext-auth',
-            label: 'External authentication',
-            icon: <SafetyOutlined />,
-            section: 'access',
-            description:
-              'OAuth/OIDC providers and group mapping rules for SSO.',
-          },
-        ],
+        saveModel: 'immediate',
+        description: 'Shared permission policies for sets of users.',
       },
       {
-        path: 'configuration/storage',
-        label: 'Storage',
-        icon: <CloudServerOutlined />,
+        path: 'access/external-auth',
+        label: 'External authentication',
+        icon: <ApiOutlined />,
+        section: 'access',
+        saveModel: 'immediate',
+        description: 'OAuth/OIDC providers and group mapping for SSO.',
+      },
+      {
+        path: 'access/admission',
+        label: 'Admission rules',
+        icon: <SecurityScanOutlined />,
+        section: 'admission',
+        dirtyKeys: ['admission'],
+        applyKey: 'admission',
+        saveModel: 'review',
+        description: 'Pre-auth request gating. First matching rule wins.',
+      },
+    ],
+  },
+  {
+    group: 'Storage',
+    entries: [
+      {
+        path: 'storage/backends',
+        label: 'Backends',
+        icon: <DatabaseOutlined />,
         section: 'storage',
-        children: [
-          {
-            path: 'configuration/storage/backends',
-            label: 'Backends',
-            icon: <DatabaseOutlined />,
-            section: 'storage',
-            description:
-              'Storage backends, default backend selection, connection tests, and encryption-at-rest.',
-          },
-          {
-            path: 'configuration/storage/buckets',
-            label: 'Buckets',
-            icon: <CloudOutlined />,
-            section: 'storage',
-            dirtyKey: 'configuration/storage/buckets',
-            description:
-              'Per-bucket policies: compression overrides, delta ratio, public prefixes, quotas, aliases.',
-          },
-          {
-            path: 'configuration/storage/replication',
-            label: 'Object replication',
-            icon: <SyncOutlined />,
-            section: 'storage',
-            dirtyKey: 'configuration/storage/replication',
-            description:
-              'Copy objects automatically between buckets and prefixes. You define the rules here; DeltaGlider tracks each rule’s progress for you.',
-          },
-          {
-            path: 'configuration/storage/lifecycle',
-            label: 'Object lifecycle',
-            icon: <ClockCircleOutlined />,
-            section: 'storage',
-            dirtyKey: 'configuration/storage/lifecycle',
-            description:
-              'Delete-only object expiration rules with read-only preview, guarded run-now, and scheduler history.',
-          },
-          // Encryption-at-rest config — per-backend as of v0.9. Lives
-          // inside the Backends panel (one subsection per backend
-          // card); no longer a top-level sidebar entry.
-        ],
+        saveModel: 'immediate',
+        description: 'Storage backends, connection tests, encryption at rest.',
       },
       {
-        path: 'configuration/recovery',
-        label: 'Backup',
-        icon: <DownloadOutlined />,
+        path: 'storage/buckets',
+        label: 'Buckets',
+        icon: <CloudOutlined />,
+        section: 'storage',
+        dirtyKeys: ['storage/buckets'],
+        applyKey: 'storage/buckets',
+        saveModel: 'review',
+        description: 'Per-bucket settings: routing, public access, quotas, compression.',
+      },
+    ],
+  },
+  {
+    group: 'Jobs',
+    entries: [
+      {
+        path: 'jobs',
+        label: 'Jobs',
+        icon: <SyncOutlined />,
+        section: 'storage',
+        dirtyKeys: ['jobs/replication', 'jobs/lifecycle'],
+        applyKey: 'jobs',
+        saveModel: 'review',
         description:
-          'Download a full backup bundle or restore one (IAM and control-plane state).',
+          'Everything that runs in the background: replication, lifecycle, re-encryption, migrations.',
+      },
+    ],
+  },
+  {
+    group: 'Integrations',
+    entries: [
+      {
+        path: 'integrations/event-delivery',
+        label: 'Event delivery',
+        icon: <SendOutlined />,
+        section: 'advanced',
+        dirtyKeys: ['integrations/event-delivery'],
+        applyKey: 'integrations/event-delivery',
+        saveModel: 'review',
+        description: 'Send object events to webhooks and Slack.',
       },
       {
-        path: 'configuration/advanced',
-        label: 'Advanced',
+        path: 'integrations/event-outbox',
+        label: 'Event outbox',
+        icon: <CloudServerOutlined />,
+        description: 'The durable queue behind event delivery: delivered, retrying, failed.',
+      },
+    ],
+  },
+  {
+    group: 'System',
+    entries: [
+      {
+        path: 'system',
+        label: 'System',
         icon: <SettingOutlined />,
         section: 'advanced',
-        children: [
-          {
-            path: 'configuration/advanced/listener',
-            label: 'Listener & TLS',
-            icon: <CloudServerOutlined />,
-            section: 'advanced',
-            dirtyKey: 'configuration/advanced/listener',
-            description: 'HTTP listen address, TLS cert and key paths.',
-          },
-          {
-            path: 'configuration/advanced/caches',
-            label: 'Caches',
-            icon: <DatabaseOutlined />,
-            section: 'advanced',
-            dirtyKey: 'configuration/advanced/caches',
-            description:
-              'Reference cache, metadata cache, codec concurrency, blocking-thread pool size.',
-          },
-          {
-            path: 'configuration/advanced/limits',
-            label: 'Limits',
-            icon: <CloudOutlined />,
-            section: 'advanced',
-            dirtyKey: 'configuration/advanced/limits',
-            description:
-              'Request timeouts, concurrency caps, multipart-upload limits. Most are env-var driven.',
-          },
-          {
-            path: 'configuration/advanced/logging',
-            label: 'Logging',
-            icon: <DatabaseOutlined />,
-            section: 'advanced',
-            dirtyKey: 'configuration/advanced/logging',
-            description:
-              'tracing-subscriber EnvFilter string. Changes take effect immediately without restart.',
-          },
-          {
-            path: 'configuration/advanced/sync',
-            label: 'Config DB sync',
-            icon: <SyncOutlined />,
-            section: 'advanced',
-            dirtyKey: 'configuration/advanced/sync',
-            description:
-              'S3 bucket for encrypted IAM/config database HA across proxy instances. This is not object replication.',
-          },
-          {
-            path: 'configuration/advanced/event-delivery',
-            label: 'Webhook delivery',
-            icon: <SendOutlined />,
-            section: 'advanced',
-            dirtyKey: 'configuration/advanced/event-delivery',
-            description:
-              'Deliver durable object events to HTTP webhooks: endpoints, auth headers, retry backoff, retention. Applies live, no restart.',
-          },
-        ],
+        dirtyKeys: ['system/listener', 'system/caches', 'system/logging', 'system/sync'],
+        saveModel: 'review',
+        description: 'Listener & TLS, caches and limits, logging, config DB sync, backup.',
       },
     ],
   },
 ];
 
 /**
- * Header metadata ({ icon, title, description }) for an admin page,
- * derived from the matching ADMIN_IA entry. Single source of truth —
- * the sidebar label doubles as the page title. Returns undefined for
- * paths with no entry (overview parents, the setup wizard).
+ * Header metadata for an admin page, derived from the matching ADMIN_IA
+ * entry. Single source of truth — the sidebar label doubles as the page
+ * title, and the save-model badge rides along. Returns undefined for
+ * paths with no entry (the setup wizard).
  */
-export function headerForPath(
-  path: string
-): { icon: ReactNode; title: string; description: string } | undefined {
+export function headerForPath(path: string):
+  | { icon: ReactNode; title: string; description: string; saveModel?: SaveModel }
+  | undefined {
   const entry = findEntry(ADMIN_IA, path);
   if (!entry || entry.description === undefined) return undefined;
-  return { icon: entry.icon, title: entry.label, description: entry.description };
-}
-
-/** Leaf entries directly under a Configuration parent (Access/Storage/Advanced). */
-export function childrenForPath(sectionPath: string): SidebarEntry[] {
-  return leavesUnder(ADMIN_IA, sectionPath);
+  return {
+    icon: entry.icon,
+    title: entry.label,
+    description: entry.description,
+    saveModel: entry.saveModel,
+  };
 }

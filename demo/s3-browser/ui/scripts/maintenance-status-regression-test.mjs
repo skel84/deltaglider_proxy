@@ -12,7 +12,7 @@ const { outputText } = ts.transpileModule(source, {
   fileName: 'maintenanceStatus.ts',
 });
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`;
-const { isActiveStatus, activePercent, phaseLabel, browserBannerText, activeJobForBucket } =
+const { isActiveStatus, activePercent, phaseLabel, browserBannerText } =
   await import(moduleUrl);
 
 const job = (over = {}) => ({
@@ -56,14 +56,5 @@ assert.ok(phaseLabel(job({ phase: 'references' })).startsWith('Finalizing'));
 assert.ok(browserBannerText(job()).includes('49%'));
 assert.ok(browserBannerText(job()).includes('readable'));
 assert.ok(!browserBannerText(job({ status: 'queued', percent: null })).includes('%'), 'no % when indeterminate');
-
-// ── activeJobForBucket ──────────────────────────────────────────────────────
-const jobs = [
-  job({ id: 1, bucket: 'done-bucket', status: 'completed' }),
-  job({ id: 2, bucket: 'PIPPO', status: 'running' }),
-];
-assert.equal(activeJobForBucket(jobs, 'pippo')?.id, 2, 'case-insensitive match');
-assert.equal(activeJobForBucket(jobs, 'done-bucket'), null, 'terminal jobs are not active');
-assert.equal(activeJobForBucket(jobs, 'other'), null);
 
 console.log('maintenance status regression checks passed');

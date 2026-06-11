@@ -12,7 +12,6 @@
  * reads as subordinate to a real card header: title at 15px/600 (between
  * SectionHeader's 17 and FormField's 13.5), hint at FormField's 12.5 muted.
  */
-import type { ReactNode } from 'react';
 import { Spin } from 'antd';
 import { useColors } from '../ThemeContext';
 
@@ -51,62 +50,3 @@ export function LoadingState({ label }: { label?: string }) {
   );
 }
 
-/**
- * Centered empty state: muted icon, title, optional hint sentence, optional
- * action button (already-rendered AntD <Button>, passed as `action`).
- */
-export function EmptyState({
-  icon,
-  title,
-  hint,
-  action,
-}: {
-  icon: ReactNode;
-  title: ReactNode;
-  hint?: ReactNode;
-  action?: ReactNode;
-}) {
-  const { TEXT_PRIMARY, TEXT_MUTED, TEXT_FAINT } = useColors();
-  return (
-    <div
-      style={{
-        textAlign: 'center',
-        padding: '48px 24px',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-      }}
-    >
-      <div style={{ fontSize: 32, color: TEXT_FAINT, lineHeight: 1, marginBottom: 12 }}>
-        {icon}
-      </div>
-      <div
-        style={{
-          fontFamily: 'var(--font-ui)',
-          fontSize: 15,
-          fontWeight: 600,
-          color: TEXT_PRIMARY,
-          lineHeight: 1.3,
-          letterSpacing: '-0.005em',
-        }}
-      >
-        {title}
-      </div>
-      {hint && (
-        <div
-          style={{
-            fontFamily: 'var(--font-ui)',
-            fontSize: 12.5,
-            color: TEXT_MUTED,
-            lineHeight: 1.45,
-            marginTop: 6,
-            maxWidth: 380,
-          }}
-        >
-          {hint}
-        </div>
-      )}
-      {action && <div style={{ marginTop: 16 }}>{action}</div>}
-    </div>
-  );
-}

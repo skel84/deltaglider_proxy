@@ -15,6 +15,7 @@ export * from './adminApi/backends';
 export * from './adminApi/recovery';
 export * from './adminApi/replication';
 export * from './adminApi/lifecycle';
+export * from './adminApi/jobs';
 export * from './adminApi/maintenance';
 export * from './adminApi/authProviders';
 export * from './adminApi/mappingRules';

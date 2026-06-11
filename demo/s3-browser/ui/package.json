@@ -44,6 +44,8 @@
     "test:browser-nav": "node scripts/browser-nav-regression-test.mjs",
     "test:dropped-files": "node scripts/dropped-files-regression-test.mjs",
     "test:maintenance-status": "node scripts/maintenance-status-regression-test.mjs",
+    "test:jobs-view": "node scripts/jobs-view-regression-test.mjs",
+    "test:admin-path-remap": "node scripts/admin-path-remap-regression-test.mjs",
     "test:destination-suggest": "node scripts/destination-suggest-regression-test.mjs",
     "e2e": "playwright test",
     "typecheck": "tsc --noEmit",

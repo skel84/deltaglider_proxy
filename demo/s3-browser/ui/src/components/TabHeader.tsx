@@ -9,10 +9,18 @@ interface Props {
   icon: React.ReactNode;
   title: string;
   description: string;
+  /** Save-model badge: tells the operator the page's edit contract. */
+  saveModel?: 'immediate' | 'review';
 }
 
-export default function TabHeader({ icon, title, description }: Props) {
+export default function TabHeader({ icon, title, description, saveModel }: Props) {
   const colors = useColors();
+  const badge =
+    saveModel === 'immediate'
+      ? { text: 'Saves immediately', tone: colors.ACCENT_BLUE }
+      : saveModel === 'review'
+        ? { text: 'Review & apply', tone: colors.ACCENT_AMBER }
+        : null;
 
   return (
     <div
@@ -76,6 +84,29 @@ export default function TabHeader({ icon, title, description }: Props) {
           {description}
         </div>
       </div>
+      {badge && (
+        <span
+          title={
+            badge.text === 'Saves immediately'
+              ? 'Every change on this page takes effect as soon as you make it.'
+              : 'Changes are staged; nothing is live until you review the diff and Apply.'
+          }
+          style={{
+            flexShrink: 0,
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: 0.5,
+            textTransform: 'uppercase',
+            padding: '3px 10px',
+            borderRadius: 10,
+            background: `${badge.tone}18`,
+            color: badge.tone,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {badge.text}
+        </span>
+      )}
     </div>
   );
 }
