@@ -399,6 +399,17 @@ async fn drain_once(
         }
 
         for rule in matched {
+            // Maintenance gate: the destination bucket is being rewritten in
+            // place (re-encryption). Stall this key's events — the cursor
+            // does not advance past them, so they replay after the job ends.
+            if state.maintenance_gate.is_busy(&rule.destination.bucket) {
+                debug!(
+                    "event consumer: rule '{}' deferred — destination '{}' under maintenance",
+                    rule.name, rule.destination.bucket
+                );
+                failed_ids.insert(max_id_for_key);
+                continue;
+            }
             // Respect the SAME per-rule lease the scheduler/reconcile uses, so
             // fast-path + reconcile + multi-instance are mutually exclusive.
             //
@@ -526,6 +537,7 @@ async fn apply_action(
                             metadata_key: REPLICATION_RULE_METADATA_KEY,
                             metadata_value: &rule.name,
                         }),
+                        strip_user_metadata_keys: &[],
                         operation: "replication-event",
                     };
                     let outcome = copy_object_with_retries(engine, transfer).await?;

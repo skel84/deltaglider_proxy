@@ -371,6 +371,7 @@ async fn execute_action(
                         metadata_key: LIFECYCLE_RULE_METADATA_KEY,
                         metadata_value: &rule.name,
                     }),
+                    strip_user_metadata_keys: &[],
                     operation: "lifecycle transition",
                 },
             )

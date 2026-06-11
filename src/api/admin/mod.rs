@@ -13,6 +13,7 @@ mod event_outbox;
 pub mod external_auth;
 mod groups;
 mod lifecycle;
+pub(crate) mod maintenance;
 pub(crate) mod objects;
 pub(crate) mod replication;
 mod savings;
@@ -76,6 +77,10 @@ pub use lifecycle::{
     failures as lifecycle_failures, history as lifecycle_history,
     list_rules as lifecycle_list_rules, preview as lifecycle_preview, run_now as lifecycle_run_now,
     LifecycleOverview, LifecycleRuleOverview,
+};
+pub use maintenance::{
+    bucket_status as maintenance_bucket_status, cancel_job as maintenance_cancel_job,
+    list_jobs as maintenance_list_jobs, start_reencrypt as maintenance_start_reencrypt,
 };
 pub use objects::{
     bulk_delete as bulk_delete_objects, copy_objects, download_zip, list_all as list_all_objects,

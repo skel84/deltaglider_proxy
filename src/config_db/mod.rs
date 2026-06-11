@@ -25,7 +25,7 @@ pub struct ConfigDb {
 }
 
 /// Schema version — bump when adding migrations.
-const SCHEMA_VERSION: i32 = 12;
+const SCHEMA_VERSION: i32 = 13;
 
 pub(crate) mod auth_providers;
 mod declarative;
@@ -520,6 +520,53 @@ impl ConfigDb {
             )?;
             info!(
                 "Migrated config DB schema from v{} to v12 (added listener_cursors)",
+                version
+            );
+        }
+
+        if version < 13 {
+            // v13: one-off maintenance jobs (initially: re-encrypt a bucket's
+            // existing objects after a backend encryption change). Modeled on
+            // the replication tables: continuation token for resume, leader
+            // lease for HA single-flight, a bounded failure ring. The partial
+            // unique index enforces at most ONE active job per bucket.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS maintenance_jobs (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind               TEXT NOT NULL DEFAULT 'reencrypt',
+                    bucket             TEXT NOT NULL,
+                    status             TEXT NOT NULL DEFAULT 'queued',
+                    phase              TEXT NOT NULL DEFAULT 'counting',
+                    objects_total      INTEGER,
+                    objects_done       INTEGER NOT NULL DEFAULT 0,
+                    objects_skipped    INTEGER NOT NULL DEFAULT 0,
+                    objects_failed     INTEGER NOT NULL DEFAULT 0,
+                    bytes_done         INTEGER NOT NULL DEFAULT 0,
+                    continuation_token TEXT,
+                    last_error         TEXT,
+                    triggered_by       TEXT,
+                    leader_instance_id TEXT,
+                    leader_expires_at  INTEGER,
+                    created_at         INTEGER NOT NULL,
+                    started_at         INTEGER,
+                    finished_at        INTEGER,
+                    updated_at         INTEGER NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_maint_active_bucket
+                    ON maintenance_jobs(bucket)
+                    WHERE status IN ('queued','running','cancelling');
+                CREATE TABLE IF NOT EXISTS maintenance_failures (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id      INTEGER NOT NULL,
+                    object_key  TEXT NOT NULL,
+                    error       TEXT NOT NULL,
+                    created_at  INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_maint_failures_job
+                    ON maintenance_failures(job_id, created_at DESC);",
+            )?;
+            info!(
+                "Migrated config DB schema from v{} to v13 (added maintenance job tables)",
                 version
             );
         }

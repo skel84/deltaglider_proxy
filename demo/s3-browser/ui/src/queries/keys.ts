@@ -53,6 +53,12 @@ export const qk = {
   prefixUsage: (bucket: string, prefix: string) =>
     ['prefix-usage', bucket, prefix] as const,
 
+  // ── Maintenance (re-encryption jobs) ────────────────────────────
+  maintenance: {
+    list: () => ['maintenance'] as const,
+    bucket: (bucket: string) => ['maintenance', 'bucket', bucket] as const,
+  },
+
   // ── Replication ─────────────────────────────────────────────────
   replication: {
     overview: () => ['replication'] as const,

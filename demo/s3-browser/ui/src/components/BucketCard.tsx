@@ -21,8 +21,8 @@
  * for pre-provisioning drafts).
  */
 import { useState } from 'react';
-import { Button, Collapse, Input, InputNumber, Modal, Radio, Select, Typography } from 'antd';
-import { DownOutlined, RightOutlined } from '@ant-design/icons';
+import { Button, Collapse, Input, InputNumber, Modal, Progress, Radio, Select, Typography } from 'antd';
+import { DownOutlined, RightOutlined, SyncOutlined } from '@ant-design/icons';
 import type { BackendInfo } from '../adminApi';
 import { resolveBackendFor, describeEncryption } from '../encryptionUi';
 import { useColors } from '../ThemeContext';
@@ -32,6 +32,9 @@ import type { BucketPolicyRow, PrefixEntry } from './bucketPolicyPayload';
 import { DEFAULT_ROW_FIELDS, freshId, isAllDefaultRow } from './bucketPolicyPayload';
 import PrefixListEditor from './PrefixListEditor';
 import MigrateBucketModal from './MigrateBucketModal';
+import type { MaintenanceJobView } from '../maintenanceStatus';
+import { activePercent, phaseLabel } from '../maintenanceStatus';
+import { cancelMaintenanceJob } from '../adminApi';
 
 const { Text } = Typography;
 
@@ -59,6 +62,10 @@ interface CardProps {
   /** Draft-name autocomplete options. */
   availableBuckets?: string[];
   inputRadius: { borderRadius: number };
+  /** Active maintenance (re-encryption) job for this bucket, if any. */
+  maintenanceJob?: MaintenanceJobView | null;
+  /** Start the one-off re-encrypt job for this bucket (the [Later] path). */
+  onReencrypt?: () => void;
 }
 
 /** Small status chip used in the collapsed row. */
@@ -104,6 +111,8 @@ export default function BucketCard({
   onRemoveDraft,
   availableBuckets = [],
   inputRadius,
+  maintenanceJob = null,
+  onReencrypt,
 }: CardProps) {
   const colors = useColors();
   const [migrateOpen, setMigrateOpen] = useState(false);
@@ -156,6 +165,18 @@ export default function BucketCard({
     eff.compression !== null || eff.max_delta_ratio !== null || eff.alias !== '' || eff.quota_bytes !== null;
 
   const chips: React.ReactNode[] = [];
+  if (maintenanceJob) {
+    const pct = activePercent(maintenanceJob);
+    chips.push(
+      <Chip
+        key="busy"
+        tone={colors.ACCENT_AMBER}
+        title="A re-encryption job is rewriting this bucket. Reads work; uploads and deletes are temporarily rejected."
+      >
+        <SyncOutlined spin style={{ fontSize: 10 }} /> busy{pct != null ? ` ${pct}%` : ''}
+      </Chip>
+    );
+  }
   if (!real) {
     chips.push(
       <Chip key="missing" tone={colors.ACCENT_AMBER} title="No bucket with this name exists yet — the policy applies once it's created.">
@@ -293,6 +314,40 @@ export default function BucketCard({
         <span style={{ flex: 1 }} />
         <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>{chips}</span>
       </div>
+
+      {/* ── Maintenance progress: visible on every render of the row ── */}
+      {maintenanceJob && (
+        <div style={{ padding: '0 14px 10px', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <Progress
+            percent={activePercent(maintenanceJob) ?? 100}
+            status="active"
+            showInfo={activePercent(maintenanceJob) != null}
+            size="small"
+            strokeColor={colors.ACCENT_AMBER}
+            style={{ flex: 1, margin: 0 }}
+          />
+          <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+            {phaseLabel(maintenanceJob)}
+          </Text>
+          {maintenanceJob.status !== 'cancelling' && (
+            <Button
+              size="small"
+              type="text"
+              danger
+              style={{ fontSize: 11, padding: '0 4px' }}
+              title="Stop the job. Already-rewritten objects stay rewritten (the job is idempotent — re-running later skips them)."
+              onClick={(e) => {
+                e.stopPropagation();
+                void cancelMaintenanceJob(maintenanceJob.id).catch(() => {
+                  /* next poll reflects the real state either way */
+                });
+              }}
+            >
+              Cancel
+            </Button>
+          )}
+        </div>
+      )}
 
       {/* ── Expanded editor: Public access / Placement / Advanced ── */}
       {expanded && (
@@ -503,8 +558,20 @@ export default function BucketCard({
           />
 
           {/* Row-level actions. Reset stages defaults (reviewed on Apply). */}
-          {(hasOverrides || onRemoveDraft) && (
-            <div style={{ marginTop: 10, display: 'flex', gap: 12 }}>
+          {(hasOverrides || onRemoveDraft || (onReencrypt && !maintenanceJob)) && (
+            <div style={{ marginTop: 10, display: 'flex', gap: 12, alignItems: 'center' }}>
+              {onReencrypt && !maintenanceJob && (
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<SyncOutlined style={{ fontSize: 11 }} />}
+                  style={{ fontSize: 11, padding: '0 4px' }}
+                  title="Rewrite every object so its at-rest encryption matches the backend's current setting"
+                  onClick={onReencrypt}
+                >
+                  Re-encrypt existing objects
+                </Button>
+              )}
               {hasOverrides && (
                 <Button
                   size="small"

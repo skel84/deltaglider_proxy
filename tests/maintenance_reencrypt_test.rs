@@ -1,0 +1,445 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! Integration tests for the one-off bucket re-encryption maintenance job
+//! (`src/maintenance/`): durable job rows, the per-bucket WRITE gate
+//! (503 SlowDown on writes, reads stay up), idempotent skip, deltaspace
+//! reference re-encryption, and the decrypt-on-disable marker-stripping
+//! regression.
+//!
+//! Filesystem backend only — no MinIO needed.
+
+mod common;
+
+use common::{
+    admin_http_client, generate_binary, get_bytes, mutate_binary, put_object, TestServer,
+};
+
+const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const KEY_ID: &str = "maint-test-key-1";
+const PLAINTEXT_MARKER: &[u8] = b"MAINT_PLAINTEXT_MARKER_0123456789";
+
+// ── Admin API helpers ──────────────────────────────────────────────────────
+
+async fn put_storage_encryption(admin: &reqwest::Client, endpoint: &str, body: serde_json::Value) {
+    let resp = admin
+        .put(format!("{endpoint}/_/api/admin/config/section/storage"))
+        .json(&serde_json::json!({ "backend_encryption": body }))
+        .send()
+        .await
+        .expect("section PUT failed");
+    assert!(
+        resp.status().is_success(),
+        "storage section PUT failed: {} {}",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+}
+
+async fn enable_encryption(admin: &reqwest::Client, endpoint: &str) {
+    put_storage_encryption(
+        admin,
+        endpoint,
+        serde_json::json!({ "mode": "aes256-gcm-proxy", "key": KEY, "key_id": KEY_ID }),
+    )
+    .await;
+}
+
+async fn start_reencrypt(
+    admin: &reqwest::Client,
+    endpoint: &str,
+    bucket: &str,
+) -> serde_json::Value {
+    let resp = admin
+        .post(format!("{endpoint}/_/api/admin/maintenance/reencrypt"))
+        .json(&serde_json::json!({ "buckets": [bucket] }))
+        .send()
+        .await
+        .expect("reencrypt POST failed");
+    assert!(
+        resp.status().is_success(),
+        "reencrypt POST failed: {}",
+        resp.status()
+    );
+    resp.json().await.expect("reencrypt response not JSON")
+}
+
+/// Poll the session-light bucket endpoint until no job is active.
+async fn wait_job_done(admin: &reqwest::Client, endpoint: &str, bucket: &str) {
+    for _ in 0..600 {
+        let v: serde_json::Value = admin
+            .get(format!(
+                "{endpoint}/_/api/admin/maintenance/bucket/{bucket}"
+            ))
+            .send()
+            .await
+            .expect("status GET failed")
+            .json()
+            .await
+            .expect("status not JSON");
+        if v["active"].is_null() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("maintenance job on '{bucket}' did not finish within 60s");
+}
+
+/// Newest job row from the admin list.
+async fn newest_job(admin: &reqwest::Client, endpoint: &str) -> serde_json::Value {
+    let v: serde_json::Value = admin
+        .get(format!("{endpoint}/_/api/admin/maintenance"))
+        .send()
+        .await
+        .expect("jobs GET failed")
+        .json()
+        .await
+        .expect("jobs not JSON");
+    v["jobs"][0].clone()
+}
+
+async fn outbox_total(admin: &reqwest::Client, endpoint: &str) -> i64 {
+    let v: serde_json::Value = admin
+        .get(format!("{endpoint}/_/api/admin/event-outbox?limit=1"))
+        .send()
+        .await
+        .expect("outbox GET failed")
+        .json()
+        .await
+        .expect("outbox not JSON");
+    v["total"].as_i64().unwrap_or(0)
+}
+
+/// Seed: `n` plaintext text objects (each embedding the marker) + a
+/// similar .zip pair under `rel/` so the bucket grows a deltaspace with
+/// a reference.bin.
+async fn seed_bucket(http: &reqwest::Client, endpoint: &str, bucket: &str, n: usize) -> Vec<u8> {
+    for i in 0..n {
+        let body = [PLAINTEXT_MARKER, format!(" object {i}").as_bytes()].concat();
+        put_object(
+            http,
+            endpoint,
+            bucket,
+            &format!("plain-{i:02}.json"),
+            body,
+            "application/json",
+        )
+        .await;
+    }
+    let base = generate_binary(100_000, 42);
+    // mutate_binary is rng-based, NOT deterministic — return the exact
+    // bytes so the post-job roundtrip can compare against them.
+    let variant = mutate_binary(&base, 0.01);
+    put_object(
+        http,
+        endpoint,
+        bucket,
+        "rel/base.zip",
+        base,
+        "application/zip",
+    )
+    .await;
+    put_object(
+        http,
+        endpoint,
+        bucket,
+        "rel/v1.zip",
+        variant.clone(),
+        "application/zip",
+    )
+    .await;
+    variant
+}
+
+fn assert_file_lacks_marker(path: &std::path::Path) {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    assert!(
+        !bytes
+            .windows(PLAINTEXT_MARKER.len())
+            .any(|w| w == PLAINTEXT_MARKER),
+        "{path:?} still contains plaintext marker — not encrypted at rest"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Full enable → re-encrypt cycle
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_reencrypt_full_cycle() {
+    let bucket = "maintbkt";
+    let server = TestServer::builder().bucket(bucket).build().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+
+    let v1_expected = seed_bucket(&http, &endpoint, bucket, 40).await;
+
+    let admin = admin_http_client(&endpoint).await;
+    let outbox_before = outbox_total(&admin, &endpoint).await;
+
+    // Flip the backend to proxy-AES. New writes encrypt; the 42 seeded
+    // objects are still plaintext on disk.
+    enable_encryption(&admin, &endpoint).await;
+
+    let res = start_reencrypt(&admin, &endpoint, bucket).await;
+    assert_eq!(
+        res["started"][0]["bucket"], bucket,
+        "job should start: {res}"
+    );
+
+    // ── While the job runs: writes 503-SlowDown, reads stay up. ──
+    // The gate arms synchronously inside the POST handler, so this PUT
+    // is deterministically gated unless the whole 42-object job already
+    // finished — which a fresh proxy can't do in one local round-trip.
+    let put_resp = http
+        .put(format!("{endpoint}/{bucket}/gate-probe.txt"))
+        .body("blocked?")
+        .send()
+        .await
+        .expect("gated PUT request failed to send");
+    assert_eq!(
+        put_resp.status(),
+        503,
+        "writes must be gated during the job"
+    );
+    let put_body = put_resp.text().await.unwrap_or_default();
+    assert!(
+        put_body.contains("SlowDown"),
+        "gated write should be an S3 SlowDown error, got: {put_body}"
+    );
+    let read_back = get_bytes(&http, &endpoint, bucket, "plain-00.json").await;
+    assert!(
+        read_back.starts_with(PLAINTEXT_MARKER),
+        "reads must keep working during the job"
+    );
+
+    wait_job_done(&admin, &endpoint, bucket).await;
+
+    // ── Job row: completed, everything rewritten, nothing failed. ──
+    let job = newest_job(&admin, &endpoint).await;
+    assert_eq!(job["status"], "completed", "job: {job}");
+    assert_eq!(job["objects_failed"], 0, "job: {job}");
+    assert_eq!(job["objects_total"], 42, "job: {job}");
+    assert_eq!(job["objects_done"], 42, "all objects were plaintext: {job}");
+    assert_eq!(job["percent"], 100, "job: {job}");
+
+    // The dg-encrypted / dg-encryption-key-id markers are INTERNAL —
+    // the S3 adapter strips dg-* from client responses (transparency),
+    // so they are asserted behaviorally: the second run below skipping
+    // every object proves each one carries the marker WITH the matching
+    // key id (that's exactly the `needs_rewrite` predicate).
+
+    // ── On-disk ciphertext: objects AND the deltaspace reference. ──
+    let data_dir = server
+        .data_dir()
+        .expect("filesystem backend has a data dir");
+    assert_file_lacks_marker(
+        &data_dir
+            .join(bucket)
+            .join("deltaspaces")
+            .join("plain-00.json"),
+    );
+    assert_file_lacks_marker(
+        &data_dir
+            .join(bucket)
+            .join("deltaspaces")
+            .join("plain-39.json"),
+    );
+    let reference = data_dir
+        .join(bucket)
+        .join("deltaspaces")
+        .join("rel")
+        .join("reference.bin");
+    assert!(reference.exists(), "deltaspace reference should exist");
+    let ref_bytes = std::fs::read(&reference).unwrap();
+    let probe = &generate_binary(100_000, 42)[..64];
+    assert!(
+        !ref_bytes.windows(64).any(|w| w == probe),
+        "reference.bin should be ciphertext after the references phase"
+    );
+
+    // ── Reads reconstruct everything transparently. ──
+    for key in [
+        "plain-00.json",
+        "plain-39.json",
+        "rel/base.zip",
+        "rel/v1.zip",
+    ] {
+        let bytes = get_bytes(&http, &endpoint, bucket, key).await;
+        assert!(!bytes.is_empty(), "GET {key} should round-trip");
+    }
+    let v1 = get_bytes(&http, &endpoint, bucket, "rel/v1.zip").await;
+    assert_eq!(v1, v1_expected, "delta reconstruction after re-encryption");
+
+    // ── No spurious object events from the rewrite. ──
+    assert_eq!(
+        outbox_total(&admin, &endpoint).await,
+        outbox_before,
+        "the maintenance job must not enqueue outbox events"
+    );
+
+    // ── Gate released: writes work again. ──
+    put_object(
+        &http,
+        &endpoint,
+        bucket,
+        "after.txt",
+        b"after".to_vec(),
+        "text/plain",
+    )
+    .await;
+
+    // ── Second run is a pure no-op (idempotency). ──
+    start_reencrypt(&admin, &endpoint, bucket).await;
+    wait_job_done(&admin, &endpoint, bucket).await;
+    let job2 = newest_job(&admin, &endpoint).await;
+    assert_eq!(job2["status"], "completed", "job2: {job2}");
+    assert_eq!(
+        job2["objects_done"], 0,
+        "everything already encrypted: {job2}"
+    );
+    assert_eq!(job2["objects_skipped"], 43, "42 seeded + after.txt: {job2}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Disable → decrypt (the stale-marker corruption regression)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_decrypt_after_disable_strips_markers() {
+    let bucket = "maintdec";
+    let server = TestServer::builder().bucket(bucket).build().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+    let admin = admin_http_client(&endpoint).await;
+
+    // Write objects while encryption is ON — they land encrypted.
+    enable_encryption(&admin, &endpoint).await;
+    let body = [PLAINTEXT_MARKER, b" secret"].concat();
+    put_object(
+        &http,
+        &endpoint,
+        bucket,
+        "doc.json",
+        body.clone(),
+        "text/plain",
+    )
+    .await;
+    let data_dir = server.data_dir().unwrap();
+    assert_file_lacks_marker(&data_dir.join(bucket).join("deltaspaces").join("doc.json"));
+
+    // Disable encryption, keeping the legacy shim so the job (and any
+    // client) can still READ the old objects during the transition.
+    put_storage_encryption(
+        &admin,
+        &endpoint,
+        serde_json::json!({ "mode": "none", "legacy_key": KEY, "legacy_key_id": KEY_ID }),
+    )
+    .await;
+
+    start_reencrypt(&admin, &endpoint, bucket).await;
+    wait_job_done(&admin, &endpoint, bucket).await;
+    let job = newest_job(&admin, &endpoint).await;
+    assert_eq!(job["status"], "completed", "job: {job}");
+    assert_eq!(job["objects_failed"], 0, "job: {job}");
+    assert_eq!(job["objects_done"], 1, "job: {job}");
+
+    // The marker must be GONE — a decrypted object that kept its
+    // dg-encrypted metadata would fail AEAD on every read. The GET below
+    // succeeding IS the regression assertion (adapter strips dg-* from
+    // responses, so it can't be checked via HEAD).
+    // Plaintext on disk, readable through the API.
+    let disk = std::fs::read(data_dir.join(bucket).join("deltaspaces").join("doc.json")).unwrap();
+    assert!(
+        disk.windows(PLAINTEXT_MARKER.len())
+            .any(|w| w == PLAINTEXT_MARKER),
+        "object should be plaintext on disk after decrypt"
+    );
+    assert_eq!(get_bytes(&http, &endpoint, bucket, "doc.json").await, body);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Validation + cancel
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_reencrypt_validation_errors() {
+    let bucket = "maintval";
+    let server = TestServer::builder().bucket(bucket).build().await;
+    let endpoint = server.endpoint();
+    let admin = admin_http_client(&endpoint).await;
+
+    let res = start_reencrypt(&admin, &endpoint, "nosuchbucket").await;
+    assert!(res["started"].as_array().unwrap().is_empty(), "{res}");
+    assert!(
+        res["errors"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not found"),
+        "{res}"
+    );
+
+    // Duplicate-active-job conflict.
+    let http = reqwest::Client::new();
+    let _ = seed_bucket(&http, &endpoint, bucket, 30).await;
+    let admin2 = admin_http_client(&endpoint).await;
+    enable_encryption(&admin2, &endpoint).await;
+    let first = start_reencrypt(&admin2, &endpoint, bucket).await;
+    assert_eq!(first["started"][0]["bucket"], bucket, "{first}");
+    let dup = start_reencrypt(&admin2, &endpoint, bucket).await;
+    assert!(
+        dup["errors"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("already active"),
+        "{dup}"
+    );
+    wait_job_done(&admin2, &endpoint, bucket).await;
+}
+
+#[tokio::test]
+async fn test_cancel_releases_gate() {
+    let bucket = "maintcan";
+    let server = TestServer::builder().bucket(bucket).build().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+    let admin = admin_http_client(&endpoint).await;
+
+    let _ = seed_bucket(&http, &endpoint, bucket, 60).await;
+    enable_encryption(&admin, &endpoint).await;
+    let res = start_reencrypt(&admin, &endpoint, bucket).await;
+    let job_id = res["started"][0]["job_id"].as_i64().expect("job id");
+
+    let cancel = admin
+        .post(format!(
+            "{endpoint}/_/api/admin/maintenance/jobs/{job_id}/cancel"
+        ))
+        .send()
+        .await
+        .expect("cancel POST failed");
+    // Either the job was still active (200: cancelled/cancelling) or it
+    // already completed on a fast machine (409). Both are valid ends.
+    assert!(
+        cancel.status().is_success() || cancel.status() == 409,
+        "cancel: {}",
+        cancel.status()
+    );
+
+    wait_job_done(&admin, &endpoint, bucket).await;
+    let job = newest_job(&admin, &endpoint).await;
+    let status = job["status"].as_str().unwrap();
+    assert!(
+        status == "cancelled" || status == "completed",
+        "terminal state expected, got {job}"
+    );
+
+    // Whatever the outcome, the gate must be released.
+    put_object(
+        &http,
+        &endpoint,
+        bucket,
+        "post-cancel.txt",
+        b"ok".to_vec(),
+        "text/plain",
+    )
+    .await;
+}

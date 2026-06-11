@@ -426,6 +426,7 @@ jobs:
             --test iam_mode_test \
             --test iam_variables_clone_test \
             --test lifecycle_test \
+            --test maintenance_reencrypt_test \
             --test quota_test \
             --test replication_test \
             --test savings_test \
@@ -657,6 +658,7 @@ jobs:
           npm run test:keyboard
           npm run test:browser-nav
           npm run test:dropped-files
+          npm run test:maintenance-status
           npm run test:destination-suggest
       - name: npm audit
         run: cd demo/s3-browser/ui && npm audit --audit-level=high || true  # warn-only

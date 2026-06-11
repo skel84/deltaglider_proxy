@@ -611,6 +611,8 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // --- App state ---
     let usage_scanner = Arc::new(UsageScanner::new());
+    let maintenance_gate = Arc::new(deltaglider_proxy::maintenance::gate::MaintenanceGate::new());
+    let maintenance_notify = Arc::new(tokio::sync::Notify::new());
     let state = Arc::new(AppState {
         engine: ArcSwap::from_pointee(engine),
         multipart,
@@ -618,12 +620,37 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         usage_scanner: usage_scanner.clone(),
         config_db: config_db.clone(),
         form_post_replay: Arc::new(dashmap::DashMap::new()),
+        maintenance_gate: maintenance_gate.clone(),
+        maintenance_notify: maintenance_notify.clone(),
     });
+
+    // Re-arm the maintenance write-gate for jobs that survived a restart
+    // (boot reconcile re-queued them). MUST happen before the S3 router
+    // serves: a gated bucket's writes stay blocked across the restart.
+    if let Some(db) = config_db.as_ref() {
+        let db = db.lock().await;
+        match db.maintenance_active_buckets() {
+            Ok(buckets) => {
+                for b in buckets {
+                    tracing::info!("maintenance: re-arming write gate for bucket '{}'", b);
+                    maintenance_gate.set_busy(&b);
+                }
+            }
+            Err(e) => tracing::warn!("maintenance: gate re-arm failed: {}", e),
+        }
+    }
 
     // --- Background monitors ---
     spawn_cache_monitor(&state, &metrics);
 
     if !config_db_mismatch {
+        if let Some(db) = config_db.as_ref() {
+            deltaglider_proxy::maintenance::worker::spawn_worker(
+                shared_config.clone(),
+                db.clone(),
+                state.clone(),
+            );
+        }
         deltaglider_proxy::lifecycle::scheduler::spawn_scheduler(
             shared_config.clone(),
             config_db.clone(),

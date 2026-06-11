@@ -520,6 +520,7 @@ pub async fn migrate_bucket(
                     metadata_key: "dg-migration",
                     metadata_value: &provenance_value,
                 }),
+                strip_user_metadata_keys: &[],
                 operation: "migrate",
             };
             match crate::transfer::copy_object_with_retries(&engine, req).await {

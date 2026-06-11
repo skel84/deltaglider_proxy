@@ -8,6 +8,7 @@ import { createBackend, deleteBackend, testS3Connection, updateAdminConfig, putS
 import { useAdminConfig } from '../queries/config';
 import { useBackends, useBucketOrigins } from '../queries/backends';
 import CreateBucketModal from './CreateBucketModal';
+import ReencryptProposalModal, { type ReencryptTransition } from './ReencryptProposalModal';
 import { useColors } from '../ThemeContext';
 import { useCardStyles } from './shared-styles';
 import SectionHeader from './SectionHeader';
@@ -53,6 +54,13 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
   // "Create bucket here" → opens the shared CreateBucketModal pre-targeted to a
   // specific backend. This panel only renders for admins (admin route).
   const [createBucketBackend, setCreateBucketBackend] = useState<string | null>(null);
+  // Post-encryption-apply proposal: offer the one-off re-encrypt job for
+  // the changed backend's buckets (enable / rotate / disable).
+  const [reencryptProposal, setReencryptProposal] = useState<{
+    transition: ReencryptTransition;
+    backendName: string;
+    buckets: string[];
+  } | null>(null);
   const loading = backendsQuery.isLoading;
   // Surface a load error (401 bubbles to the session-expired handler; anything
   // else renders in the Alert below).
@@ -264,6 +272,27 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
         message: `Encryption updated on backend '${backendName}'`,
       });
       await refresh();
+      // Existing objects keep their OLD at-rest state — propose the canned
+      // migration when the transition changes what "correct" looks like.
+      // prevMode comes from the pre-apply backends snapshot (render closure).
+      const prevMode = backends.find((b) => b.name === backendName)?.encryption?.mode;
+      const transition: ReencryptTransition | null =
+        patch.mode === 'aes256-gcm-proxy'
+          ? prevMode === 'aes256-gcm-proxy'
+            ? patch.key
+              ? 'rotate'
+              : null // settings-only change (e.g. legacy shim) — nothing to rewrite
+            : 'encrypt'
+          : patch.mode === 'none' && prevMode === 'aes256-gcm-proxy'
+            ? 'decrypt'
+            : null;
+      if (transition) {
+        const bucketsHere = (originsQuery.data?.buckets ?? [])
+          .filter((o) => (o.backend_name ?? defaultBackend) === backendName)
+          .map((o) => o.name)
+          .sort();
+        setReencryptProposal({ transition, backendName, buckets: bucketsHere });
+      }
     } catch (e) {
       if (e instanceof Error && !resultSet) {
         setSaveResult({ ok: false, message: e.message });
@@ -280,6 +309,13 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
 
   return (
     <div style={{ maxWidth: 700, margin: '0 auto', padding: 'clamp(16px, 3vw, 24px)' }}>
+      <ReencryptProposalModal
+        open={reencryptProposal !== null}
+        transition={reencryptProposal?.transition ?? 'encrypt'}
+        backendName={reencryptProposal?.backendName ?? ''}
+        buckets={reencryptProposal?.buckets ?? []}
+        onClose={() => setReencryptProposal(null)}
+      />
       <CreateBucketModal
         open={createBucketBackend !== null}
         presetBackend={createBucketBackend ?? undefined}

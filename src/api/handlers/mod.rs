@@ -65,6 +65,12 @@ pub struct AppState {
     /// TTLs because policy expirations vary from minutes to days).
     /// See `enforce_form_post_replay` in `handlers/form_post.rs`.
     pub form_post_replay: Arc<dashmap::DashMap<String, std::time::Instant>>,
+    /// Per-bucket WRITE gate for maintenance jobs (re-encryption). Layered
+    /// into the S3 router as middleware; admin handlers and background
+    /// writers consult it explicitly. See `src/maintenance/gate.rs`.
+    pub maintenance_gate: Arc<crate::maintenance::gate::MaintenanceGate>,
+    /// Wakes the maintenance worker immediately when a job is created.
+    pub maintenance_notify: Arc<tokio::sync::Notify>,
 }
 
 // ---------------------------------------------------------------------------

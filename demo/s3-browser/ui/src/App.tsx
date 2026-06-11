@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
-import { Layout, Spin, Empty, Grid, Button, Space } from 'antd';
+import { Layout, Spin, Empty, Grid, Button, Progress, Space } from 'antd';
 import useS3Browser from './useS3Browser';
 import TopBar from './components/TopBar';
 import BulkActionBar from './components/BulkActionBar';
+import { useBucketMaintenance } from './queries/maintenance';
+import { browserBannerText, phaseLabel, activePercent } from './maintenanceStatus';
 import Sidebar from './components/Sidebar';
 import ObjectTable from './components/ObjectTable';
 import InspectorPanel from './components/InspectorPanel';
@@ -97,6 +99,11 @@ export default function App() {
   // Fall back to the s3client module state during the brief window before the
   // first bucket is chosen / synced.
   const activeBucket = browser.bucket || getBucket();
+  // Maintenance (re-encryption) status for the active bucket. Polls fast
+  // while a job runs; the banner self-dismisses on completion. Reads keep
+  // working — only write affordances are disabled below.
+  const bucketMaintenance = useBucketMaintenance(view === 'browser' ? activeBucket || null : null).data?.active ?? null;
+  const bucketBusy = bucketMaintenance !== null;
   // Canonicalize the URL once a bucket is active but absent from the path
   // (landing at bare /_/browse: the Sidebar selects the first bucket into
   // s3client module state, but nothing put it in the URL). Without the bucket
@@ -293,19 +300,19 @@ export default function App() {
   // show Settings after whoami resolves admin/open/bootstrap authority.
   const canAdmin = identity?.mode === 'bootstrap' || identity?.mode === 'open' || identity?.user?.is_admin === true;
   const canCreateBucket = canUse(identity, 'admin');
-  const canWriteActivePrefix = Boolean(activeBucket) && canUse(identity, 'write', activeBucket, s3.prefix);
+  const canWriteActivePrefix = Boolean(activeBucket) && !bucketBusy && canUse(identity, 'write', activeBucket, s3.prefix);
   const uploadFallbackPrefix = writablePrefixes[0] ?? null;
   const uploadPrefix = canWriteActivePrefix
     ? s3.prefix
     : (uploadFallbackPrefix ?? s3.prefix);
-  const canUploadToActiveBucket = Boolean(activeBucket) && (canWriteActivePrefix || uploadFallbackPrefix !== null);
+  const canUploadToActiveBucket = Boolean(activeBucket) && !bucketBusy && (canWriteActivePrefix || uploadFallbackPrefix !== null);
   const selectedKeys = Array.from(s3.selectedKeys);
   const canReadSelected = Boolean(activeBucket) && selectedKeys.length > 0 && selectedKeys.every((selectedKey) =>
     selectedKey.startsWith('folder:')
       ? canUse(identity, 'read', activeBucket, selectedKey.slice('folder:'.length))
       : canUse(identity, 'read', activeBucket, selectedKey)
   );
-  const canDeleteSelected = Boolean(activeBucket) && selectedKeys.length > 0 && selectedKeys.every((selectedKey) =>
+  const canDeleteSelected = Boolean(activeBucket) && !bucketBusy && selectedKeys.length > 0 && selectedKeys.every((selectedKey) =>
     selectedKey.startsWith('folder:')
       ? canUse(identity, 'delete', activeBucket, selectedKey.slice('folder:'.length))
       : canUse(identity, 'delete', activeBucket, selectedKey)
@@ -460,6 +467,36 @@ export default function App() {
 
     return (
       <>
+        {bucketMaintenance && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 14,
+              padding: '10px 16px',
+              background: 'rgba(217, 119, 6, 0.10)',
+              borderBottom: '1px solid rgba(217, 119, 6, 0.35)',
+            }}
+          >
+            <Spin size="small" />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>
+                {browserBannerText(bucketMaintenance)}
+              </div>
+              <Progress
+                percent={activePercent(bucketMaintenance) ?? 100}
+                status="active"
+                showInfo={activePercent(bucketMaintenance) != null}
+                size="small"
+                strokeColor="#d97706"
+                style={{ margin: '4px 0 0', maxWidth: 420 }}
+              />
+            </div>
+            <span style={{ fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap' }}>
+              {phaseLabel(bucketMaintenance)}
+            </span>
+          </div>
+        )}
         {s3.selectedKeys.size > 0 && (
           <BulkActionBar
             selectedCount={s3.selectedKeys.size}

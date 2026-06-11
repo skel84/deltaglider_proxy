@@ -117,6 +117,14 @@ async fn run_due_rules(
             continue;
         }
 
+        if state.maintenance_gate.is_busy(&rule.bucket) {
+            info!(
+                "Lifecycle scheduler deferring rule '{}': bucket '{}' is under maintenance",
+                rule.name, rule.bucket
+            );
+            continue;
+        }
+
         info!("Lifecycle scheduler running rule '{}'", rule.name);
         let engine = state.engine.load().clone();
         match super::run_rule(

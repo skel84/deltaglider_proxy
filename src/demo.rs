@@ -130,6 +130,14 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
     let session_light = Router::new()
         .route("/_/api/admin/logout", post(admin::logout))
         .route("/_/api/admin/session", get(admin::check_session))
+        // Bucket maintenance status is session-light ON PURPOSE: non-admin
+        // browser users (S3BrowserLift) need to see "busy + progress" for
+        // the bucket they are viewing. The view carries only job
+        // status/phase/counts — no config detail.
+        .route(
+            "/_/api/admin/maintenance/bucket/:bucket",
+            get(admin::maintenance_bucket_status),
+        )
         .route(
             "/_/api/admin/session/s3-credentials",
             get(admin::get_s3_session_creds)
@@ -290,6 +298,18 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         // Replication: overview + per-rule controls. Session-gated,
         // not IAM-gated (admins manage replication the same way they
         // manage other storage config).
+        .route(
+            "/_/api/admin/maintenance",
+            get(admin::maintenance_list_jobs),
+        )
+        .route(
+            "/_/api/admin/maintenance/reencrypt",
+            post(admin::maintenance_start_reencrypt),
+        )
+        .route(
+            "/_/api/admin/maintenance/jobs/:id/cancel",
+            post(admin::maintenance_cancel_job),
+        )
         .route(
             "/_/api/admin/replication",
             get(admin::replication_list_rules),

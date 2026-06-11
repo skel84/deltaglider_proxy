@@ -174,11 +174,27 @@ fn detect_collisions(items: &[CopyItem], dest_prefix: &str) -> Vec<String> {
 // POST /_/api/admin/objects/copy
 // ---------------------------------------------------------------------------
 
+/// 409 when the bucket is under maintenance (re-encryption rewrites the
+/// bucket in place; admin writes bypass the S3 gate, so check explicitly).
+fn reject_if_under_maintenance(
+    state: &std::sync::Arc<crate::api::admin::AdminState>,
+    bucket: &str,
+) -> Result<(), (StatusCode, String)> {
+    if state.s3_state.maintenance_gate.is_busy(bucket) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("bucket '{bucket}' is temporarily read-only: maintenance in progress"),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn copy_objects(
     Extension(_gate): Extension<AdminGuiGate>,
     State(state): State<Arc<crate::api::admin::AdminState>>,
     Json(req): Json<CopyRequest>,
 ) -> Result<Json<CopyResponse>, (StatusCode, String)> {
+    reject_if_under_maintenance(&state, &req.dest_bucket)?;
     if req.items.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "no items to copy".into()));
     }
@@ -300,6 +316,8 @@ pub async fn move_objects(
     State(state): State<Arc<crate::api::admin::AdminState>>,
     Json(req): Json<MoveRequest>,
 ) -> Result<Json<MoveResponse>, (StatusCode, String)> {
+    reject_if_under_maintenance(&state, &req.dest_bucket)?;
+    reject_if_under_maintenance(&state, &req.source_bucket)?;
     if req.items.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "no items to move".into()));
     }
@@ -414,6 +432,7 @@ pub async fn bulk_delete(
     State(state): State<Arc<crate::api::admin::AdminState>>,
     Json(req): Json<DeleteRequest>,
 ) -> Result<Json<DeleteResponse>, (StatusCode, String)> {
+    reject_if_under_maintenance(&state, &req.bucket)?;
     if req.keys.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "no keys to delete".into()));
     }

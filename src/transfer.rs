@@ -28,6 +28,14 @@ pub(crate) struct ObjectTransferRequest<'a> {
     pub destination_bucket: &'a str,
     pub destination_key: &'a str,
     pub provenance: Option<TransferProvenance<'a>>,
+    /// User-metadata keys to DROP from the copied metadata before the
+    /// destination store. The re-encryption job uses this to shed stale
+    /// `dg-encrypted` / `dg-encryption-key-id` markers when rewriting
+    /// toward plaintext — copying them verbatim would make every later
+    /// read attempt AEAD decryption of plaintext and fail. The encrypting
+    /// wrapper re-stamps fresh markers on the store when the destination
+    /// backend encrypts, so stripping is always safe.
+    pub strip_user_metadata_keys: &'a [&'a str],
     pub operation: &'a str,
 }
 
@@ -102,6 +110,9 @@ async fn copy_object_once(
             provenance.metadata_key.to_string(),
             provenance.metadata_value.to_string(),
         );
+    }
+    for key in request.strip_user_metadata_keys {
+        user_metadata.remove(*key);
     }
 
     if let Some(mp_etag) = meta.multipart_etag.clone() {

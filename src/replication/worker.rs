@@ -239,6 +239,7 @@ pub async fn run_rule(
                     metadata_key: REPLICATION_RULE_METADATA_KEY,
                     metadata_value: &rule.name,
                 }),
+                strip_user_metadata_keys: &[],
                 operation: "replication",
             };
             match copy_object_with_retries(engine, transfer).await {

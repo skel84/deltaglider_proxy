@@ -34,8 +34,11 @@ import SectionHeader from './SectionHeader';
 import ApplyDialog from './ApplyDialog';
 import BucketCard from './BucketCard';
 import CreateBucketModal from './CreateBucketModal';
+import ReencryptProposalModal from './ReencryptProposalModal';
 import { useApplyHandler } from '../useDirtySection';
 import { useSectionEditor } from '../useSectionEditor';
+import { useMaintenanceJobs } from '../queries/maintenance';
+import { activeJobForBucket } from '../maintenanceStatus';
 import type { BucketPolicyRow, BucketPolicyPatch, PrefixEntry } from './bucketPolicyPayload';
 import { DEFAULT_ROW_FIELDS, buildBucketPayload, freshId, isAllDefaultRow, policyToRow } from './bucketPolicyPayload';
 
@@ -100,6 +103,11 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
   const [createOpen, setCreateOpen] = useState(false);
   /** Expanded row: `real:<name>` for buckets, the row `_id` for drafts. */
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  /** Manual "[Later]" re-encrypt action target. */
+  const [reencryptBucket, setReencryptBucket] = useState<string | null>(null);
+  // Active jobs drive the busy chip + progress bar; the query self-polls
+  // every 2s while any job is active and goes quiet otherwise.
+  const maintenanceJobs = useMaintenanceJobs().data?.jobs ?? [];
 
   useEffect(() => {
     if (cfg === null) onSessionExpired?.();
@@ -294,6 +302,8 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
                 onPatch={(patch) => patchBucket(name, patch)}
                 onPrefixesChange={prefixChangeFor(name)}
                 inputRadius={inputRadius}
+                maintenanceJob={activeJobForBucket(maintenanceJobs, name)}
+                onReencrypt={() => setReencryptBucket(name)}
               />
             );
           })}
@@ -354,6 +364,17 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
         )}
       </div>
 
+      <ReencryptProposalModal
+        open={reencryptBucket !== null}
+        transition="encrypt"
+        backendName={
+          reencryptBucket
+            ? (rowByName.get(reencryptBucket)?.backend || defaultBackend || 'default')
+            : ''
+        }
+        buckets={reencryptBucket ? [reencryptBucket] : []}
+        onClose={() => setReencryptBucket(null)}
+      />
       <CreateBucketModal
         open={createOpen}
         canAdmin

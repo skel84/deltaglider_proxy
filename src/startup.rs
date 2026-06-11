@@ -617,12 +617,21 @@ pub fn build_s3_router(
         ))
         .layer(middleware::from_fn(authorization_middleware))
         .layer(middleware::from_fn(sigv4_auth_middleware))
+        // Maintenance write-gate: runs after admission, before SigV4. A
+        // PERMANENT layer whose contents (the busy-bucket set) swap
+        // lock-free — unlike the admission chain it cannot be lost to a
+        // config rebuild mid-job. Writes to a busy bucket → 503 SlowDown;
+        // reads always pass. See src/maintenance/gate.rs.
+        .layer(middleware::from_fn(
+            deltaglider_proxy::maintenance::gate::maintenance_gate_middleware,
+        ))
         .layer(middleware::from_fn(
             deltaglider_proxy::admission::admission_middleware,
         ))
         .layer(axum::Extension(iam_state.clone()))
         .layer(axum::Extension(public_prefix_snapshot.clone()))
-        .layer(axum::Extension(admission_chain.clone()));
+        .layer(axum::Extension(admission_chain.clone()))
+        .layer(axum::Extension(state.maintenance_gate.clone()));
 
     if config_db_mismatch {
         error!(
@@ -728,6 +737,21 @@ pub fn init_config_db(
                 Ok(_) => {}
                 Err(err) => {
                     warn!("Failed to reconcile lifecycle runtime state on boot: {err}");
+                }
+            }
+            // Maintenance jobs are one-offs the operator explicitly started:
+            // interrupted ones go back to QUEUED with their cursor preserved
+            // (the worker resumes them), unlike replication's running→failed.
+            match db.maintenance_reconcile_on_boot() {
+                Ok(count) if count > 0 => {
+                    warn!(
+                        "Re-queued {count} maintenance job(s) interrupted by a previous process — \
+                         they will resume shortly"
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!("Failed to reconcile maintenance jobs on boot: {err}");
                 }
             }
             // Declarative IAM: the YAML is the source of truth, so reconcile it

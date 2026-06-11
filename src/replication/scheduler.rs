@@ -104,6 +104,14 @@ async fn run_due_rules(
             continue;
         }
 
+        if state.maintenance_gate.is_busy(&rule.destination.bucket) {
+            info!(
+                "Replication scheduler deferring rule '{}': destination '{}' is under maintenance",
+                rule.name, rule.destination.bucket
+            );
+            continue;
+        }
+
         info!("Replication scheduler running due rule '{}'", rule.name);
         let engine = state.engine.load().clone();
         if let Err(err) = run_rule(
