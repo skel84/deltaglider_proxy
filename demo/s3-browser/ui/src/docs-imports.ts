@@ -34,7 +34,11 @@ import REF_AUTHENTICATION from '../../../../docs/product/reference/authenticatio
 import REF_IAM_PERMISSIONS from '../../../../docs/product/reference/iam-permissions.md?raw';
 import REF_CLI from '../../../../docs/product/reference/cli.md?raw';
 import REF_METRICS from '../../../../docs/product/reference/metrics.md?raw';
-import REF_DELTA from '../../../../docs/product/reference/how-delta-works.md?raw';
+import EXP_DELTA from '../../../../docs/product/explanation/delta-compression.md?raw';
+import EXP_MULTIBACKEND from '../../../../docs/product/explanation/multi-backend-architecture.md?raw';
+import EXP_SECURITY from '../../../../docs/product/explanation/security-model.md?raw';
+import EXP_ENCRYPTION from '../../../../docs/product/explanation/encryption-at-rest.md?raw';
+import EXP_JOBS from '../../../../docs/product/explanation/jobs-and-durability.md?raw';
 import REF_ENCRYPTION from '../../../../docs/product/reference/encryption.md?raw';
 import REF_DECLARATIVE_IAM from '../../../../docs/product/reference/declarative-iam.md?raw';
 import REF_JOBS from '../../../../docs/product/reference/jobs.md?raw';
@@ -76,7 +80,11 @@ const CONTENT_BY_PATH: Record<string, string> = {
   'reference/iam-permissions': REF_IAM_PERMISSIONS,
   'reference/cli': REF_CLI,
   'reference/metrics': REF_METRICS,
-  'reference/how-delta-works': REF_DELTA,
+  'explanation/delta-compression': EXP_DELTA,
+  'explanation/multi-backend-architecture': EXP_MULTIBACKEND,
+  'explanation/security-model': EXP_SECURITY,
+  'explanation/encryption-at-rest': EXP_ENCRYPTION,
+  'explanation/jobs-and-durability': EXP_JOBS,
   'reference/encryption': REF_ENCRYPTION,
   'reference/declarative-iam': REF_DECLARATIVE_IAM,
   'reference/jobs': REF_JOBS,
