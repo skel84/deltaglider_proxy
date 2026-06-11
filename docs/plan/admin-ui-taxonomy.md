@@ -1,6 +1,6 @@
 # Admin UI taxonomy study — minimal control system + architectural overlaps
 
-*Status: PROPOSAL. Method: exhaustive code inventory of every admin screen/control
+*Status: SHIPPED (phases 1-6; the worker-loop orchestrator §4.3-4 is in progress as the final phase). Method: exhaustive code inventory of every admin screen/control
 (19 leaf pages, per-field counts) + side-by-side architectural inventory of every
 background subsystem (6 job-like + 2 gates). Companion to
 `storage-ui-cognitive-load.md` (shipped), extending the same question — "make
