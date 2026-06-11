@@ -90,6 +90,7 @@ pub async fn run_rule(
         let id = db.replication_begin_run(&rule.name, started_at, triggered_by)?;
         (id, resume_token)
     };
+    let resumed_from_token = continuation.is_some();
 
     info!(
         "Replication run starting: rule='{}' src={}/{} dst={}/{} resuming={}",
@@ -144,6 +145,14 @@ pub async fn run_rule(
                     "replication rule '{}' list page {} failed: {}",
                     rule.name, page_idx, e
                 );
+                // Poison-token guard: a RESUMED run whose FIRST page fails
+                // to list most likely holds a backend-invalidated token —
+                // clear it so the next tick starts fresh instead of
+                // wedging every subsequent run on the same bad cursor.
+                if page_idx == 0 && resumed_from_token {
+                    let db = db.lock().await;
+                    let _ = db.replication_set_continuation_token(&rule.name, None);
+                }
                 log_failure(
                     &db,
                     &rule.name,

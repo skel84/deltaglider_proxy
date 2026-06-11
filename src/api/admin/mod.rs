@@ -75,8 +75,9 @@ pub use groups::{
 };
 pub use lifecycle::{
     failures as lifecycle_failures, history as lifecycle_history,
-    list_rules as lifecycle_list_rules, preview as lifecycle_preview, run_now as lifecycle_run_now,
-    LifecycleOverview, LifecycleRuleOverview,
+    list_rules as lifecycle_list_rules, pause as lifecycle_pause, preview as lifecycle_preview,
+    resume as lifecycle_resume, run_now as lifecycle_run_now, LifecycleOverview,
+    LifecycleRuleOverview,
 };
 pub use maintenance::{
     bucket_status as maintenance_bucket_status, cancel_job as maintenance_cancel_job,

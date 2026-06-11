@@ -72,6 +72,10 @@ async fn run_due_rules(
                 false
             } else {
                 match db_guard.lifecycle_load_state(&rule.name) {
+                    Ok(Some(st)) if st.paused => {
+                        debug!("Lifecycle scheduler skipped paused rule '{}'", rule.name);
+                        false
+                    }
                     Ok(Some(st)) if st.next_due_at > now => false,
                     Ok(Some(_)) | Ok(None) => match db_guard.lifecycle_try_acquire_lease(
                         &rule.name,

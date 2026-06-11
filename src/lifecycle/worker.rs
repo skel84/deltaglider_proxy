@@ -202,7 +202,20 @@ async fn run_or_preview(
     let (include_globs, exclude_globs) = compile_rule_globs(rule).map_err(|err| err.to_string())?;
     let prefix = lifecycle_prefix(rule);
     let page_size = rule.batch_size.clamp(1, 10_000);
+    // EXECUTE runs resume from the persisted cursor (a crash/restart no
+    // longer re-lists a huge bucket from page 0). Previews always start
+    // fresh — they are read-only estimates of a full pass.
     let mut cursor: Option<String> = None;
+    if execute {
+        if let Some(db) = db.as_ref() {
+            let db = db.lock().await;
+            cursor = db
+                .lifecycle_load_state(&rule.name)
+                .map_err(|err| err.to_string())?
+                .and_then(|st| st.continuation_token);
+        }
+    }
+    let resumed_from_token = cursor.is_some();
     let mut out = LifecycleRunOutcome {
         run_id: ctx.as_ref().and_then(|c| c.run_id),
         rule_name: rule.name.clone(),
@@ -232,6 +245,16 @@ async fn run_or_preview(
         let page = match page {
             Ok(page) => page,
             Err(err) if execute => {
+                // Poison-token guard: if the FIRST page of a RESUMED run
+                // fails to list, the persisted cursor itself is the prime
+                // suspect (backends invalidate tokens). Clear it so the
+                // next run starts fresh instead of failing forever.
+                if page_idx == 0 && resumed_from_token {
+                    if let Some(db) = db.as_ref() {
+                        let db = db.lock().await;
+                        let _ = db.lifecycle_set_continuation_token(&rule.name, None);
+                    }
+                }
                 out.errors += 1;
                 let msg = err.to_string();
                 push_failure(&mut out.failures, response_cap, String::new(), msg.clone());
@@ -312,7 +335,20 @@ async fn run_or_preview(
         }
 
         cursor = page.next_continuation_token;
-        if !page.is_truncated || cursor.is_none() {
+        let complete = !page.is_truncated || cursor.is_none();
+        if execute {
+            if let Some(db) = db.as_ref() {
+                let db = db.lock().await;
+                // Persist the resumable cursor after every page; a complete
+                // pass clears it so the next run starts from the top.
+                db.lifecycle_set_continuation_token(
+                    &rule.name,
+                    if complete { None } else { cursor.as_deref() },
+                )
+                .map_err(|err| err.to_string())?;
+            }
+        }
+        if complete {
             break 'pages;
         }
     }

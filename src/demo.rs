@@ -345,6 +345,14 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
             post(admin::lifecycle_run_now),
         )
         .route(
+            "/_/api/admin/lifecycle/rules/:name/pause",
+            post(admin::lifecycle_pause),
+        )
+        .route(
+            "/_/api/admin/lifecycle/rules/:name/resume",
+            post(admin::lifecycle_resume),
+        )
+        .route(
             "/_/api/admin/lifecycle/rules/:name/history",
             get(admin::lifecycle_history),
         )
