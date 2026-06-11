@@ -256,7 +256,7 @@ export default function JobsPanel({ onSessionExpired }: Props) {
           <Tag color={d.row.kind === 'replication' ? 'blue' : d.row.kind === 'lifecycle' ? 'purple' : 'gold'}>
             {kindLabel(d.row.kind)}
           </Tag>
-          <Text strong style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>
+          <Text strong style={{ fontFamily: 'var(--font-mono)', fontSize: 13, whiteSpace: 'nowrap' }}>
             {d.row.name}
           </Text>
           {d.draft && <Tag color="warning">draft — not applied</Tag>}
@@ -268,7 +268,7 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       title: 'Scope',
       key: 'scope',
       render: (_: unknown, d: JobDisplayRow) => (
-        <Text type="secondary" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+        <Text type="secondary" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, wordBreak: 'normal' }}>
           {d.row.scope.bucket}
           {d.row.scope.prefix ? `/${d.row.scope.prefix}` : ''}
           {d.row.scope.target ? ` → ${d.row.scope.target}` : ''}
@@ -280,7 +280,7 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       key: 'trigger',
       width: 110,
       render: (_: unknown, d: JobDisplayRow) => (
-        <Text type="secondary" style={{ fontSize: 12 }}>
+        <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
           {triggerLabel(d.row.trigger)}
         </Text>
       ),
@@ -325,7 +325,8 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       render: (_: unknown, d: JobDisplayRow) => {
         const ts = d.row.last_run_at ?? d.row.finished_at ?? d.row.started_at;
         return (
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          // wordBreak normal: wrap at the date/time boundary, never mid-digit
+          <Text type="secondary" style={{ fontSize: 12, wordBreak: 'normal' }}>
             {ts ? new Date(ts * 1000).toLocaleString() : '—'}
           </Text>
         );
