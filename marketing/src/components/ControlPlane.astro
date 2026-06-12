@@ -1,15 +1,28 @@
 ---
 // ControlPlane.astro — "the other half of the product" section.
-// Replaces the old Capabilities bento + standalone screenshot gallery,
-// which were two parallel "what you get" lists. One section now: a bento
-// of the control-plane features (the delta tile is gone — the whole top
-// half of the page already sells compression; jobs/events/audit takes its
-// slot) followed by three real admin-UI screenshots as evidence, captions
-// always visible (the old gallery hid them behind hover — dead on mobile).
-const tier1Tags = ["IAM", "ABAC", "OAuth / OIDC", "Per-bucket"];
-const tier2Tags = ["Event-driven", "Scheduled", "Pause / resume"];
-const tier3aTags = ["AES-256-GCM", "Your key"];
-const tier3bTags = ["Webhooks", "Slack", "Audit log"];
+// v2: the art-directed bento (fake policy JSON, glowing flowmap, lopsided
+// tall tile) is gone — decorative mock-UI sitting above REAL screenshots
+// always loses. Now: a plain editorial feature list, then the evidence —
+// three real admin-UI screens with always-visible captions and a lightbox
+// with prev/next navigation.
+const features = [
+  {
+    title: 'Per-user auth & access control',
+    desc: 'IAM with fine-grained ABAC permissions, plus OAuth/OIDC SSO with group mapping — an access layer your budget object store doesn’t have.',
+  },
+  {
+    title: 'Cross-cloud replication',
+    desc: 'Replicate buckets between providers — event-driven or scheduled, with pause/resume. Migrate or run multi-cloud, without lock-in.',
+  },
+  {
+    title: 'Encryption at rest',
+    desc: 'AES-256-GCM before objects hit the bucket. Your key stays in your runtime; the backend only ever sees ciphertext.',
+  },
+  {
+    title: 'Jobs, events & audit',
+    desc: 'Replication, lifecycle, migrations, and re-encryption run as resumable jobs with run history. Webhook or Slack on every event; an audit trail on every admin action.',
+  },
+];
 
 const shots = [
   {
@@ -35,7 +48,7 @@ const shots = [
     <header class="cp-head">
       <span class="section-eyebrow">The other half</span>
       <h2 id="cp-title" class="cp-title">
-        It's also the control plane your <span class="grad">cheap bucket</span> is missing
+        It's also the control plane your cheap bucket is missing
       </h2>
       <p class="cp-intro">
         The compression pays for the move; this is why you stay. Point it
@@ -44,113 +57,16 @@ const shots = [
       </p>
     </header>
 
-    <div class="bento">
-      <!-- TIER 1 — HERO -->
-      <article class="tile tile--hero" style="--i:0">
-        <div class="hero-glow" aria-hidden="true"></div>
-        <div class="hero-grid">
-          <div class="hero-copy">
-            <span class="kicker">
-              <span class="kicker-idx">01</span> Access
-            </span>
-            <h3 class="tile-title">Per-user auth &amp; access control</h3>
-            <p class="tile-desc">
-              Per-user IAM with fine-grained ABAC permissions and
-              OAuth/OIDC SSO with group mapping — an access layer your
-              budget object store doesn't have, in front of any bucket.
-            </p>
-            <ul class="chips" aria-label="Capabilities">
-              {tier1Tags.map((t) => <li class="chip chip--brand">{t}</li>)}
-            </ul>
-          </div>
-
-          <div class="hero-visual" aria-hidden="true">
-            <div class="policy">
-              <div class="policy-bar">
-                <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-                <span class="policy-name">access-policy.json</span>
-              </div>
-              <pre class="policy-code"><code><span class="ln"><span class="pun">&#123;</span></span>
-<span class="ln">  <span class="key">"actions"</span><span class="pun">:</span> <span class="brk">[</span><span class="str">"read"</span><span class="pun">,</span> <span class="str">"list"</span><span class="brk">]</span><span class="pun">,</span></span>
-<span class="ln">  <span class="key">"resources"</span><span class="pun">:</span> <span class="brk">[</span><span class="str">"prod/*"</span><span class="brk">]</span><span class="pun">,</span></span>
-<span class="ln">  <span class="key">"group"</span><span class="pun">:</span> <span class="str">"engineering"</span></span>
-<span class="ln"><span class="pun">&#125;</span></span></code></pre>
-            </div>
-
-            <div class="flowmap">
-              <span class="node node--user">user</span>
-              <span class="wire"></span>
-              <span class="node node--role">role</span>
-              <span class="wire"></span>
-              <span class="node node--bucket">bucket</span>
-            </div>
-
-            <div class="sso">
-              <span class="sso-chip">Google</span>
-              <span class="sso-chip">OIDC</span>
-              <span class="sso-chip">SSO</span>
-            </div>
-          </div>
+    <div class="feat-grid">
+      {features.map((f, i) => (
+        <div class="feat">
+          <span class="feat-idx">{String(i + 1).padStart(2, '0')}</span>
+          <h3 class="feat-title">{f.title}</h3>
+          <p class="feat-desc">{f.desc}</p>
         </div>
-      </article>
-
-      <!-- TIER 2 — REPLICATION -->
-      <article class="tile tile--wide" style="--i:1">
-        <div class="accent-corner" aria-hidden="true"></div>
-        <span class="kicker kicker--accent">
-          <span class="kicker-idx">02</span> Mobility
-        </span>
-        <h3 class="tile-title">Cross-cloud replication</h3>
-        <p class="tile-desc">
-          Replicate objects between buckets across providers —
-          event-driven or scheduled, with pause/resume. Migrate or run
-          multi-cloud, without lock-in.
-        </p>
-        <div class="repl-route" aria-hidden="true">
-          <span class="rnode">S3</span>
-          <span class="rarrow">⇄</span>
-          <span class="rnode">MinIO</span>
-          <span class="rarrow">⇄</span>
-          <span class="rnode">Hetzner</span>
-        </div>
-        <ul class="chips" aria-label="Capabilities">
-          {tier2Tags.map((t) => <li class="chip chip--accent">{t}</li>)}
-        </ul>
-      </article>
-
-      <!-- TIER 3a — ENCRYPTION -->
-      <article class="tile tile--small" style="--i:2">
-        <span class="kicker">
-          <span class="kicker-idx">03</span> Confidentiality
-        </span>
-        <h3 class="tile-title tile-title--sm">Encryption at rest</h3>
-        <p class="tile-desc">
-          AES-256-GCM before objects hit the bucket. Your key stays in
-          your runtime; the backend only ever sees ciphertext.
-        </p>
-        <ul class="chips" aria-label="Capabilities">
-          {tier3aTags.map((t) => <li class="chip">{t}</li>)}
-        </ul>
-      </article>
-
-      <!-- TIER 3b — OPERATIONS -->
-      <article class="tile tile--small" style="--i:3">
-        <span class="kicker">
-          <span class="kicker-idx">04</span> Operations
-        </span>
-        <h3 class="tile-title tile-title--sm">Jobs, events &amp; audit</h3>
-        <p class="tile-desc">
-          Replication, lifecycle, migrations, and re-encryption run as
-          resumable background jobs with run history. Webhook or Slack on
-          every object event; an audit trail on every admin action.
-        </p>
-        <ul class="chips" aria-label="Capabilities">
-          {tier3bTags.map((t) => <li class="chip">{t}</li>)}
-        </ul>
-      </article>
+      ))}
     </div>
 
-    <!-- EVIDENCE STRIP — real screens from the embedded admin UI -->
     <p class="cp-proof-lede">
       None of it is a separate product: these screens ship inside the
       binary you download. Click to inspect.
@@ -172,29 +88,47 @@ const shots = [
   <form method="dialog" class="lightbox-close-wrapper">
     <button class="lightbox-close" aria-label="Close lightbox">&times;</button>
   </form>
+  <button id="cp-lightbox-prev" class="lightbox-nav lightbox-nav--prev" type="button" aria-label="Previous screenshot">&#8249;</button>
   <img id="cp-lightbox-img" src="" alt="" loading="lazy" />
+  <button id="cp-lightbox-next" class="lightbox-nav lightbox-nav--next" type="button" aria-label="Next screenshot">&#8250;</button>
 </dialog>
 
 <script>
-  const frames = document.querySelectorAll('.shot-frame');
+  const frames = Array.from(document.querySelectorAll('.shot-frame'));
   const dialog = document.getElementById('cp-lightbox') as HTMLDialogElement;
   const img = document.getElementById('cp-lightbox-img') as HTMLImageElement;
+  const prevBtn = document.getElementById('cp-lightbox-prev');
+  const nextBtn = document.getElementById('cp-lightbox-next');
 
-  if (frames.length > 0 && dialog && img) {
-    frames.forEach((frame) => {
+  if (frames.length > 0 && dialog && img && prevBtn && nextBtn) {
+    let current = 0;
+
+    const show = (i: number) => {
+      current = (i + frames.length) % frames.length;
+      const frame = frames[current];
+      img.src = frame.getAttribute('data-src') || '';
+      img.alt = frame.getAttribute('data-alt') || '';
+    };
+
+    frames.forEach((frame, i) => {
       frame.addEventListener('click', () => {
-        const src = frame.getAttribute('data-src');
-        const alt = frame.getAttribute('data-alt');
-        if (src) {
-          img.src = src;
-          img.alt = alt || '';
-          dialog.showModal();
-        }
+        show(i);
+        dialog.showModal();
       });
     });
 
+    prevBtn.addEventListener('click', (e) => { e.stopPropagation(); show(current - 1); });
+    nextBtn.addEventListener('click', (e) => { e.stopPropagation(); show(current + 1); });
+
+    dialog.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft') { e.preventDefault(); show(current - 1); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); show(current + 1); }
+    });
+
     dialog.addEventListener('click', (e) => {
-      const r = dialog.getBoundingClientRect();
+      const t = e.target as HTMLElement;
+      if (t.closest('.lightbox-nav') || t.closest('.lightbox-close-wrapper')) return;
+      const r = img.getBoundingClientRect();
       if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) {
         dialog.close();
       }
@@ -203,353 +137,74 @@ const shots = [
 </script>
 
 <style>
-  .cp { position: relative; overflow: hidden; }
-
-  .cp::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background:
-      radial-gradient(60% 50% at 18% 22%, rgba(34, 211, 238, 0.07), transparent 70%),
-      radial-gradient(50% 45% at 88% 80%, rgba(217, 70, 239, 0.06), transparent 70%);
-    pointer-events: none;
-  }
-
   /* ---------- header ---------- */
   .cp-head {
     max-width: 680px;
-    margin-bottom: 3rem;
-    position: relative;
+    margin-bottom: 2.75rem;
   }
   .cp-title {
-    font-family: var(--font-sans);
-    font-weight: 800;
-    font-size: clamp(2rem, 4.6vw, 3.4rem);
-    line-height: 1.04;
-    letter-spacing: -0.02em;
-    color: var(--ink-strong);
-    margin: 0.7rem 0 1rem;
-  }
-  .cp-title .grad {
-    background: linear-gradient(100deg, var(--brand) 0%, var(--brand-dark) 50%, var(--accent) 120%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+    margin-top: 0.7rem;
   }
   .cp-intro {
-    font-family: var(--font-sans);
-    font-size: clamp(1rem, 1.4vw, 1.15rem);
+    font-size: clamp(1rem, 1.4vw, 1.1rem);
     line-height: 1.6;
     color: var(--ink-soft);
     margin: 0;
     max-width: 60ch;
   }
 
-  /* ---------- bento grid ---------- */
-  .bento {
+  /* ---------- editorial feature grid ---------- */
+  .feat-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    grid-auto-rows: 1fr;
-    gap: 1.25rem;
-    grid-template-areas:
-      "hero hero wide"
-      "hero hero wide"
-      "sm1  sm2  wide";
+    grid-template-columns: 1fr;
+    gap: 2rem 3rem;
+    max-width: var(--measure-wide);
   }
-  .tile--hero { grid-area: hero; }
-  .tile--wide { grid-area: wide; }
-  .tile--small:nth-of-type(3) { grid-area: sm1; }
-  .tile--small:nth-of-type(4) { grid-area: sm2; }
-
-  .tile {
-    position: relative;
-    border: 1px solid var(--rule);
-    border-radius: 18px;
-    background: var(--bg-card);
-    backdrop-filter: blur(8px);
-    padding: 1.6rem 1.7rem;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    isolation: isolate;
-    transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1),
-      border-color 0.35s ease, box-shadow 0.35s ease;
-    opacity: 0;
-    transform: translateY(22px);
-    animation: cp-rise 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
-    animation-delay: calc(var(--i) * 110ms + 80ms);
-  }
-  .tile:hover {
-    transform: translateY(-5px);
-    border-color: var(--rule-strong);
-    box-shadow: var(--shadow-lg);
-  }
-  @keyframes cp-rise {
-    to { opacity: 1; transform: translateY(0); }
+  @media (min-width: 720px) {
+    .feat-grid { grid-template-columns: 1fr 1fr; }
   }
 
-  .kicker {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.55rem;
+  .feat {
+    border-top: 2px solid var(--rule-strong);
+    padding-top: 1rem;
+  }
+
+  .feat-idx {
     font-family: var(--font-mono);
     font-size: 0.72rem;
     font-weight: 600;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
+    letter-spacing: 0.1em;
     color: var(--brand-dark);
-    margin-bottom: 0.9rem;
   }
-  .kicker--accent { color: #f5b6fb; }
-  .kicker-idx {
-    font-variant-numeric: tabular-nums;
-    color: var(--ink-soft);
-    padding: 0.12rem 0.4rem;
-    border: 1px solid var(--rule-strong);
-    border-radius: 6px;
-  }
-  .tile-title {
-    font-family: var(--font-sans);
-    font-weight: 800;
-    letter-spacing: -0.015em;
+
+  .feat-title {
+    margin: 0.35rem 0 0.45rem;
+    font-size: 1.12rem;
+    font-weight: 700;
     color: var(--ink-strong);
-    margin: 0 0 0.6rem;
-    line-height: 1.1;
-    font-size: 1.3rem;
+    line-height: 1.2;
   }
-  .tile-title--sm { font-size: 1.16rem; font-weight: 700; }
-  .tile-desc {
-    font-family: var(--font-sans);
+
+  .feat-desc {
+    margin: 0;
+    color: var(--ink-soft);
     font-size: 0.94rem;
     line-height: 1.55;
-    color: var(--ink-soft);
-    margin: 0 0 1.1rem;
-  }
-
-  .chips {
-    list-style: none;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin: auto 0 0;
-    padding: 0;
     max-width: none;
   }
-  .chip {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    letter-spacing: 0.02em;
-    color: var(--ink-soft);
-    padding: 0.32rem 0.6rem;
-    border: 1px solid var(--rule-strong);
-    border-radius: 999px;
-    background: var(--bg-soft);
-    white-space: nowrap;
-  }
-  .chip--brand {
-    color: var(--brand-dark);
-    border-color: rgba(34, 211, 238, 0.4);
-    background: rgba(34, 211, 238, 0.1);
-  }
-  .chip--accent {
-    color: #f5b6fb;
-    border-color: rgba(217, 70, 239, 0.45);
-    background: rgba(217, 70, 239, 0.12);
-  }
-
-  /* ---------- hero tile ---------- */
-  .tile--hero {
-    padding: 2.2rem 2.3rem;
-    border-color: rgba(34, 211, 238, 0.4);
-    background:
-      linear-gradient(165deg, rgba(34, 211, 238, 0.08), rgba(30, 41, 59, 0.55) 42%);
-    box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.08), var(--shadow-lg);
-  }
-  .tile--hero:hover {
-    border-color: rgba(34, 211, 238, 0.6);
-    box-shadow: 0 0 28px rgba(34, 211, 238, 0.22), var(--shadow-lg);
-  }
-  .hero-glow {
-    position: absolute;
-    inset: -30% -10% auto -10%;
-    height: 80%;
-    background: radial-gradient(50% 60% at 30% 20%, rgba(34, 211, 238, 0.3), transparent 70%);
-    filter: blur(18px);
-    z-index: -1;
-    animation: cp-pulse 5.5s ease-in-out infinite;
-  }
-  @keyframes cp-pulse {
-    0%, 100% { opacity: 0.5; }
-    50% { opacity: 0.9; }
-  }
-
-  .hero-grid {
-    display: grid;
-    grid-template-columns: 1.05fr 0.95fr;
-    gap: 2rem;
-    align-items: center;
-    height: 100%;
-  }
-  .hero-copy { display: flex; flex-direction: column; }
-  .tile--hero .kicker { font-size: 0.78rem; color: var(--brand); }
-  .tile--hero .tile-title {
-    font-size: clamp(1.5rem, 2.4vw, 2.1rem);
-  }
-  .tile--hero .tile-desc { font-size: 1rem; }
-
-  .hero-visual {
-    display: flex;
-    flex-direction: column;
-    gap: 0.9rem;
-  }
-  .policy {
-    border: 1px solid rgba(34, 211, 238, 0.25);
-    border-radius: 12px;
-    background: rgba(8, 13, 24, 0.82);
-    box-shadow: var(--shadow-glow);
-    overflow: hidden;
-  }
-  .policy-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid var(--rule);
-    background: rgba(255, 255, 255, 0.02);
-  }
-  .policy-bar .dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--ink-500);
-  }
-  .policy-bar .dot:first-child { background: var(--accent); opacity: 0.85; }
-  .policy-name {
-    margin-left: 0.4rem;
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    color: var(--ink-soft);
-  }
-  .policy-code {
-    margin: 0;
-    padding: 0.85rem 0.95rem;
-    font-family: var(--font-mono);
-    font-size: 0.74rem;
-    line-height: 1.7;
-    color: var(--ink-soft);
-    overflow-x: auto;
-  }
-  .policy-code .ln { display: block; }
-  .policy-code .key { color: var(--brand-dark); }
-  .policy-code .str { color: #fcd34d; }
-  .policy-code .pun,
-  .policy-code .brk { color: var(--ink-500); }
-
-  .flowmap {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.3rem;
-  }
-  .node {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    letter-spacing: 0.04em;
-    padding: 0.34rem 0.55rem;
-    border-radius: 7px;
-    border: 1px solid var(--rule-strong);
-    background: var(--bg-soft);
-    color: var(--ink-soft);
-    white-space: nowrap;
-  }
-  .node--role {
-    color: var(--brand-dark);
-    border-color: rgba(34, 211, 238, 0.5);
-    background: rgba(34, 211, 238, 0.12);
-    box-shadow: 0 0 12px rgba(34, 211, 238, 0.25);
-  }
-  .wire {
-    flex: 1;
-    height: 1px;
-    background: linear-gradient(90deg, var(--rule), rgba(34, 211, 238, 0.6), var(--rule));
-    position: relative;
-  }
-  .wire::after {
-    content: "";
-    position: absolute;
-    top: -2px;
-    width: 5px; height: 5px;
-    border-radius: 50%;
-    background: var(--brand);
-    box-shadow: 0 0 8px var(--brand);
-    animation: cp-travel 2.6s linear infinite;
-  }
-  .flowmap .wire:nth-of-type(4)::after { animation-delay: 1.3s; }
-  @keyframes cp-travel {
-    from { left: 0%; opacity: 0; }
-    10% { opacity: 1; }
-    90% { opacity: 1; }
-    to { left: 100%; opacity: 0; }
-  }
-
-  .sso { display: flex; gap: 0.4rem; }
-  .sso-chip {
-    font-family: var(--font-mono);
-    font-size: 0.66rem;
-    letter-spacing: 0.05em;
-    padding: 0.28rem 0.55rem;
-    border-radius: 999px;
-    border: 1px solid var(--rule-strong);
-    background: rgba(255, 255, 255, 0.03);
-    color: var(--ink-soft);
-  }
-
-  /* ---------- replication tile ---------- */
-  .tile--wide {
-    background: linear-gradient(180deg, rgba(217, 70, 239, 0.07), var(--bg-card) 50%);
-    border-color: rgba(217, 70, 239, 0.24);
-    justify-content: flex-start;
-  }
-  .tile--wide:hover { border-color: rgba(217, 70, 239, 0.5); }
-  .accent-corner {
-    position: absolute;
-    top: -40px; right: -40px;
-    width: 140px; height: 140px;
-    background: radial-gradient(circle at center, rgba(217, 70, 239, 0.35), transparent 70%);
-    filter: blur(10px);
-    z-index: -1;
-  }
-  .repl-route {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-    margin: 0.4rem 0 1.2rem;
-  }
-  .rnode {
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
-    font-weight: 600;
-    padding: 0.36rem 0.6rem;
-    border-radius: 8px;
-    border: 1px solid rgba(217, 70, 239, 0.35);
-    background: rgba(217, 70, 239, 0.1);
-    color: #f5b6fb;
-  }
-  .rarrow { color: var(--accent); font-size: 0.95rem; }
 
   /* ---------- evidence strip ---------- */
   .cp-proof-lede {
-    margin: 2.75rem 0 1.25rem;
+    margin: 3rem 0 1.25rem;
     color: var(--ink-soft);
     font-size: 0.98rem;
     max-width: var(--measure-wide);
-    position: relative;
   }
 
   .shots {
     display: grid;
     grid-template-columns: 1fr;
     gap: 1.4rem;
-    position: relative;
   }
   @media (min-width: 700px) {
     .shots { grid-template-columns: repeat(3, 1fr); }
@@ -638,39 +293,41 @@ const shots = [
     color: #0b0f19;
     transform: scale(1.1);
   }
+
+  .lightbox-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    border: 1px solid var(--rule);
+    background: var(--bg-card);
+    color: var(--ink-strong);
+    font-size: 1.7rem;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-bottom: 0.2rem;
+    cursor: pointer;
+    box-shadow: var(--shadow-md);
+    transition: all 0.2s ease;
+  }
+  .lightbox-nav--prev { left: -3.6rem; }
+  .lightbox-nav--next { right: -3.6rem; }
+  .lightbox-nav:hover {
+    background: var(--brand);
+    border-color: var(--brand);
+    color: #0b0f19;
+    transform: translateY(-50%) scale(1.1);
+  }
+
   @media (max-width: 768px) {
     .lightbox-close-wrapper { top: 0.5rem; right: 0.5rem; }
     .lightbox-close { width: 32px; height: 32px; font-size: 1.2rem; }
-  }
-
-  /* ---------- responsive bento ---------- */
-  @media (max-width: 880px) {
-    .bento {
-      grid-template-columns: 1fr 1fr;
-      grid-auto-rows: auto;
-      grid-template-areas:
-        "hero hero"
-        "wide wide"
-        "sm1  sm2";
-    }
-    .hero-grid { grid-template-columns: 1fr; gap: 1.4rem; }
-  }
-  @media (max-width: 560px) {
-    .bento {
-      grid-template-columns: 1fr;
-      grid-template-areas:
-        "hero"
-        "wide"
-        "sm1"
-        "sm2";
-    }
-    .cp-head { margin-bottom: 2.25rem; }
-    .tile--hero { padding: 1.8rem 1.5rem; }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .tile { animation: none; opacity: 1; transform: none; }
-    .hero-glow, .wire::after { animation: none; }
-    .tile:hover { transform: none; }
+    .lightbox-nav { width: 38px; height: 38px; font-size: 1.4rem; }
+    .lightbox-nav--prev { left: 0.5rem; }
+    .lightbox-nav--next { right: 0.5rem; }
   }
 </style>
