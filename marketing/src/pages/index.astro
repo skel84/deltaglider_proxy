@@ -1,11 +1,23 @@
 ---
-// Homepage — v5 plan §4.1. Visual design pass: alternating sections,
-// proper hero, real CTAs, no wall-of-text.
+// Homepage — rewritten 2026-06. Structure: one problem-first hero, then
+// each section answers exactly one question, in the order a skeptical
+// engineer asks them:
+//   hero        what is it, why do I care
+//   stats       is the claim real
+//   HowItWorks  how does it work
+//   Mechanism   "but ZIPs won't diff" — the obvious objection
+//   Capabilities what else do I get
+//   Proof       who runs it in anger
+//   Fit         is it for MY workload (honest no's included)
+//   Engineering can I trust the code and the people
+//   Doors       where do I go next
+//   Quickstart  let me touch it
+// No section repeats another's job — the old page had three overlapping
+// "what it does" blocks; they're consolidated into Capabilities.
 
 import BaseLayout from '../layouts/BaseLayout.astro';
 import JsonLd from '../components/JsonLd.astro';
 import TestimonialsBlock from '../components/TestimonialsBlock.astro';
-import CustomerSegmentBlock from '../components/CustomerSegmentBlock.astro';
 import SimoneCallout from '../components/SimoneCallout.astro';
 import MechanismExplanation from '../components/MechanismExplanation.astro';
 import WorkloadFitTable from '../components/WorkloadFitTable.astro';
@@ -22,8 +34,8 @@ import {
 ---
 
 <BaseLayout
-  title="DeltaGlider — S3-compatible storage compression"
-  description="Storage compression for S3, behind the same S3 API your apps already use. Open source, GPL-3.0. Built by Beshu Tech, 10 senior engineers since 2017."
+  title="DeltaGlider Proxy — store a hundred versions, pay for one"
+  description="A drop-in S3 proxy that stores each new version of a binary artifact as a tiny delta. Same S3 API, zero client changes — plus IAM, SSO, replication, lifecycle, and encryption at rest on any S3-compatible backend. Open source, GPL-3.0."
 >
   <Fragment slot="json-ld">
     <JsonLd schema={organizationSchema()} />
@@ -37,28 +49,38 @@ import {
       <div class="hero-copy">
         <span class="hero-eyebrow">
           <span class="hero-eyebrow-dot"></span>
-          Open source · GPL-3.0
+          Open source · GPL-3.0 · one binary
         </span>
 
-        <h1>Turn any S3 bucket into&nbsp;enterprise&nbsp;S3.</h1>
+        <h1>Store a hundred versions. Pay&nbsp;for&nbsp;one.</h1>
 
         <p class="hero-lede">
-          A drop-in proxy that adds <strong>per-user IAM, OAuth, object
-          lifecycle, cross-cloud replication, and encryption</strong> in
-          front of Hetzner, Wasabi, MinIO, or AWS — plus transparent delta
-          compression. Same S3 API. Zero code changes.
+          Every build, dump, and firmware image you ship is mostly the one
+          before it — and your bucket bills you full price for every copy.
+          DeltaGlider Proxy is a <strong>drop-in S3 proxy</strong> that
+          stores each new version as a tiny delta against the last full
+          copy. Same S3 API, same buckets, <strong>zero client
+          changes</strong>.
+        </p>
+
+        <p class="hero-lede hero-lede-secondary">
+          And since every byte already flows through it, it's also your
+          storage control plane: per-user IAM and SSO, replication,
+          lifecycle, encryption at rest — on any S3-compatible backend,
+          including the cheap ones.
         </p>
 
         <div class="hero-ctas">
           <a href="/trial" class="btn btn-brand">Start free trial&nbsp;&rarr;</a>
-          <a href="/docs/tutorials/first-delta-savings" class="btn">Read the docs</a>
+          <a href="/docs/tutorials/first-delta-savings" class="btn">See it in 15 minutes</a>
           <a href="https://github.com/beshu-tech/deltaglider_proxy" class="btn btn-ghost">GitHub</a>
         </div>
 
         <p class="hero-trust">
-          <strong>Open source, in production at Beshu Tech</strong> — storing
-          and serving every <a href="https://readonlyrest.com">ReadonlyREST</a>
-          build. Written by the same team, since 2017.
+          Built by <strong>Beshu Tech</strong> — the
+          <a href="https://readonlyrest.com">ReadonlyREST</a> team, since
+          2017. Our own 1.71&nbsp;TB build catalog is migrating through it
+          <a href="/case-studies/readonlyrest-builds">in public, bugs and all</a>.
         </p>
       </div>
 
@@ -68,198 +90,130 @@ import {
     </div>
   </section>
 
-  {/* ============================ CAPABILITIES ======================== */}
-  {/* #1 message: enterprise S3 on cheap storage (auth → replication →
-      compression/encryption), as an art-directed bento right after the hero. */}
-  <Capabilities />
+  {/* ============================ STATS STRIP ========================= */}
+  <section class="section stats-band" aria-label="Key numbers">
+    <div class="shell">
+      <div class="stats-grid">
+        <div class="stat">
+          <div class="stat-big">88.5×</div>
+          <p class="stat-text">
+            One real plugin release: 2,866&nbsp;MB stored as 32.4&nbsp;MB.
+            <a href="/case-studies/readonlyrest-builds">From the migration log</a>.
+          </p>
+        </div>
+        <div class="stat">
+          <div class="stat-big">SHA-256</div>
+          <p class="stat-text">
+            Every read reconstructs the original bytes and verifies the
+            hash. Integrity is checked, not assumed.
+          </p>
+        </div>
+        <div class="stat">
+          <div class="stat-big">1 binary</div>
+          <p class="stat-text">
+            Proxy, web UI, IAM, jobs, metrics — no sidecar zoo. Run it
+            with Docker, a binary, or Helm.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
 
-  {/* ============================ HOW IT WORKS ========================= */}
-  {/* The compression mechanism deep-dive — tier 3, so it sits below the
-      capabilities overview rather than leading the page. */}
+  {/* ============================ HOW IT WORKS ======================== */}
   <HowItWorks />
 
-  {/* ============================ TESTIMONIALS ========================= */}
+  {/* ===================== THE OBVIOUS OBJECTION ====================== */}
   <section class="section section-alt">
-    <div class="shell">
-      <TestimonialsBlock />
-    </div>
-  </section>
-
-  {/* ============================ DOGFOODING =========================== */}
-  <section class="section">
-    <div class="shell">
-      <SimoneCallout />
-    </div>
-  </section>
-
-  {/* ============================ TRUST COPY =========================== */}
-  <section class="section section-alt">
-    <div class="shell">
-      <CustomerSegmentBlock />
-    </div>
-  </section>
-
-  {/* ============================ WHY ZIP DELTA ======================== */}
-  <section class="section">
     <div class="shell">
       <MechanismExplanation />
     </div>
   </section>
 
-  {/* ============================ WORKLOAD FIT ========================= */}
+  {/* ============================ CAPABILITIES ======================== */}
+  <Capabilities />
+
+  {/* ====================== THE WHOLE CONTROL PLANE =================== */}
   <section class="section section-alt">
     <div class="shell">
-      <WorkloadFitTable />
-    </div>
-  </section>
-
-  {/* ============================ IN PROGRESS ========================== */}
-  <section class="section">
-    <div class="shell">
-      <span class="section-eyebrow">In progress</span>
-      <h2>Migrating ReadonlyREST's build catalog → Hetzner</h2>
-
+      <span class="section-eyebrow">In the box</span>
+      <h2>One admin surface for all of it</h2>
       <p>
-        Sample so far: a 1.69.0 plugin version compressed
-        <strong>88.5×</strong> (2,866 MB → 32.4 MB), bit-perfect
-        SHA-256 round-trip through the proxy. About <strong>$9 in EC2
-        compute</strong> plus ~$2 in Glacier Bulk-tier retrieval for
-        the migration so far.
+        Buckets, backends, users, jobs, events, audit, trace — managed
+        from the embedded UI or as plain YAML, your pick. Every screen
+        below ships inside the binary.
       </p>
-
-      <p>
-        The full migration covers 145 versions, 8 years of release
-        history. Final results published as a reproducible case study
-        when complete.
-      </p>
-
-      <p>
-        <a href="/case-studies/readonlyrest-builds" class="btn">
-          Read the migration log →
-        </a>
-      </p>
-    </div>
-  </section>
-
-  {/* ============================ HOW IT FITS ========================== */}
-  <section class="section section-alt">
-    <div class="shell">
-      <span class="section-eyebrow">Architecture</span>
-      <h2>How it fits in your stack</h2>
-
-      <p>
-        DeltaGlider sits between your apps and your bucket, speaking the
-        same S3 API to both. On upload, it stores whichever is smaller:
-        a delta against the previous version, or the file as-is. On
-        download, it rebuilds the exact original bytes and streams them
-        back. Your apps never know the difference — they just see
-        ordinary S3.
-      </p>
-    </div>
-  </section>
-
-  {/* ============================ OPERATOR SURFACE ===================== */}
-  <section class="section">
-    <div class="shell">
-      <span class="section-eyebrow">Beyond compression</span>
-      <h2>A full S3 control plane, not just a compressor</h2>
-
-      <p>
-        Because every request already flows through the proxy, it can do
-        more than dedupe bytes — it's where you run IAM, replication,
-        encryption, lifecycle, and audit:
-      </p>
-
-      <ul class="feature-list">
-        <li>
-          <strong>Per-user IAM with ABAC permissions</strong> —
-          AWS-IAM grammar via <code>iam-rs</code>, OAuth/OIDC group
-          mapping, encrypted SQLCipher config DB.
-        </li>
-        <li>
-          <strong>Replication rules</strong> between buckets and
-          backends — run-now, pause/resume, history, optional delete-
-          replication.
-        </li>
-        <li>
-          <strong>AES-256-GCM at-rest encryption</strong>, per-object
-          IV. Encryption key stays in your runtime; the backend sees
-          ciphertext.
-        </li>
-        <li>
-          <strong>Lifecycle, quotas, audit, metrics</strong> —
-          lifecycle expiration, event outbox with retries/webhooks,
-          soft per-bucket quotas (including <code>quota=0</code> freeze
-          for migration windows), Prometheus metrics, in-memory audit
-          ring plus structured stdout for SIEM shipping.
-        </li>
-        <li>
-          <strong>Delta efficiency diagnostic panel</strong> — one-
-          click scan flags prefixes where the reference baseline
-          produces wasted bytes.
-        </li>
-        <li>
-          <strong>Pre-auth admission chain</strong> —
-          <code>deny</code>/<code>reject</code>/<code>allow-anonymous</code>
-          rules evaluated BEFORE auth. <code>config trace</code> shows
-          exactly which rule fired and why.
-        </li>
-      </ul>
-
-      <p>
-        → <a href="/docs/reference">Reference docs</a>
-      </p>
-
       <ScreenshotGallery />
     </div>
   </section>
 
-  {/* ============================ ACCOUNTABILITY ======================= */}
-  <section class="section section-alt">
-    <div class="shell">
-      <span class="section-eyebrow">Support</span>
-      <h2>The people who wrote it answer your tickets</h2>
-
-      <p>
-        Beshu Tech's 10 senior engineers wrote DeltaGlider; they're the
-        ones who answer your support tickets. No outsourced first-
-        line. No AI chatbot. Email
-        <a href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20General%20inquiry">contact@beshu.tech</a>
-        and the response comes from someone whose name is in
-        <code>git log</code>.
-      </p>
-    </div>
-  </section>
-
-  {/* ============================ CORRECTNESS X-RAY ==================== */}
+  {/* ========================= RUN IN ANGER =========================== */}
   <section class="section">
     <div class="shell">
-      <span class="section-eyebrow">May 2026</span>
-      <h2>We hunted our own bugs — and published them</h2>
+      <span class="section-eyebrow">Run in anger</span>
+      <h2>We migrated our own history through it — in public</h2>
 
       <p>
-        A focused audit by five specialised investigators (concurrency,
-        auth, storage, HTTP/wire, error handling) surfaced 10 distinct
-        correctness bugs across the proxy. All fixed; each pinned by a
-        regression test. <strong>769 unit tests</strong> in
-        <code>cargo test --lib</code>, +23 added during the audit.
-        Clippy <code>-D warnings</code> clean. Bug-by-bug write-up in
-        <a href="https://github.com/beshu-tech/deltaglider_proxy/blob/main/CHANGELOG.md">CHANGELOG.md</a>.
+        145 plugin versions, 8 years of release history, 1.71&nbsp;TB. The
+        migration log names the bugs we hit and what they cost to fix —
+        because a storage product that hides its own incidents is asking
+        you to find them for it.
       </p>
+
+      <SimoneCallout />
+      <TestimonialsBlock />
     </div>
   </section>
 
-  {/* ============================ COMPARISON =========================== */}
+  {/* ============================ HONEST FIT ========================== */}
   <section class="section section-alt">
     <div class="shell">
       <span class="section-eyebrow">Honest positioning</span>
-      <h2>When to use what</h2>
+      <h2>Where it wins — and where it won't</h2>
+
+      <p>
+        Delta compression pays off when versions resemble each other.
+        If your workload doesn't look like that, the proxy still gives
+        you the control plane — but the savings claim doesn't apply,
+        and we'd rather you know now:
+      </p>
+
+      <WorkloadFitTable />
       <ComparisonTable />
     </div>
   </section>
 
-  {/* ============================ NEXT DOORS =========================== */}
+  {/* ============================ ENGINEERING ========================= */}
   <section class="section">
+    <div class="shell">
+      <span class="section-eyebrow">Engineering</span>
+      <h2>Built like we mean it</h2>
+
+      <ul class="proof-list">
+        <li>
+          <strong>1,100+ unit tests</strong>, clippy
+          <code>-D warnings</code> clean, and a curated integration
+          matrix against real MinIO — on every merge.
+        </li>
+        <li>
+          <strong>We hunt our own bugs and publish them.</strong> A
+          five-investigator correctness audit (concurrency, auth,
+          storage, wire, errors) surfaced 10 bugs; all fixed, each
+          pinned by a regression test, written up bug-by-bug in the
+          <a href="https://github.com/beshu-tech/deltaglider_proxy/blob/main/CHANGELOG.md">CHANGELOG</a>.
+        </li>
+        <li>
+          <strong>The people who wrote it answer your tickets.</strong>
+          No outsourced first line, no chatbot. Email
+          <a href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20General%20inquiry">contact@beshu.tech</a>
+          and the reply comes from someone whose name is in
+          <code>git log</code>.
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  {/* ============================ NEXT DOORS ========================== */}
+  <section class="section section-alt">
     <div class="shell">
       <h2>Where to read next</h2>
       <div class="door-grid">
@@ -283,25 +237,26 @@ import {
     </div>
   </section>
 
-  {/* ============================ QUICKSTART =========================== */}
-  <section class="section section-alt">
+  {/* ============================ QUICKSTART ========================== */}
+  <section class="section">
     <div class="shell">
       <span class="section-eyebrow">Get started</span>
-      <h2>Try it in 30 seconds</h2>
+      <h2>Touch it in 60 seconds</h2>
 
-      <pre><code>docker run -p 9000:9000 \
-  -e DGP_S3_ENDPOINT=https://your-backend \
-  -e DGP_BE_AWS_ACCESS_KEY_ID=... \
-  -e DGP_BE_AWS_SECRET_ACCESS_KEY=... \
-  ghcr.io/beshu-tech/deltaglider_proxy:latest</code></pre>
+      <pre><code>docker run --rm -it -p 9000:9000 -v dgp-data:/data \
+  -e DGP_AUTHENTICATION=none \
+  beshultd/deltaglider_proxy</code></pre>
 
       <p>
-        Then point your S3 SDK at <code>http://localhost:9000</code>.
-        Same SigV4. Same buckets. Same workflow.
+        Open <code>http://localhost:9000/_/</code> for the browser, or
+        point any S3 SDK at <code>http://localhost:9000</code>. Open
+        access is for a localhost first look —
+        <a href="/docs/tutorials/secure-your-proxy">the second tutorial
+        locks it down</a>.
       </p>
 
       <p style="margin-top: 1.5rem;">
-        <a href="/docs/tutorials/first-delta-savings" class="btn">Full quickstart</a>
+        <a href="/docs/tutorials/first-delta-savings" class="btn">Full tutorial</a>
         <a href="https://github.com/beshu-tech/deltaglider_proxy" class="btn" style="margin-left: 0.4rem;">GitHub</a>
       </p>
     </div>
@@ -309,7 +264,53 @@ import {
 </BaseLayout>
 
 <style>
-  .feature-list {
+  .hero-lede-secondary {
+    font-size: 0.98rem;
+    margin-top: 0.75rem;
+  }
+
+  .stats-band {
+    padding-top: 2.5rem;
+    padding-bottom: 2.5rem;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1.25rem;
+    max-width: var(--measure-wide);
+  }
+
+  @media (min-width: 720px) {
+    .stats-grid {
+      grid-template-columns: 1fr 1fr 1fr;
+    }
+  }
+
+  .stat {
+    padding: 1.5rem 1.6rem;
+    background: var(--bg-card);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .stat-big {
+    font-size: 2rem;
+    font-weight: 800;
+    color: var(--brand);
+    letter-spacing: -0.02em;
+    margin-bottom: 0.35rem;
+  }
+
+  .stat-text {
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: 0.95rem;
+    line-height: 1.5;
+  }
+
+  .proof-list {
     list-style: none;
     padding-left: 0;
     max-width: var(--measure-wide);
@@ -318,7 +319,7 @@ import {
     margin: 1.5rem 0;
   }
 
-  .feature-list li {
+  .proof-list li {
     padding: 1rem 1.25rem;
     background: var(--bg-card);
     border: 1px solid var(--rule);
@@ -327,12 +328,6 @@ import {
     color: var(--ink-strong);
     line-height: 1.55;
     margin: 0;
-  }
-
-  .feature-list li strong {
-    color: var(--ink);
-    display: block;
-    margin-bottom: 0.15rem;
   }
 
   .door-grid {
