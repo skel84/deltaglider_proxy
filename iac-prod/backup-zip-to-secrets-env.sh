@@ -83,7 +83,15 @@ chmod 600 "$OUT"
 
 echo "Writing $OUT (filled keys logged, values hidden):"
 
-emit DGP_BOOTSTRAP_PASSWORD_HASH  "$SEC" '.bootstrap_password_hash'
+# The backup stores the bcrypt hash base64-wrapped; the proxy consumes the
+# RAW "$2y$..." form via DGP_BOOTSTRAP_PASSWORD_HASH — decode it here.
+RAW_HASH="$(jq -r '.bootstrap_password_hash // empty' "$SEC" | base64 -d 2>/dev/null || true)"
+if [[ -n "$RAW_HASH" && "$RAW_HASH" == \$2*\$* ]]; then
+  echo "DGP_BOOTSTRAP_PASSWORD_HASH=$RAW_HASH" >> "$OUT"
+  echo "  + DGP_BOOTSTRAP_PASSWORD_HASH (decoded from base64)"
+else
+  emit DGP_BOOTSTRAP_PASSWORD_HASH  "$SEC" '.bootstrap_password_hash'
+fi
 { echo "DGP_CONFIG=/etc/deltaglider_proxy/config.yaml"
   echo "DGP_LISTEN_ADDR=0.0.0.0:9000"
   echo

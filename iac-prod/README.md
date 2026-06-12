@@ -94,9 +94,28 @@ values as container env (Secret refs); the proxy does the substitution.
 
 On a **fresh** DB the proxy comes up in bootstrap mode using the bootstrap SigV4
 pair (`access.access_key_id`/`secret_access_key`, here `${env:DGP_BOOTSTRAP_*}`).
-Declarative `iam_users`/groups are reconciled into the DB on a `config apply`
-(admin API / GUI), not automatically at cold boot — so after first `up`, push the
-config once to populate IAM.
+Since v1.4.0 the startup reconciler applies the YAML's IAM **at cold boot** for
+additive/idempotent state (fresh deploys populate users/groups automatically).
+It deliberately refuses DESTRUCTIVE diffs (deletes of existing DB users/groups/
+providers) — those need an attended `config apply` so a bad template can't
+silently wipe IAM on a restart.
+
+## The round-trip (v1.4.1+)
+
+The proxy records which config values came from `${env:NAME}` references and
+re-emits the references on every persist AND in `GET /config/export`. The
+operating loop for this directory is therefore:
+
+1. Provision: this YAML + `secrets.env` (refs expand in-process at load).
+2. Tweak in the admin GUI as needed — the in-container persisted config keeps
+   the `${env:...}` refs for every ref-sourced secret.
+3. `GET /_/api/admin/config/export` → the download still carries the refs →
+   commit it straight back here as the new `deltaglider_proxy.yaml`.
+
+Secrets created in the GUI (no ref provenance) come out REDACTED in the
+export — that's the signal to add them to `secrets.env` + reference them in
+the YAML. Numeric/boolean fields fed by refs do not round-trip (they persist
+as literals).
 
 ## Review before first prod apply
 - `legacy-admin` (access_key `admin`, wildcard `*`/`*`) — consider folding into

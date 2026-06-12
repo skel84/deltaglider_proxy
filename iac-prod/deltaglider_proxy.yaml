@@ -33,12 +33,74 @@ storage:
       force_path_style: true
       access_key_id: ${env:DGP_BACKEND_HETZNER_ACCESS_KEY_ID}
       secret_access_key: ${env:DGP_BACKEND_HETZNER_SECRET_ACCESS_KEY}
+
+    # Local filesystem backend with at-rest encryption (proxy-side
+    # AES-256-GCM). The data lives on the container volume; the key is an
+    # env placeholder — REQUIRED to read every object already written under
+    # this key. Losing it makes those objects unrecoverable.
+    - name: LOCAL1BE
+      type: filesystem
+      path: ./data
+      encryption:
+        mode: aes256-gcm-proxy
+        key: ${env:DGP_BACKEND_LOCAL1BE_AES_KEY}
   default_backend: HetznerHelsinki1
 
   buckets:
     beshu:
       public_prefixes:
         - ror/libs/
+    # REVIEW: the three buckets below look like staging experiments that made
+    # it into the prod config (they route to the local-disk backend). Prune
+    # here AND in prod if they're not load-bearing.
+    didi:
+      backend: LOCAL1BE
+    pippo:
+      backend: LOCAL1BE
+    reenc-demo:
+      backend: LOCAL1BE
+
+  # Background replication machinery is ON (workers + scheduler); the single
+  # rule is currently DISABLED — kept for one-click re-enable from the GUI.
+  replication:
+    enabled: true
+    tick_interval: 30s
+    lease_ttl: 60s
+    heartbeat_interval: 20s
+    max_failures_retained: 100
+    rules:
+      - name: mirror-debug-to-local
+        enabled: false
+        source:
+          bucket: debug
+          prefix: builds/
+        destination:
+          bucket: pippo
+          prefix: mirror/
+        interval: 24h
+        batch_size: 100
+        replicate_deletes: false
+        conflict: newer-wins
+        include_globs: []
+        exclude_globs:
+          - .deltaglider/**
+
+  # Lifecycle is fully OFF (subsystem disabled AND the rule disabled).
+  lifecycle:
+    enabled: false
+    tick_interval: 1h
+    max_failures_retained: 100
+    rules:
+      - name: expire-old-builds
+        enabled: false
+        bucket: debug
+        prefix: builds/
+        action: delete
+        expire_after: 30d
+        include_globs: []
+        exclude_globs:
+          - .deltaglider/**
+        batch_size: 100
 
 access:
   # YAML owns IAM. The encrypted DB is reconciled to match this on every apply.

@@ -2118,6 +2118,70 @@ impl Config {
         }
     }
 
+    /// Resolve any full-scalar `${env:NAME}` string field back to its value.
+    /// The inverse of [`Self::with_env_refs_reinserted`], for the section-PUT
+    /// ingest path: section GETs now EMIT refs for ref-sourced secrets, so a
+    /// GUI round-trip echoes the literal `"${env:NAME}"` string back — without
+    /// this resolution that literal would silently REPLACE the real secret.
+    /// It also makes refs first-class in the GUI: an operator can type
+    /// `${env:NAME}` into a field and it resolves like the file loader would.
+    ///
+    /// Lookup order per ref: recorded provenance (`env_refs`) → the process
+    /// environment → the ref's own `:-default` → hard error (fail loud, same
+    /// contract as file load). Newly resolved names are recorded into
+    /// `env_refs` so future persists re-emit the ref. Only strings that are
+    /// EXACTLY one ref resolve — mid-string refs in GUI fields stay literal.
+    pub fn resolve_env_ref_scalars(&mut self) -> Result<(), ConfigError> {
+        fn walk(
+            v: &mut serde_yaml::Value,
+            refs: &mut std::collections::BTreeMap<String, String>,
+        ) -> Result<(), ConfigError> {
+            match v {
+                serde_yaml::Value::String(s) if is_env_ref(s) => {
+                    // Record provenance ONLY when the lookup supplied the
+                    // value — a ref satisfied by its `:-default` is not
+                    // recorded, mirroring `expand_env_vars_recording`.
+                    let mut hits: Vec<(String, String)> = Vec::new();
+                    let resolved = expand_env_with(s, |name| {
+                        let v = refs.get(name).cloned().or_else(|| std::env::var(name).ok());
+                        if let Some(val) = &v {
+                            if !val.is_empty() {
+                                hits.push((name.to_string(), val.clone()));
+                            }
+                        }
+                        v
+                    })?;
+                    refs.extend(hits);
+                    *s = resolved;
+                    Ok(())
+                }
+                serde_yaml::Value::Sequence(seq) => {
+                    for item in seq {
+                        walk(item, refs)?;
+                    }
+                    Ok(())
+                }
+                serde_yaml::Value::Mapping(map) => {
+                    for (_, value) in map.iter_mut() {
+                        walk(value, refs)?;
+                    }
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }
+
+        let mut refs = self.env_refs.clone();
+        let mut tree =
+            serde_yaml::to_value(&*self).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        walk(&mut tree, &mut refs)?;
+        let mut resolved: Config =
+            serde_yaml::from_value(tree).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        resolved.env_refs = refs;
+        *self = resolved;
+        Ok(())
+    }
+
     /// Clone the config with *infrastructure* secrets redacted. Matches the
     /// Persistence variant: strips `bootstrap_password_hash` (it has its
     /// own dedicated rotation endpoint + sits in the encrypted IAM DB,
@@ -5102,5 +5166,24 @@ storage:
     fn no_refs_is_a_plain_clone() {
         let cfg = Config::default();
         assert_eq!(cfg.with_env_refs_reinserted(), cfg);
+    }
+
+    #[test]
+    fn section_echo_back_resolves_instead_of_clobbering() {
+        // A GUI round-trip echoes the ref string a section GET emitted.
+        // resolve_env_ref_scalars must restore the real secret from
+        // provenance — NOT store the literal "${env:...}" string.
+        let mut cfg = load_template();
+        cfg.iam_users[0].secret_access_key = "${env:CI_UPLOADER_SECRET}".into();
+        cfg.resolve_env_ref_scalars().unwrap();
+        assert_eq!(cfg.iam_users[0].secret_access_key, "ci-secret-456");
+        // And an operator-typed ref with a default resolves via the default
+        // when neither provenance nor process env has it.
+        cfg.access_key_id = Some("${env:DGP_DOES_NOT_EXIST_ANYWHERE:-fallback}".into());
+        cfg.resolve_env_ref_scalars().unwrap();
+        assert_eq!(cfg.access_key_id.as_deref(), Some("fallback"));
+        // An unresolvable ref fails loudly.
+        cfg.access_key_id = Some("${env:DGP_DOES_NOT_EXIST_ANYWHERE}".into());
+        assert!(cfg.resolve_env_ref_scalars().is_err());
     }
 }

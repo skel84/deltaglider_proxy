@@ -339,6 +339,20 @@ async fn apply_section(
     // effectively a defensive no-op for that field.
     new_cfg.bootstrap_password_hash = old_cfg.bootstrap_password_hash.clone();
 
+    // Carry env-ref provenance through the rebuild (into_flat starts from a
+    // default), then resolve any full-scalar `${env:NAME}` strings in the
+    // incoming section. Section GETs emit refs for ref-sourced secrets, so a
+    // GUI round-trip echoes them back — resolving here (provenance → server
+    // env → ref default) keeps the real secret AND lets operators type refs
+    // into GUI fields. An unresolvable ref fails the PUT loudly.
+    new_cfg.env_refs = old_cfg.env_refs.clone();
+    if let Err(e) = new_cfg.resolve_env_ref_scalars() {
+        return reject(
+            StatusCode::BAD_REQUEST,
+            format!("env reference in section body did not resolve: {e}").as_str(),
+        );
+    }
+
     // STEP-1: cred preservation. Uses the SAME shared helpers as
     // `apply_config_doc` (see `super::preserve_sigv4_pair`,
     // `preserve_primary_backend_creds`, `preserve_named_backends_creds`
