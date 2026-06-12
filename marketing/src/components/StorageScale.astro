@@ -107,37 +107,36 @@ const rows = Array.from({ length: VERSIONS }, (_, i) => i + 1);
 
   .scale-chart {
     display: grid;
-    gap: 7px;
-    max-width: var(--measure-wide);
-    padding: 1.5rem 1.6rem 1.4rem;
+    gap: 12px;
+    padding: 2.25rem 2.5rem 2rem;
     border: 1px solid var(--rule);
-    border-radius: 14px;
+    border-radius: 16px;
     background: var(--bg-card);
   }
 
   .scale-row {
     display: grid;
-    grid-template-columns: 2.4rem 1fr 1fr;
-    column-gap: 1.4rem;
+    grid-template-columns: 3.2rem 1fr 1fr;
+    column-gap: 2rem;
     align-items: center;
   }
 
-  .scale-head-row { margin-bottom: 0.4rem; }
+  .scale-head-row { margin-bottom: 0.6rem; }
 
   .scale-head {
     font-family: var(--font-mono);
-    font-size: 0.7rem;
+    font-size: 0.95rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
-    color: var(--ink-mute);
+    letter-spacing: 0.08em;
+    color: var(--ink-soft);
   }
   .scale-head-b { color: var(--brand-dark); }
 
   .vlabel {
     font-family: var(--font-mono);
-    font-size: 0.68rem;
-    color: var(--ink-mute);
+    font-size: 0.95rem;
+    color: var(--ink-faint);
     text-align: right;
     padding-right: 0.2rem;
   }
@@ -145,7 +144,7 @@ const rows = Array.from({ length: VERSIONS }, (_, i) => i + 1);
   .track {
     display: flex;
     align-items: center;
-    height: 20px;
+    height: 34px;
     min-width: 0;
   }
 
@@ -153,10 +152,10 @@ const rows = Array.from({ length: VERSIONS }, (_, i) => i + 1);
     display: flex;
     align-items: center;
     height: 100%;
-    border-radius: 3px;
-    padding-inline: 7px;
+    border-radius: 6px;
+    padding-inline: 12px;
     font-family: var(--font-mono);
-    font-size: 0.62rem;
+    font-size: 0.92rem;
     font-style: normal;
     white-space: nowrap;
     overflow: hidden;
@@ -168,7 +167,7 @@ const rows = Array.from({ length: VERSIONS }, (_, i) => i + 1);
   .fill-a {
     width: 100%;
     background: rgba(148, 163, 184, 0.22);
-    border: 1px solid var(--rule);
+    border: 1px solid var(--rule-strong);
     color: var(--ink-soft);
   }
 
@@ -179,54 +178,58 @@ const rows = Array.from({ length: VERSIONS }, (_, i) => i + 1);
     color: #f0abfc;
   }
 
-  /* 148 KB / 91 MB = 0.163% — the 2px floor is the only generosity */
+  /* 148 KB / 91 MB = 0.163% — the 3px floor is the only generosity */
   .fill-d {
-    width: max(2px, 0.163%);
+    width: max(3px, 0.163%);
     padding: 0;
     background: var(--brand);
-    box-shadow: 0 0 7px rgba(34, 211, 238, 0.65);
+    box-shadow: 0 0 10px rgba(34, 211, 238, 0.7);
   }
 
   .d-label {
     font-family: var(--font-mono);
-    font-size: 0.62rem;
+    font-size: 0.92rem;
     color: var(--brand-dark);
-    margin-left: 0.55rem;
+    margin-left: 0.7rem;
     white-space: nowrap;
   }
 
   .scale-more {
-    margin-top: 0.15rem;
+    margin-top: 0.3rem;
   }
   .more-text {
     font-family: var(--font-mono);
-    font-size: 0.66rem;
-    color: var(--ink-mute);
+    font-size: 0.88rem;
+    color: var(--ink-faint);
     letter-spacing: 0.02em;
   }
   .more-text-b { color: var(--brand-dark); }
 
   .scale-totals {
-    margin-top: 0.55rem;
-    padding-top: 0.85rem;
-    border-top: 1px solid var(--rule);
+    margin-top: 0.9rem;
+    padding-top: 1.3rem;
+    border-top: 1px solid var(--rule-strong);
   }
   .total {
     font-family: var(--font-mono);
-    font-size: 1.1rem;
+    font-size: 2.1rem;
     font-weight: 700;
+    letter-spacing: -0.02em;
     color: var(--ink-strong);
   }
   .total em {
     font-style: normal;
     font-weight: 400;
-    font-size: 0.68rem;
-    color: var(--ink-mute);
+    font-size: 0.85rem;
+    color: var(--ink-faint);
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-left: 0.4rem;
+    letter-spacing: 0.07em;
+    margin-left: 0.5rem;
   }
-  .total-b { color: var(--brand-dark); }
+  .total-b {
+    color: var(--brand-dark);
+    text-shadow: 0 0 24px rgba(34, 211, 238, 0.45);
+  }
 
   .scale-projection {
     max-width: var(--measure-wide);
@@ -273,11 +276,15 @@ const rows = Array.from({ length: VERSIONS }, (_, i) => i + 1);
   }
 
   @media (max-width: 640px) {
-    .scale-chart { padding: 1.1rem 1rem 1rem; }
-    .scale-row { column-gap: 0.8rem; grid-template-columns: 2rem 1fr 1fr; }
-    .fill { font-size: 0.56rem; padding-inline: 5px; }
-    .more-text { font-size: 0.58rem; }
-    .total { font-size: 0.95rem; }
+    .scale-chart { padding: 1.25rem 1rem 1.1rem; }
+    .scale-row { column-gap: 0.8rem; grid-template-columns: 2.2rem 1fr 1fr; }
+    .scale-head { font-size: 0.7rem; }
+    .vlabel { font-size: 0.72rem; }
+    .track { height: 24px; }
+    .fill { font-size: 0.66rem; padding-inline: 6px; }
+    .d-label { font-size: 0.68rem; }
+    .more-text { font-size: 0.62rem; }
+    .total { font-size: 1.25rem; }
     .total em { display: block; margin: 0.1rem 0 0; }
   }
 

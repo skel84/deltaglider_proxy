@@ -29,23 +29,52 @@ const description =
     />
   </Fragment>
   <section class="hero">
-    <div class="shell">
-      <h1>Use cheap S3-compatible storage without giving the provider your data.</h1>
+    <div class="shell reg-hero-grid">
+      <div class="reg-hero-copy">
+        <h1>Use cheap S3-compatible storage without giving the provider your data.</h1>
 
-      <p class="hero-lede">
-        DeltaGlider encrypts every object with AES-256-GCM before it
-        reaches the bucket. Your encryption key lives in your runtime;
-        the storage provider — Hetzner, Wasabi, Cloudflare, an offshore
-        mirror — sees ciphertext only.
-      </p>
+        <p class="hero-lede">
+          DeltaGlider encrypts every object with AES-256-GCM before it
+          reaches the bucket. Your encryption key lives in your runtime;
+          the storage provider — Hetzner, Wasabi, Cloudflare, an offshore
+          mirror — sees ciphertext only.
+        </p>
 
-      <p>
-        Built by <a href="https://beshu.tech">Beshu Tech</a> — 10 senior
-        engineers, since 2017. Same team behind
-        <a href="https://readonlyrest.com">ReadonlyREST</a> (Elasticsearch
-        security) and Anaphora (dashboard-to-PDF reporting), in production
-        at:
-      </p>
+        <p>
+          Built by <a href="https://beshu.tech">Beshu Tech</a> — 10 senior
+          engineers, since 2017. Same team behind
+          <a href="https://readonlyrest.com">ReadonlyREST</a> (Elasticsearch
+          security) and Anaphora (dashboard-to-PDF reporting), in production
+          at:
+        </p>
+      </div>
+
+      <div class="enc-visual" aria-hidden="true">
+        <div class="enc-pane enc-pane--yours">
+          <span class="enc-tag">Your runtime</span>
+          <div class="enc-file">
+            <span class="enc-file-icon">▤</span>
+            acme-db-20260611.dump · 2.1 GB
+          </div>
+          <div class="enc-keyrow">
+            <span class="enc-key-chip">⚿ AES-256 key</span>
+            <span class="enc-key-note">lives here. Never uploaded.</span>
+          </div>
+        </div>
+
+        <div class="enc-arrow">
+          <span class="enc-arrow-label">encrypt, then upload</span>
+          <span class="enc-arrow-line"></span>
+        </div>
+
+        <div class="enc-pane enc-pane--theirs">
+          <span class="enc-tag enc-tag--theirs">What the provider stores</span>
+          <pre class="enc-cipher">9f 2e 41 c7 88 0a d3 5b 6c e1 74 92 fb 08 1d a6
+33 c9 5e 07 b4 8f 2a d1 66 0b 9c e8 45 71 af 12
+de 60 3b f5 9a 04 c2 77 18 8d eb 56 a3 0f c4 29</pre>
+          <span class="enc-cipher-note">ciphertext only — on Hetzner, Wasabi, anywhere</span>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -175,6 +204,135 @@ const description =
 </BaseLayout>
 
 <style>
+  /* === Hero: copy left, encryption-flow visual right === */
+  .reg-hero-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 3rem;
+    align-items: center;
+  }
+  @media (min-width: 1024px) {
+    .reg-hero-grid { grid-template-columns: 1.05fr 0.95fr; gap: 4rem; }
+  }
+
+  .reg-hero-copy h1 {
+    max-width: 22ch;
+    font-size: clamp(2.2rem, 3.6vw, 3.3rem);
+  }
+
+  .enc-visual {
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+  }
+
+  .enc-pane {
+    border-radius: 16px;
+    padding: 1.8rem 2rem;
+    border: 1px solid var(--rule-strong);
+    background: var(--bg-card);
+    box-shadow: var(--shadow-md);
+  }
+
+  .enc-pane--yours {
+    border-color: rgba(34, 211, 238, 0.45);
+    box-shadow: 0 0 28px rgba(34, 211, 238, 0.14), var(--shadow-md);
+  }
+
+  .enc-tag {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--brand-dark);
+    margin-bottom: 1rem;
+  }
+  .enc-tag--theirs { color: var(--ink-faint); }
+
+  .enc-file {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    font-family: var(--font-mono);
+    font-size: 1.05rem;
+    color: var(--ink-strong);
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    margin-bottom: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .enc-file-icon { color: var(--brand); font-size: 1.25rem; }
+
+  .enc-keyrow {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    flex-wrap: wrap;
+  }
+  .enc-key-chip {
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #fcd34d;
+    padding: 0.45rem 0.8rem;
+    border: 1px solid rgba(252, 211, 77, 0.4);
+    border-radius: 999px;
+    background: rgba(252, 211, 77, 0.08);
+  }
+  .enc-key-note { color: var(--ink-soft); font-size: 0.95rem; }
+
+  .enc-arrow {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0 0.5rem;
+  }
+  .enc-arrow-label {
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    color: var(--brand-dark);
+    white-space: nowrap;
+  }
+  .enc-arrow-line {
+    flex: 1;
+    height: 2px;
+    background: linear-gradient(90deg, rgba(34, 211, 238, 0.7), var(--rule));
+    position: relative;
+  }
+  .enc-arrow-line::after {
+    content: '';
+    position: absolute;
+    right: -1px;
+    top: 50%;
+    transform: translateY(-50%);
+    border-left: 8px solid var(--rule-strong);
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+  }
+
+  .enc-cipher {
+    margin: 0 0 0.8rem;
+    padding: 1rem 1.1rem;
+    font-size: 0.98rem;
+    line-height: 1.8;
+    letter-spacing: 0.04em;
+    color: var(--ink-faint);
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    box-shadow: none;
+    overflow: hidden;
+  }
+  .enc-cipher-note {
+    font-size: 0.95rem;
+    color: var(--ink-soft);
+  }
+
   .content-layout {
     display: flex;
     flex-direction: column;

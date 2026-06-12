@@ -6,7 +6,7 @@
 //   Scale        the claim drawn to scale + the ZIP objection (same artifact)
 //   DropIn       what adoption costs (one config line) + trust facts
 //   ControlPlane the other half of the product + real admin-UI screens
-//   Receipts     migration log, engineering discipline, team track record
+//   DueDiligence the visitor's own questions, answered with links
 //   Fit          is it for MY workload (honest no's) + where to go next
 //   Quickstart   let me touch it
 // No section repeats another's job. Casualties of the rethink: the stats
@@ -17,7 +17,6 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 import JsonLd from '../components/JsonLd.astro';
 import TestimonialsBlock from '../components/TestimonialsBlock.astro';
-import SimoneCallout from '../components/SimoneCallout.astro';
 import WorkloadFitTable from '../components/WorkloadFitTable.astro';
 import HeroSlideshow from '../components/HeroSlideshow.tsx';
 import StorageScale from '../components/StorageScale.astro';
@@ -42,7 +41,7 @@ import {
 
   {/* ============================== HERO ============================== */}
   <section class="hero">
-    <div class="shell hero-grid">
+    <div class="shell hero-grid hero-grid--bleed">
       <div class="hero-copy">
         <span class="hero-eyebrow">
           <span class="hero-eyebrow-dot"></span>
@@ -81,7 +80,7 @@ import {
         </p>
       </div>
 
-      <div class="hero-visual">
+      <div class="hero-visual hero-visual--bleed">
         <HeroSlideshow client:visible />
       </div>
     </div>
@@ -96,40 +95,58 @@ import {
   {/* ======================= THE OTHER HALF =========================== */}
   <ControlPlane />
 
-  {/* ============================ RECEIPTS ============================= */}
+  {/* ====================== DUE DILIGENCE ============================= */}
   <section class="section section-alt">
     <div class="shell">
-      <span class="section-eyebrow">Receipts</span>
-      <h2>Judge us by what we publish</h2>
+      <span class="section-eyebrow">Due diligence</span>
+      <h2>The questions you'd ask anyway</h2>
 
       <p>
-        A storage product asks for a lot of trust. Rather than assert
-        it, here's the paper trail:
+        Answered with links, so you can check instead of believe.
       </p>
 
-      <SimoneCallout />
+      <div class="dd-grid">
+        <article class="dd-card" data-n="01">
+          <h3 class="dd-q">Will it corrupt my artifacts?</h3>
+          <p class="dd-a">
+            Every delta read is rebuilt and SHA-256-checked against the
+            hash recorded at upload — and 1,100+ unit tests plus an
+            integration matrix against real MinIO gate every merge.
+          </p>
+          <a class="dd-link" href="https://github.com/beshu-tech/deltaglider_proxy">Read the source — it's GPL-3.0 →</a>
+        </article>
 
-      <ul class="proof-list">
-        <li>
-          <strong>1,100+ unit tests</strong>, clippy
-          <code>-D warnings</code> clean, and a curated integration
-          matrix against real MinIO — on every merge.
-        </li>
-        <li>
-          <strong>We hunt our own bugs and publish them.</strong> A
-          five-investigator correctness audit (concurrency, auth,
-          storage, wire, errors) surfaced 10 bugs; all fixed, each
-          pinned by a regression test, written up bug-by-bug in the
-          <a href="https://github.com/beshu-tech/deltaglider_proxy/blob/main/CHANGELOG.md">CHANGELOG</a>.
-        </li>
-        <li>
-          <strong>The people who wrote it answer your tickets.</strong>
-          No outsourced first line, no chatbot. Email
-          <a href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20General%20inquiry">contact@beshu.tech</a>
-          and the reply comes from someone whose name is in
-          <code>git log</code>.
-        </li>
-      </ul>
+        <article class="dd-card dd-card--accent" data-n="02">
+          <h3 class="dd-q">What breaks in production?</h3>
+          <p class="dd-a">
+            Here's what broke in ours: we pushed our own 1.71&nbsp;TB
+            release catalog through it and published every bug we hit —
+            upstream TMPDIR, proxy timeouts, EBS exhaustion — with the
+            fixes.
+          </p>
+          <a class="dd-link" href="/case-studies/readonlyrest-builds">Read the migration log →</a>
+        </article>
+
+        <article class="dd-card dd-card--accent" data-n="03">
+          <h3 class="dd-q">Will bugs get fixed — or hidden?</h3>
+          <p class="dd-a">
+            A five-investigator correctness audit surfaced 10 bugs; all
+            fixed, each pinned by a regression test, written up
+            bug-by-bug where you can read them.
+          </p>
+          <a class="dd-link" href="https://github.com/beshu-tech/deltaglider_proxy/blob/main/CHANGELOG.md">The bug-by-bug CHANGELOG →</a>
+        </article>
+
+        <article class="dd-card" data-n="04">
+          <h3 class="dd-q">Who answers when it breaks at 2 a.m.?</h3>
+          <p class="dd-a">
+            The people whose names are in <code>git log</code>. No
+            outsourced first line, no chatbot — your mail lands with the
+            engineers who wrote the code.
+          </p>
+          <a class="dd-link" href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20General%20inquiry">contact@beshu.tech →</a>
+        </article>
+      </div>
 
       <TestimonialsBlock />
     </div>
@@ -184,25 +201,79 @@ import {
     margin-top: 0.75rem;
   }
 
-  .proof-list {
-    list-style: none;
-    padding-left: 0;
-    max-width: var(--measure-wide);
+  .dd-grid {
     display: grid;
-    gap: 1rem;
-    margin: 1.5rem 0;
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+    margin: 2.5rem 0 3.5rem;
   }
 
-  .proof-list li {
-    padding: 1rem 1.25rem;
+  @media (min-width: 760px) {
+    .dd-grid { grid-template-columns: 1fr 1fr; }
+  }
+
+  .dd-card {
+    position: relative;
+    overflow: hidden;
+    padding: 2.2rem 2.4rem 2.1rem;
     background: var(--bg-card);
     border: 1px solid var(--rule);
-    border-radius: 6px;
+    border-radius: 16px;
     box-shadow: var(--shadow-sm);
-    color: var(--ink-strong);
-    line-height: 1.55;
-    margin: 0;
+    transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
   }
+
+  .dd-card:hover {
+    transform: translateY(-3px);
+    border-color: rgba(34, 211, 238, 0.45);
+    box-shadow: var(--shadow-md);
+  }
+
+  .dd-card--accent:hover {
+    border-color: rgba(217, 70, 239, 0.5);
+  }
+
+  /* giant watermark number — graphic weight without clutter */
+  .dd-card::before {
+    content: attr(data-n);
+    position: absolute;
+    top: -1.6rem;
+    right: -0.6rem;
+    font-family: var(--font-mono);
+    font-size: 7.5rem;
+    font-weight: 800;
+    line-height: 1;
+    color: rgba(34, 211, 238, 0.08);
+    pointer-events: none;
+  }
+  .dd-card--accent::before {
+    color: rgba(217, 70, 239, 0.09);
+  }
+
+  .dd-q {
+    margin: 0 0 0.8rem;
+    font-size: 1.45rem;
+    font-weight: 800;
+    letter-spacing: -0.015em;
+    line-height: 1.15;
+    color: var(--ink-strong);
+    max-width: 18ch;
+  }
+
+  .dd-a {
+    margin: 0 0 1.1rem;
+    color: var(--ink-soft);
+    font-size: 1rem;
+    line-height: 1.6;
+    max-width: 48ch;
+  }
+
+  .dd-link {
+    font-weight: 600;
+    color: var(--brand-dark);
+    text-decoration: none;
+  }
+  .dd-link:hover { text-decoration: underline; }
 
   .fit-next {
     margin-top: 1.5rem;

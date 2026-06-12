@@ -210,64 +210,64 @@ const description =
     display: flex;
     justify-content: center;
     align-items: center;
-    height: 300px;
+    height: 480px;
   }
 
   .abstract-jars {
     position: relative;
-    width: 200px;
-    height: 200px;
+    width: 360px;
+    height: 360px;
   }
 
   .jar {
     position: absolute;
-    width: 160px;
-    height: 160px;
-    border: 2px solid rgba(255, 255, 255, 0.1);
-    border-radius: 12px;
+    width: 300px;
+    height: 300px;
+    border: 2px solid rgba(255, 255, 255, 0.12);
+    border-radius: 18px;
     background: var(--bg-alt);
-    top: 0; left: 20px;
+    top: 0; left: 30px;
     transform-origin: bottom center;
     transition: transform 0.5s ease;
   }
 
-  .jar-1 { 
-    transform: translateY(0) scale(1) translateZ(-40px); 
-    opacity: 0.2; 
+  .jar-1 {
+    transform: translateY(0) scale(1) translateZ(-40px);
+    opacity: 0.3;
     display: flex;
     align-items: center;
     justify-content: center;
   }
-  
+
   .jar-label {
     color: var(--ink-faint);
-    font-size: 1.5rem;
+    font-size: 2.6rem;
     font-weight: 700;
     font-family: var(--font-mono);
     text-transform: uppercase;
   }
-  .jar-2 { transform: translateY(15px) scale(0.95) translateZ(-20px); opacity: 0.4; border-color: rgba(25, 230, 203, 0.2); }
-  .jar-3 { transform: translateY(30px) scale(0.9); opacity: 0.8; border-color: rgba(25, 230, 203, 0.4); }
+  .jar-2 { transform: translateY(26px) scale(0.95) translateZ(-20px); opacity: 0.45; border-color: rgba(25, 230, 203, 0.2); }
+  .jar-3 { transform: translateY(52px) scale(0.9); opacity: 0.85; border-color: rgba(25, 230, 203, 0.4); }
 
   .delta-block {
     position: absolute;
-    bottom: -30px;
-    left: 10px;
-    width: 180px;
-    padding: 1.5rem;
+    bottom: -48px;
+    left: 25px;
+    width: 310px;
+    padding: 2.2rem;
     background: rgba(25, 230, 203, 0.15);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
     border: 1px solid var(--brand);
-    border-radius: 12px;
-    box-shadow: 0 10px 30px rgba(25, 230, 203, 0.2);
+    border-radius: 16px;
+    box-shadow: 0 14px 44px rgba(25, 230, 203, 0.25);
     text-align: center;
     z-index: 10;
   }
 
   .delta-stat {
     display: block;
-    font-size: 2rem;
+    font-size: 3.2rem;
     font-weight: 800;
     color: var(--brand);
     line-height: 1;
@@ -276,11 +276,11 @@ const description =
 
   .delta-label {
     display: block;
-    font-size: 0.85rem;
+    font-size: 1rem;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.12em;
     color: var(--brand-dark);
-    margin-top: 0.5rem;
+    margin-top: 0.6rem;
   }
 
   /* === Rhythm & Layouts === */
