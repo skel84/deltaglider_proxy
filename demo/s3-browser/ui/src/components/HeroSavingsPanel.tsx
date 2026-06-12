@@ -1,40 +1,30 @@
 /**
- * HeroSavingsPanel — the dashboard "money shot".
+ * HeroSavingsPanel — the dashboard "money shot", v2.
  *
- * Replaces the old 4-card KPI strip (Total storage · Space saved ·
- * Savings % · Est. monthly savings) with one composition that
- * communicates the staggering before-after of delta compression in
- * under two seconds:
+ * Redesigned after a three-expert pass (information design / visual
+ * craft / contrarian). The one story this panel tells in two seconds:
  *
- *   - **Hero number**: the savings percent at billboard size with a
- *     count-up animation on first visit per session.
- *   - **Ratio caption**: "15× smaller" underneath, plain English.
- *   - **Scale-accurate bar**: a single 100%-wide rectangle showing
- *     kept-vs-saved as actual area, not just numbers. The kept slice
- *     is solid theme accent; the saved slice is muted with a soft
- *     dot pattern so it reads as *absence*, not another colour.
- *   - **Cost line**: dollars-per-month, configurable by a small cog
- *     popover (same `useFixedOverlayPosition` overlay we use for
- *     SimpleSelect / HoverHint).
- *   - **Before-after bytes**: "1.4 TB ↓ 96 GB on disk", plain text.
- *   - **Cache-age line**: when each bucket was last scanned, so the
- *     user knows the picture isn't stale-invisible.
+ *     "You uploaded 1.4 TB. You're storing 96 GB."
  *
- * Three independent reads in one composition (gut · wallet · proof);
- * scale-invariant from GB to PB; animation is the message — viewers
- * watch the bar literally contract.
+ * Layout: two zones over a full-width proof.
+ *   - LEFT — the multiplier ("15.2×") at billboard size in gradient
+ *     ink. Unbounded and visceral where the old % hero was capped and
+ *     flat. The % survives as a green pill underneath.
+ *   - RIGHT — the before/after proof: a dashed ghost bar ("without
+ *     DeltaGlider", always full width) above the real bar ("with"),
+ *     where the dense teal KEPT slice is dwarfed by the luminous green
+ *     SAVED field. Green = money not spent; teal-ink = bytes kept.
+ *     Then the dollar line: $/mo AND $/yr.
+ *   - FOOTER — one quiet strip of derived facts (objects · buckets ·
+ *     biggest single save · reference share).
  *
- * Animation policy
- *   - Once per session (gated by `sessionStorage`); subsequent tab
- *     opens render the final state instantly.
- *   - Honors `prefers-reduced-motion: reduce` → static final values.
- *   - When a live SSE scan is streaming we suppress the count-up and
- *     let values track the live frames. The hero only animates the
- *     first paint of a *settled* state.
+ * Empty state (no scans yet): never renders 0% / $0.00. Instead a
+ * designed "Ready to measure" composition with an EXAMPLE-labelled
+ * illustration of the two bars and a primary scan CTA.
  *
- * Bundle cost: ~5 KB initial (`m` + `LazyMotion`), ~30 KB lazy-loaded
- * via `domAnimation` features when the Analytics tab mounts. No
- * chart library is added — the bar is two divs with percent widths.
+ * Animation: one choreographed timeline (ghost paints → bars + numbers
+ * count together → settle pulse → shimmer). Session-gated, honours
+ * prefers-reduced-motion, suppressed while live SSE frames stream.
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -47,12 +37,12 @@ import {
   useTransform,
   animate,
 } from 'motion/react';
-import { SettingOutlined, ClockCircleOutlined } from '@ant-design/icons';
+import { SettingOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
-import { formatBytes, clamp, dotPattern } from '../utils';
+import { formatBytes, clamp } from '../utils';
 import { useFixedOverlayPosition } from '../useFixedOverlayPosition';
 
-/** Cost rate presets — moved here from AnalyticsSection (sole caller now). */
+/** Cost rate presets. */
 const COST_PRESETS = [
   { label: 'AWS S3', rate: 0.023 },
   { label: 'AWS S3 IA', rate: 0.0125 },
@@ -63,7 +53,7 @@ const COST_PRESETS = [
 
 const SESSION_GATE_KEY = 'dgp-hero-animated';
 const ANIMATION_MS = 1400;
-const EASE = [0.16, 1, 0.3, 1] as const; // expo-ish, mimics Stripe/Linear
+const EASE = [0.16, 1, 0.3, 1] as const;
 
 interface Props {
   totalOriginal: number;
@@ -72,11 +62,15 @@ interface Props {
   monthlySavings: number;
   costRate: number;
   onChangeCostRate: (rate: number) => void;
-  /** ISO-ish age label, already formatted by ageLabel() upstream. */
-  cacheAgeNewest: string | null;
-  cacheAgeOldest: string | null;
-  /** Total buckets not yet scanned — surfaces a tiny amber footnote. */
+  /** Footer facts (computed upstream). */
+  totalObjects: number;
+  bucketCount: number;
+  biggestSave: { bucket: string; bytes: number } | null;
+  /** Reference bytes as a share of stored bytes (0..1), null if unknown. */
+  referenceShare: number | null;
+  /** Buckets without a cached scan — powers the empty-state CTA. */
   unscannedCount: number;
+  onScanMissing: () => void;
   /** When a scan is streaming, suppress count-up so values track live frames. */
   liveScanning: boolean;
 }
@@ -96,41 +90,42 @@ function HeroInner({
   monthlySavings,
   costRate,
   onChangeCostRate,
-  cacheAgeNewest,
-  cacheAgeOldest,
+  totalObjects,
+  bucketCount,
+  biggestSave,
+  referenceShare,
   unscannedCount,
+  onScanMissing,
   liveScanning,
 }: Props) {
   const colors = useColors();
+  const hasData = totalOriginal > 0;
 
-  // ─── Motion values + animation gate ───────────────────────────────
-  //
-  // Three values animate together: the percent number, the dollar
-  // figure, and the saved-bar width. They share one duration + easing
-  // so the orchestration reads as one event, not three things racing.
-  const percentMV = useMotionValue(0);
+  // ─── Motion values ────────────────────────────────────────────────
+  const ratioMV = useMotionValue(1);
   const dollarMV = useMotionValue(0);
-  const savedWidthMV = useMotionValue(0); // 0..100
+  const savedWidthMV = useMotionValue(0); // 0..100 — width of the SAVED field
 
-  /** Final-paint values formatted to strings via useTransform. */
-  const percentDisplay = useTransform(
-    percentMV,
-    v => v.toFixed(1).replace(/\.0$/, ''),
-  );
-  const dollarDisplay = useTransform(
-    dollarMV,
-    v => v < 10 ? v.toFixed(2) : v.toFixed(2),
-  );
-
+  const compressionRatio = totalStored > 0 ? totalOriginal / totalStored : 0;
+  const useRatioLead = compressionRatio >= 1.05;
+  const targetRatio = Math.max(1, compressionRatio);
   const targetPercent = clamp(savingsPercent, 0, 100);
   const targetSavedWidth = clamp(savingsPercent, 0, 100);
   const targetDollars = Math.max(0, monthlySavings);
 
-  // Skip the count-up sequence when:
-  //   - we've already animated this session
-  //   - the user prefers reduced motion
-  //   - a live scan is streaming (values must track frames, not interpolate)
+  const ratioDisplay = useTransform(ratioMV, v =>
+    v >= 100 ? Math.round(v).toString() : v.toFixed(1).replace(/\.0$/, ''),
+  );
+  const dollarDisplay = useTransform(dollarMV, v => v.toFixed(2));
+  const percentLead = useTransform(ratioMV, () => targetPercent.toFixed(1));
+  const keptWidth = useTransform(savedWidthMV, v => `max(${100 - v}%, 3px)`);
+  const savedWidth = useTransform(savedWidthMV, v => `${v}%`);
+  const seamLeft = useTransform(savedWidthMV, v => `calc(${100 - v}% - 1px)`);
+
+  const [settled, setSettled] = useState(false);
+
   useEffect(() => {
+    if (!hasData) return;
     const prefersReduced =
       typeof window !== 'undefined' &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -140,59 +135,38 @@ function HeroInner({
     const skipAnim = prefersReduced || alreadyPlayed || liveScanning;
 
     if (skipAnim) {
-      percentMV.set(targetPercent);
+      ratioMV.set(targetRatio);
       dollarMV.set(targetDollars);
       savedWidthMV.set(targetSavedWidth);
+      setSettled(true);
       return;
     }
 
-    // Start each value from zero so the bar literally GROWS from
-    // nothing into the final dwarf-the-kept proportions.
-    percentMV.set(0);
+    ratioMV.set(1);
     dollarMV.set(0);
     savedWidthMV.set(0);
+    setSettled(false);
 
-    const ctrl1 = animate(percentMV, targetPercent, {
-      duration: ANIMATION_MS / 1000,
-      ease: EASE,
-    });
-    const ctrl2 = animate(dollarMV, targetDollars, {
-      duration: ANIMATION_MS / 1000,
-      ease: EASE,
-    });
-    const ctrl3 = animate(savedWidthMV, targetSavedWidth, {
-      duration: ANIMATION_MS / 1000,
-      ease: EASE,
-    });
+    const opts = { duration: ANIMATION_MS / 1000, ease: EASE };
+    const ctrl1 = animate(ratioMV, targetRatio, opts);
+    const ctrl2 = animate(dollarMV, targetDollars, opts);
+    const ctrl3 = animate(savedWidthMV, targetSavedWidth, opts);
 
-    const gateTimer = window.setTimeout(() => {
+    const settleTimer = window.setTimeout(() => {
+      setSettled(true);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(SESSION_GATE_KEY, '1');
       }
-    }, ANIMATION_MS + 200);
+    }, ANIMATION_MS + 150);
 
     return () => {
       ctrl1.stop();
       ctrl2.stop();
       ctrl3.stop();
-      window.clearTimeout(gateTimer);
+      window.clearTimeout(settleTimer);
     };
-    // We deliberately depend on the *targets*, not the motion values.
-    // The animation re-runs when underlying totals change (e.g. cost
-    // preset switch updates dollars only, not the bar). The motion
-    // values are stable refs from useMotionValue — touching them in the
-    // body doesn't (and shouldn't) re-trigger this effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetPercent, targetDollars, targetSavedWidth, liveScanning]);
-
-  // ─── Derived display values ──────────────────────────────────────
-  const compressionRatio =
-    totalStored > 0 ? totalOriginal / totalStored : 0;
-  const ratioLabel =
-    compressionRatio >= 1.05
-      ? `${compressionRatio.toFixed(1).replace(/\.0$/, '')}× smaller`
-      : null;
-  const hasData = totalOriginal > 0;
+  }, [hasData, targetRatio, targetDollars, targetSavedWidth, liveScanning]);
 
   // ─── Cost popover ────────────────────────────────────────────────
   const [showCostConfig, setShowCostConfig] = useState(false);
@@ -227,199 +201,375 @@ function HeroInner({
     };
   }, [showCostConfig, popoverEl]);
 
+  // ─── Empty state ─────────────────────────────────────────────────
+  if (!hasData) {
+    return (
+      <EmptyHero
+        colors={colors}
+        bucketCount={bucketCount}
+        unscannedCount={unscannedCount}
+        onScanMissing={onScanMissing}
+      />
+    );
+  }
+
+  const savedBytes = Math.max(0, totalOriginal - totalStored);
+  const keptPct = 100 - targetSavedWidth;
+  const yearlySavings = targetDollars * 12;
+
+  const monoLabel: React.CSSProperties = {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 10,
+    fontWeight: 600,
+    letterSpacing: '0.08em',
+    textTransform: 'uppercase',
+  };
+
   return (
     <div
       style={{
         display: 'grid',
-        // Two-column layout above the bar: hero number | caption.
-        // Stacks on narrow viewports via the dashboard density rules
-        // — at small widths the panel goes single-column.
-        gridTemplateColumns: 'minmax(280px, 1fr) 1.4fr',
-        gap: 'clamp(16px, 2vw, 36px)',
+        gridTemplateColumns: 'minmax(240px, 0.9fr) 1.6fr',
+        gap: 'clamp(20px, 2.5vw, 44px)',
         alignItems: 'center',
         height: '100%',
         position: 'relative',
-        // Allow the haze pseudo-element to bleed without the panel
-        // body clipping it sideways.
         overflow: 'hidden',
+        fontFamily: 'var(--font-ui)',
       }}
     >
-      {/* Soft radial haze behind the hero number (Vercel/Linear pattern).
-          Pure CSS, no images — swaps colour cleanly between themes. */}
+      {/* Green haze behind the numeral. */}
       <div
         aria-hidden
         style={{
           position: 'absolute',
           inset: 0,
           pointerEvents: 'none',
-          background: `radial-gradient(60% 60% at 18% 50%, ${colors.ACCENT_BLUE}1f 0%, transparent 70%)`,
+          background: `radial-gradient(120% 90% at 14% 35%, ${colors.GLOW_GREEN.replace(/[\d.]+\)$/, '0.10)')} 0%, transparent 62%)`,
           animation: 'dgHeroHazePulse 6s ease-in-out infinite',
         }}
       />
 
-      {/* ── Hero number column ───────────────────────────────────
-          All three lines (eyebrow · big number · ratio caption) share
-          the same flex-start left edge of an inner flex column. The
-          inner column shrinks to the natural width of its widest
-          child (the big number) so the eyebrow + ratio caption sit
-          flush under the digits' bounding box — no visual drift from
-          the giant number's negative letter-spacing because all three
-          measure from the same x=0 origin of the same wrapper.
-      */}
+      {/* ── LEFT: the multiplier ─────────────────────────────────── */}
       <div
         style={{
           display: 'flex',
           flexDirection: 'column',
-          gap: 6,
+          alignItems: 'center',
+          gap: 10,
           position: 'relative',
           zIndex: 1,
-          alignItems: 'flex-start',
         }}
       >
         <div
           style={{
-            display: 'inline-flex',
-            flexDirection: 'column',
-            gap: 6,
-            // Center the eyebrow + ratio caption under the giant
-            // number rather than pinning them to its textbox origin.
-            // The wrapper itself shrinks to the digits' natural
-            // width, so center-aligning the children visually
-            // centers each label under the % glyphs.
-            alignItems: 'center',
+            fontSize: 11,
+            fontWeight: 800,
+            letterSpacing: '0.16em',
+            textTransform: 'uppercase',
+            color: colors.SAVED_TEXT,
           }}
         >
-          <div
-            style={{
-              fontSize: 10.5,
-              fontWeight: 700,
-              letterSpacing: '0.12em',
-              textTransform: 'uppercase',
-              color: colors.TEXT_MUTED,
-              fontFamily: 'var(--font-ui)',
-              alignSelf: 'center',
-            }}
-          >
-            Storage saved
-          </div>
-          <div
-            aria-live="polite"
-            aria-label={`${targetPercent.toFixed(1)} percent storage saved`}
-            style={{
-              display: 'flex',
-              alignItems: 'baseline',
-              gap: 4,
-              color: colors.TEXT_PRIMARY,
-              fontFamily: 'var(--font-ui)',
-              fontWeight: 800,
-              fontSize: 'clamp(64px, 11vw, 132px)',
-              lineHeight: 1,
-              letterSpacing: '-0.04em',
-              fontVariantNumeric: 'tabular-nums',
-            }}
-          >
-            <m.span>{percentDisplay}</m.span>
-            <span
-              style={{
-                fontSize: '0.42em',
-                fontWeight: 700,
-                color: colors.ACCENT_GREEN,
-                marginLeft: 4,
-              }}
-            >
-              %
-            </span>
-          </div>
-          {ratioLabel && (
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 600,
-                color: colors.ACCENT_GREEN,
-                fontFamily: 'var(--font-ui)',
-                letterSpacing: '-0.01em',
-                alignSelf: 'center',
-              }}
-            >
-              {ratioLabel}
+          Storage saved
+        </div>
+        <m.div
+          aria-live="polite"
+          aria-label={
+            useRatioLead
+              ? `${targetRatio.toFixed(1)} times smaller`
+              : `${targetPercent.toFixed(1)} percent storage saved`
+          }
+          animate={settled ? { scale: [1, 1.015, 1] } : undefined}
+          transition={{ duration: 0.32, ease: 'easeOut' }}
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            fontWeight: 800,
+            fontSize: 'clamp(72px, 9.5vw, 138px)',
+            lineHeight: 0.95,
+            letterSpacing: '-0.045em',
+            fontVariantNumeric: 'tabular-nums',
+            background: colors.HERO_NUM_GRADIENT,
+            backgroundSize: '200% 200%',
+            WebkitBackgroundClip: 'text',
+            backgroundClip: 'text',
+            color: 'transparent',
+            animation: 'dgNumSheen 8s ease-in-out infinite',
+          }}
+        >
+          {useRatioLead ? (
+            <>
+              <m.span>{ratioDisplay}</m.span>
+              <span style={{ fontSize: '0.42em', fontWeight: 800, marginLeft: 2 }}>×</span>
+            </>
+          ) : (
+            <>
+              <m.span>{percentLead}</m.span>
+              <span style={{ fontSize: '0.38em', fontWeight: 800, marginLeft: 4 }}>%</span>
+            </>
+          )}
+        </m.div>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+          {useRatioLead && (
+            <div style={{ fontSize: 14, fontWeight: 600, color: colors.TEXT_SECONDARY }}>
+              smaller on disk
             </div>
           )}
+          <div
+            style={{
+              padding: '4px 14px',
+              borderRadius: 999,
+              fontSize: 13,
+              fontWeight: 700,
+              fontVariantNumeric: 'tabular-nums',
+              color: colors.SAVED_TEXT_DEEP,
+              background: `${colors.ACCENT_GREEN}14`,
+              border: `1px solid ${colors.ACCENT_GREEN}3a`,
+            }}
+          >
+            {targetPercent.toFixed(1)}% saved
+          </div>
         </div>
       </div>
 
-      {/* ── Caption column: bytes + dollars + cost preset ──────── */}
+      {/* ── RIGHT: before/after proof + dollars ──────────────────── */}
       <div
         style={{
           display: 'flex',
           flexDirection: 'column',
           gap: 14,
-          fontFamily: 'var(--font-ui)',
-          color: colors.TEXT_PRIMARY,
           zIndex: 1,
+          minWidth: 0,
         }}
       >
-        {/* Before/after bytes line — the proof. */}
-        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-          <span
+        {/* WITHOUT — dashed ghost, always full width. */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span style={{ ...monoLabel, color: colors.TEXT_FAINT }}>Without DeltaGlider</span>
+            <span
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 'clamp(14px, 1.2vw, 18px)',
+                fontWeight: 600,
+                color: colors.TEXT_SECONDARY,
+                fontVariantNumeric: 'tabular-nums',
+              }}
+            >
+              {formatBytes(totalOriginal)}
+            </span>
+          </div>
+          <m.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.14, duration: 0.3 }}
             style={{
-              fontSize: 'clamp(18px, 1.6vw, 26px)',
-              fontWeight: 600,
-              color: colors.TEXT_PRIMARY,
-              fontVariantNumeric: 'tabular-nums',
+              height: 22,
+              borderRadius: 7,
+              border: `1.5px dashed ${colors.TEXT_FAINT}`,
+              opacity: 0.55,
+              background: `repeating-linear-gradient(45deg, ${colors.TEXT_FAINT}22 0 1px, transparent 1px 8px)`,
             }}
-          >
-            {hasData ? formatBytes(totalOriginal) : '—'}
-          </span>
-          <span style={{ color: colors.TEXT_MUTED, fontSize: 18, fontWeight: 400 }}>→</span>
-          <span
-            style={{
-              fontSize: 'clamp(18px, 1.6vw, 26px)',
-              fontWeight: 600,
-              color: colors.ACCENT_GREEN,
-              fontVariantNumeric: 'tabular-nums',
-            }}
-          >
-            {hasData ? formatBytes(totalStored) : '—'}
-          </span>
-          <span
-            style={{
-              fontSize: 12,
-              color: colors.TEXT_MUTED,
-              fontWeight: 500,
-              marginLeft: 2,
-            }}
-          >
-            on disk
-          </span>
+            title={`Original: ${formatBytes(totalOriginal)}`}
+          />
         </div>
 
-        {/* Dollar line + cost preset cog. */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'baseline',
-            gap: 8,
-            flexWrap: 'wrap',
-            position: 'relative',
-          }}
-        >
-          <span
+        {/* WITH — kept slice (dense teal) + saved field (luminous green). */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span style={{ ...monoLabel, color: colors.KEPT_TEXT }}>With DeltaGlider</span>
+            <span
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 'clamp(14px, 1.2vw, 18px)',
+                fontWeight: 700,
+                color: colors.KEPT_TEXT,
+                fontVariantNumeric: 'tabular-nums',
+              }}
+            >
+              {formatBytes(totalStored)}
+            </span>
+          </div>
+          <div
+            role="img"
+            aria-label={`${formatBytes(totalStored)} stored from ${formatBytes(totalOriginal)} original — ${targetPercent.toFixed(1)} percent saved`}
             style={{
-              fontSize: 'clamp(20px, 1.8vw, 30px)',
-              fontWeight: 700,
-              color: colors.TEXT_PRIMARY,
-              fontVariantNumeric: 'tabular-nums',
-              letterSpacing: '-0.02em',
+              position: 'relative',
+              width: '100%',
+              height: 40,
+              background: colors.BAR_TRACK,
+              border: `1px solid ${colors.BORDER}`,
+              borderRadius: 10,
+              overflow: 'hidden',
+              display: 'flex',
+              boxShadow: colors.INSET_SHADOW,
             }}
           >
-            $
-            <m.span>{dollarDisplay}</m.span>
+            {/* Kept slice — dense, matte. */}
+            <m.div
+              style={{
+                width: keptWidth,
+                background: colors.BAR_KEPT,
+                boxShadow:
+                  'inset 0 1px 0 rgba(255,255,255,0.18), inset 0 -1px 0 rgba(0,0,0,0.18)',
+                display: 'flex',
+                alignItems: 'center',
+                overflow: 'hidden',
+                flexShrink: 0,
+              }}
+              title={`Kept on disk: ${formatBytes(totalStored)}`}
+            >
+              {keptPct >= 14 && (
+                <span
+                  style={{
+                    ...monoLabel,
+                    color: 'rgba(255,255,255,0.92)',
+                    textShadow: '0 1px 2px rgba(0,0,0,0.25)',
+                    padding: '0 12px',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  kept {formatBytes(totalStored)}
+                </span>
+              )}
+            </m.div>
+            {/* Saved field — luminous, striped, glowing. */}
+            <m.div
+              style={{
+                width: savedWidth,
+                position: 'relative',
+                background: `repeating-linear-gradient(45deg, rgba(255,255,255,0.10) 0 1px, transparent 1px 7px), ${colors.BAR_SAVED}`,
+                boxShadow: `inset 0 1px 0 rgba(255,255,255,0.35), 0 0 18px ${colors.GLOW_GREEN}`,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'flex-end',
+                overflow: 'hidden',
+              }}
+              title={`Saved: ${formatBytes(savedBytes)}`}
+            >
+              {targetSavedWidth >= 22 && (
+                <span
+                  style={{
+                    ...monoLabel,
+                    color: 'rgba(255,255,255,0.95)',
+                    textShadow: '0 1px 2px rgba(0,0,0,0.3)',
+                    padding: '0 12px',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  saved {formatBytes(savedBytes)}
+                </span>
+              )}
+              {/* Shimmer sweep after settle, then a faint slow loop. */}
+              {settled && (
+                <div
+                  className="dg-saved-sheen"
+                  aria-hidden
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    bottom: 0,
+                    width: '36%',
+                    background:
+                      'linear-gradient(90deg, transparent, rgba(255,255,255,0.30), transparent)',
+                    animation:
+                      'dgSavedSheen 1.1s cubic-bezier(0.4,0,0.2,1) 0.2s 1 both, dgSavedSheen 1.4s cubic-bezier(0.4,0,0.2,1) 4s infinite',
+                    opacity: 0.85,
+                  }}
+                />
+              )}
+            </m.div>
+            {/* Seam blade at the compression front. */}
+            <m.div
+              aria-hidden
+              style={{
+                position: 'absolute',
+                top: 0,
+                bottom: 0,
+                width: 2,
+                left: seamLeft,
+                background: 'rgba(255,255,255,0.85)',
+                boxShadow: `0 0 10px 1px ${colors.GLOW_GREEN}`,
+                borderRadius: 1,
+              }}
+            />
+          </div>
+          {/* Tick ruler. */}
+          <div aria-hidden style={{ position: 'relative', height: 12, marginTop: 1 }}>
+            {Array.from({ length: 11 }, (_, i) => i * 10).map(t => (
+              <div
+                key={t}
+                style={{
+                  position: 'absolute',
+                  left: `${t}%`,
+                  top: 0,
+                  width: 1,
+                  height: t % 50 === 0 ? 6 : 4,
+                  background: colors.TEXT_FAINT,
+                  opacity: t % 50 === 0 ? 0.7 : 0.4,
+                }}
+              />
+            ))}
+            {[0, 50, 100].map(t => (
+              <span
+                key={t}
+                style={{
+                  position: 'absolute',
+                  left: `${t}%`,
+                  top: 5,
+                  transform: t === 0 ? 'none' : t === 100 ? 'translateX(-100%)' : 'translateX(-50%)',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 9,
+                  fontWeight: 500,
+                  color: colors.TEXT_FAINT,
+                  letterSpacing: '0.04em',
+                }}
+              >
+                {t === 0 ? '0' : `${t}%`}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* Dollar line. Sub-cent savings render as "<$0.01" rather than a
+            broken-looking $0.00. */}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+          <span
+            style={{
+              fontSize: 'clamp(24px, 2vw, 34px)',
+              fontWeight: 800,
+              color: colors.TEXT_PRIMARY,
+              fontVariantNumeric: 'tabular-nums',
+              letterSpacing: '-0.03em',
+            }}
+          >
+            {targetDollars > 0 && targetDollars < 0.01 ? (
+              <span>
+                <span style={{ color: colors.SAVED_TEXT }}>&lt;$</span>0.01
+              </span>
+            ) : (
+              <>
+                <span style={{ color: colors.SAVED_TEXT }}>$</span>
+                <m.span>{dollarDisplay}</m.span>
+              </>
+            )}
+            <span style={{ fontSize: '0.55em', fontWeight: 600, color: colors.TEXT_MUTED }}>
+              /mo
+            </span>
           </span>
-          <span style={{ fontSize: 13, color: colors.TEXT_MUTED, fontWeight: 500 }}>
-            saved / month
-          </span>
-          <span style={{ fontSize: 11, color: colors.TEXT_FAINT, marginLeft: 4 }}>
-            at ${costRate}/GB
+          {yearlySavings >= 1 && (
+            <span
+              style={{
+                fontSize: 15,
+                fontWeight: 700,
+                color: colors.SAVED_TEXT_DEEP,
+                fontVariantNumeric: 'tabular-nums',
+              }}
+            >
+              ${yearlySavings >= 100 ? Math.round(yearlySavings).toLocaleString() : yearlySavings.toFixed(2)}/yr
+            </span>
+          )}
+          <span style={{ fontSize: 12, color: colors.TEXT_MUTED, fontWeight: 500 }}>
+            saved at ${costRate}/GB
           </span>
           <button
             ref={cogRef}
@@ -434,7 +584,6 @@ function HeroInner({
               cursor: 'pointer',
               color: colors.TEXT_MUTED,
               padding: 4,
-              marginLeft: 2,
               display: 'inline-flex',
               alignItems: 'center',
               borderRadius: 4,
@@ -448,13 +597,6 @@ function HeroInner({
         </div>
         {showCostConfig &&
           createPortal(
-            // Mounted on document.body so the popover escapes the
-            // hero panel's stacking context. Earlier the popover was
-            // a sibling of motion.div nodes that establish transform-
-            // based containing blocks; even with zIndex 99999 the bar
-            // textures painted on top of the menu. Portaling solves
-            // that absolutely and is the same pattern AntD uses for
-            // popovers — just done by hand.
             <div
               ref={setPopoverEl}
               role="listbox"
@@ -469,12 +611,7 @@ function HeroInner({
                 background: colors.BG_ELEVATED,
                 border: `1px solid ${colors.BORDER}`,
                 borderRadius: 8,
-                boxShadow: '0 12px 32px rgba(0,0,0,0.45)',
-                // The portal mounts this on document.body, OUTSIDE
-                // the panel's font inheritance chain, so without an
-                // explicit font-family we fall through to the browser
-                // serif default. Apply the same UI font + tabular
-                // nums the rest of the dashboard uses.
+                boxShadow: colors.ELEV_SHADOW,
                 fontFamily: 'var(--font-ui)',
                 fontVariantNumeric: 'tabular-nums',
                 color: colors.TEXT_PRIMARY,
@@ -526,109 +663,178 @@ function HeroInner({
           )}
       </div>
 
-      {/* ── Compression bar (full width, spans both columns) ──── */}
-      <div
-        style={{
-          gridColumn: '1 / -1',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
-          zIndex: 1,
-        }}
-        role="img"
-        aria-label={
-          hasData
-            ? `Compression ratio: ${formatBytes(totalStored)} stored from ${formatBytes(totalOriginal)} original, saving ${targetPercent.toFixed(1)} percent`
-            : 'No scan data yet'
-        }
-      >
-        <div
-          style={{
-            position: 'relative',
-            width: '100%',
-            height: 30,
-            background: colors.BG_CARD,
-            border: `1px solid ${colors.BORDER}`,
-            borderRadius: 8,
-            overflow: 'hidden',
-            display: 'flex',
-            boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.3)',
-          }}
-        >
-          {/* Kept slice. Solid theme accent — the part that survives. */}
-          <m.div
-            style={{
-              width: useTransform(savedWidthMV, v => `${100 - v}%`),
-              background: `linear-gradient(180deg, ${colors.ACCENT_BLUE} 0%, ${colors.ACCENT_BLUE_LIGHT} 100%)`,
-              boxShadow: `inset 0 1px 0 rgba(255,255,255,0.2), 0 0 12px ${colors.ACCENT_BLUE}55`,
-              transition: 'background 0.15s',
-            }}
-            title={hasData ? `Kept on disk: ${formatBytes(totalStored)}` : ''}
-          />
-          {/* Saved slice. Muted background + dot pattern so it reads
-              as "absence" / negative space, not another category. */}
-          <m.div
-            style={{
-              width: useTransform(savedWidthMV, v => `${v}%`),
-              backgroundImage: dotPattern(colors.TEXT_FAINT),
-              backgroundColor: 'transparent',
-              borderLeft: hasData ? `1px solid ${colors.BORDER}` : 'none',
-              animation: 'dgBarGrain 12s linear infinite',
-            }}
-            title={hasData ? `Saved: ${formatBytes(totalOriginal - totalStored)}` : ''}
-          />
-        </div>
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            fontSize: 11,
-            color: colors.TEXT_MUTED,
-            fontFamily: 'var(--font-ui)',
-            fontVariantNumeric: 'tabular-nums',
-          }}
-        >
-          <span>
-            <span style={{ color: colors.ACCENT_BLUE_LIGHT, fontWeight: 700 }}>●</span>{' '}
-            Kept {hasData ? formatBytes(totalStored) : ''}
-          </span>
-          <span>
-            Saved {hasData ? formatBytes(totalOriginal - totalStored) : ''}{' '}
-            <span style={{ color: colors.TEXT_FAINT, fontWeight: 700 }}>○</span>
-          </span>
-        </div>
-      </div>
-
-      {/* ── Cache-age line ─────────────────────────────────────── */}
+      {/* ── FOOTER STRIP: derived facts, one quiet line ──────────── */}
       <div
         style={{
           gridColumn: '1 / -1',
           display: 'flex',
           alignItems: 'center',
+          flexWrap: 'wrap',
           gap: 6,
           fontSize: 11,
           color: colors.TEXT_MUTED,
-          fontFamily: 'var(--font-ui)',
+          fontVariantNumeric: 'tabular-nums',
           zIndex: 1,
-          marginTop: -4,
+          borderTop: `1px solid ${colors.BORDER}`,
+          paddingTop: 10,
+          marginTop: -2,
         }}
       >
-        <ClockCircleOutlined style={{ fontSize: 10 }} />
-        {cacheAgeNewest ? (
+        <FooterFact text={`${totalObjects.toLocaleString()} objects`} />
+        <Dot colors={colors} />
+        <FooterFact text={`${bucketCount} bucket${bucketCount === 1 ? '' : 's'}`} />
+        {biggestSave && biggestSave.bytes > 0 && (
           <>
-            <span>Newest scan {cacheAgeNewest}</span>
-            {cacheAgeOldest && cacheAgeOldest !== cacheAgeNewest && (
-              <span> · Oldest {cacheAgeOldest}</span>
-            )}
+            <Dot colors={colors} />
+            <FooterFact
+              text={`biggest single save: ${biggestSave.bucket} −${formatBytes(biggestSave.bytes)}`}
+            />
           </>
-        ) : (
-          <span>No scans yet</span>
+        )}
+        {referenceShare !== null && referenceShare > 0 && referenceShare <= 1 && (
+          <>
+            <Dot colors={colors} />
+            <FooterFact
+              text={`references are ${(referenceShare * 100).toFixed(0)}% of stored — the rest is pure deltas`}
+            />
+          </>
         )}
         {unscannedCount > 0 && (
-          <span style={{ color: colors.ACCENT_AMBER }}>
-            · {unscannedCount} bucket{unscannedCount === 1 ? '' : 's'} excluded
-          </span>
+          <>
+            <Dot colors={colors} />
+            <span style={{ color: colors.ACCENT_AMBER }}>
+              {unscannedCount} bucket{unscannedCount === 1 ? '' : 's'} not scanned
+            </span>
+          </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function FooterFact({ text }: { text: string }) {
+  return <span>{text}</span>;
+}
+
+function Dot({ colors }: { colors: ReturnType<typeof useColors> }) {
+  return <span style={{ color: colors.TEXT_FAINT }}>·</span>;
+}
+
+/**
+ * Designed empty state — no zeros, no dead bars. A headline, a scan
+ * CTA, and an honest EXAMPLE-labelled illustration of the two bars.
+ */
+function EmptyHero({
+  colors,
+  bucketCount,
+  unscannedCount,
+  onScanMissing,
+}: {
+  colors: ReturnType<typeof useColors>;
+  bucketCount: number;
+  unscannedCount: number;
+  onScanMissing: () => void;
+}) {
+  const n = unscannedCount > 0 ? unscannedCount : bucketCount;
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(260px, 1fr) 1.2fr',
+        gap: 'clamp(20px, 3vw, 48px)',
+        alignItems: 'center',
+        height: '100%',
+        fontFamily: 'var(--font-ui)',
+      }}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div
+          style={{
+            fontSize: 'clamp(20px, 2vw, 27px)',
+            fontWeight: 800,
+            letterSpacing: '-0.02em',
+            color: colors.TEXT_PRIMARY,
+            lineHeight: 1.2,
+          }}
+        >
+          Ready to measure your savings
+        </div>
+        <div style={{ fontSize: 13, color: colors.TEXT_MUTED, lineHeight: 1.55, maxWidth: 380 }}>
+          DeltaGlider stores versioned artifacts as binary deltas. Scan your{' '}
+          {bucketCount > 0 ? `${bucketCount} ` : ''}bucket{bucketCount === 1 ? '' : 's'} to see how
+          much you're really storing.
+        </div>
+        {n > 0 && (
+          <button
+            onClick={onScanMissing}
+            style={{
+              alignSelf: 'flex-start',
+              height: 40,
+              padding: '0 22px',
+              borderRadius: 8,
+              border: 'none',
+              cursor: 'pointer',
+              fontSize: 14,
+              fontWeight: 700,
+              fontFamily: 'var(--font-ui)',
+              color: '#fff',
+              background: colors.BAR_SAVED,
+              boxShadow: `0 2px 12px ${colors.GLOW_GREEN}`,
+            }}
+          >
+            Scan {n} bucket{n === 1 ? '' : 's'}
+          </button>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, position: 'relative' }}>
+        <span
+          style={{
+            position: 'absolute',
+            top: -22,
+            right: 0,
+            fontSize: 9,
+            fontWeight: 800,
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+            color: colors.TEXT_FAINT,
+            border: `1px solid ${colors.BORDER}`,
+            borderRadius: 4,
+            padding: '2px 7px',
+          }}
+        >
+          Example
+        </span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: colors.TEXT_FAINT, fontFamily: 'var(--font-mono)' }}>
+            Your current storage
+          </span>
+          <div
+            style={{
+              height: 22,
+              borderRadius: 7,
+              background: `repeating-linear-gradient(45deg, ${colors.TEXT_FAINT}33 0 1px, transparent 1px 8px)`,
+              border: `1px solid ${colors.BORDER}`,
+            }}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: colors.TEXT_FAINT, fontFamily: 'var(--font-mono)' }}>
+            After DeltaGlider — run a scan to find out
+          </span>
+          <div
+            style={{
+              height: 22,
+              width: '7%',
+              minWidth: 26,
+              borderRadius: 7,
+              border: `1.5px dashed ${colors.ACCENT_GREEN}88`,
+            }}
+          />
+        </div>
+        <div style={{ fontSize: 11, color: colors.TEXT_MUTED }}>
+          Versioned builds and backups typically compress 5–50×.
+        </div>
       </div>
     </div>
   );

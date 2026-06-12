@@ -75,3 +75,23 @@
     animation: none !important;
   }
 }
+
+/* ── Money-shot hero additions (visual-craft pass) ──────────────────── */
+
+/* One-off shimmer sweep across the saved field after the count-up
+   settles, then a faint 9s loop so live demos never look frozen. */
+@keyframes dgSavedSheen {
+  0%   { transform: translateX(-130%) skewX(-18deg); }
+  100% { transform: translateX(330%)  skewX(-18deg); }
+}
+
+/* The gradient-ink hero numeral slowly "breathes" its background
+   position so the green ink shifts across the digits. */
+@keyframes dgNumSheen {
+  0%, 100% { background-position: 0% 0%; }
+  50%      { background-position: 100% 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dg-saved-sheen { display: none; }
+}

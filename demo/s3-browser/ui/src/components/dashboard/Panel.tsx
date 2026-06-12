@@ -63,6 +63,9 @@ export default function Panel({
   // We encode the intended span on a data attribute so the CSS
   // rule below can match on it — inline styles can't do media-free
   // conditional logic.
+  const accentHex = accent ? accentColor(colors, accent) : null;
+  // Light theme gets a machined top inner highlight; dark a faint one.
+  const isLight = colors.BG_CARD === '#ffffff';
   return (
     <div
       data-colspan={colSpan}
@@ -72,12 +75,12 @@ export default function Panel({
         // Comfortable density default.
         gridColumn: `span ${colSpan}`,
         gridRow: `span ${rowSpan}`,
-        background: colors.BG_CARD,
+        background: accentHex
+          ? `linear-gradient(180deg, ${accentHex}0d 0%, ${colors.BG_CARD} 120px)`
+          : colors.BG_CARD,
         border: `1px solid ${colors.BORDER}`,
-        borderTop: accent
-          ? `2px solid ${accentColor(colors, accent)}`
-          : `1px solid ${colors.BORDER}`,
-        borderRadius: 10,
+        borderRadius: 12,
+        boxShadow: `${colors.ELEV_SHADOW}, inset 0 1px 0 ${isLight ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.04)'}`,
         padding: 0,
         display: 'flex',
         flexDirection: 'column',
@@ -85,8 +88,26 @@ export default function Panel({
         minHeight: 0,
         overflow: 'hidden',
         boxSizing: 'border-box',
+        position: 'relative',
       }}
     >
+      {/* Accent edge: a fading gradient blade instead of a blunt 2px border. */}
+      {accentHex && (
+        <div
+          aria-hidden
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 14,
+            right: 14,
+            height: 2,
+            borderRadius: 2,
+            background: `linear-gradient(90deg, transparent, ${accentHex} 18%, ${accentHex} 82%, transparent)`,
+            opacity: 0.9,
+            zIndex: 1,
+          }}
+        />
+      )}
       <PanelHeader title={title} subtitle={subtitle} actions={actions} colors={colors} />
       <PanelBody loading={loading} empty={empty} colors={colors}>
         {children}
@@ -123,10 +144,10 @@ function PanelHeader({
         <div
           style={{
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 700,
             color: colors.TEXT_PRIMARY,
             fontFamily: 'var(--font-ui)',
-            letterSpacing: '-0.005em',
+            letterSpacing: '-0.01em',
             whiteSpace: 'nowrap',
             overflow: 'hidden',
             textOverflow: 'ellipsis',

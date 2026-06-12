@@ -29,7 +29,8 @@
  * staleness is never invisible.
  */
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { XAxis, YAxis, ResponsiveContainer, Tooltip as RechartsTooltip, AreaChart, Area } from 'recharts';
+import { Button } from 'antd';
+import { CaretRightOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import { listBuckets } from '../s3client';
 import type { AdminConfig } from '../adminApi';
@@ -45,13 +46,9 @@ import { formatBytes, ageLabel } from '../utils';
 import { summarizeScopeSavings } from '../savings';
 import DashboardGrid from './dashboard/DashboardGrid';
 import Panel from './dashboard/Panel';
-import { CHART_PALETTE, chartTooltipStyle, axisTickStyle, fmtNum } from './dashboard/chartDefaults';
 import HeroSavingsPanel from './HeroSavingsPanel';
-import ByTheNumbersGrid from './ByTheNumbersGrid';
-import FleetHealthGauge from './FleetHealthGauge';
 import TopBucketsSortSelect from './TopBucketsSortSelect';
 import BucketFleetList from './BucketFleetList';
-import TopBucketsList from './TopBucketsList';
 import ScanStatusBanner from './ScanStatusBanner';
 import { isScanStale } from './scanFreshness';
 import { SORT_LABELS, type TopBucketsSortKey } from './topBucketsSort';
@@ -80,7 +77,6 @@ interface Props {
 
 export default function AnalyticsSection({ config }: Props) {
   const colors = useColors();
-  const tt = chartTooltipStyle(colors);
 
   /**
    * The two state slices that together define the analytics view:
@@ -122,38 +118,6 @@ export default function AnalyticsSection({ config }: Props) {
   // localStorage setter) all live inside HeroSavingsPanel now —
   // AnalyticsSection just owns the rate value + the save callback so
   // the hero panel can swap presets.
-
-  /**
-   * Live scan timeline — one point per SSE frame for the bucket
-   * currently being scanned. Resets when a new bucket starts.
-   * Powers the "Scan progress" chart that replaces the old session-
-   * savings chart (which only made sense for the polling-based
-   * /stats fetch we just removed).
-   */
-  const [scanTimeline, setScanTimeline] = useState<
-    Array<{ time: string; objects: number; bytes: number }>
-  >([]);
-
-  useEffect(() => {
-    if (!liveProgress) {
-      setScanTimeline([]);
-      return;
-    }
-    setScanTimeline(prev => {
-      const now = new Date().toLocaleTimeString([], {
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-      });
-      // Reset the timeline when a new bucket takes over.
-      if (prev.length > 0 && liveProgress.objects < prev[prev.length - 1].objects) {
-        return [{ time: now, objects: liveProgress.objects, bytes: liveProgress.original_bytes }];
-      }
-      return [...prev, {
-        time: now,
-        objects: liveProgress.objects,
-        bytes: liveProgress.original_bytes,
-      }].slice(-60); // keep the last minute-or-so of frames
-    });
-  }, [liveProgress]);
 
   const saveCostRate = (rate: number) => {
     setCostRate(rate);
@@ -391,13 +355,9 @@ export default function AnalyticsSection({ config }: Props) {
     return !bucketCompressionOn && b.totalOriginal > 1024 * 1024;
   });
 
-  // Top-5 table (or fewer if <5 buckets). Renders next to the fleet view.
   /**
    * Resolve a bucket's backend name from the policy map, falling
-   * back to the proxy's default_backend. The backend label is shown
-   * as a small chip next to the bucket name in Top buckets so the
-   * operator can tell at a glance which storage tier a bucket lives
-   * on (Hetzner vs AWS vs filesystem etc.).
+   * back to the proxy's default_backend.
    */
   const backendOf = (bucket: string): string | null => {
     const policy =
@@ -406,71 +366,98 @@ export default function AnalyticsSection({ config }: Props) {
     return policy?.backend ?? config?.default_backend ?? null;
   };
 
-  /**
-   * Sorted top-buckets list. Compares all rows under the chosen
-   * sort key — there's no point capping at 5 only to then sort that
-   * partial slice. The render still slices to top 5.
-   */
-  const topBuckets = [...bucketRows]
-    .sort((a, b) => {
-      switch (topBucketsSort) {
-        case 'savings':
-          return b.savings - a.savings;
-        case 'ratio':
-          return b.savingsPercent - a.savingsPercent;
-        case 'objects':
-          return b.objectCount - a.objectCount;
-        case 'recent':
-          return (b.completedAt ?? '').localeCompare(a.completedAt ?? '');
-        case 'original':
-        default:
-          return b.totalOriginal - a.totalOriginal;
-      }
-    })
-    .slice(0, 5);
+  /** The ONE bucket list, sorted under the operator's chosen key. */
+  const sortedRows = [...bucketRows].sort((a, b) => {
+    switch (topBucketsSort) {
+      case 'savings':
+        return b.savings - a.savings;
+      case 'ratio':
+        return b.savingsPercent - a.savingsPercent;
+      case 'objects':
+        return b.objectCount - a.objectCount;
+      case 'recent':
+        return (b.completedAt ?? '').localeCompare(a.completedAt ?? '');
+      case 'original':
+      default:
+        return b.totalOriginal - a.totalOriginal;
+    }
+  });
+
+  // ── Derived facts for the hero footer strip ────────────────────────
+  const biggestSaveRow = bucketRows.reduce<BucketRow | null>(
+    (best, r) => (r.savings > (best?.savings ?? 0) ? r : best),
+    null,
+  );
+  const totalReference = Object.values(scans).reduce(
+    (s, r) => s + (r.total_reference_bytes ?? 0),
+    0,
+  );
+  const referenceShare =
+    totalStored > 0 && totalReference > 0 ? totalReference / totalStored : null;
+
+  // ── Opportunity math: dollars left on the table ────────────────────
+  // For each compression-OFF bucket, estimate what the fleet's own
+  // bytes-weighted ratio would reclaim at the configured cost rate.
+  const fleetRatio = savingsPercent / 100;
+  const opportunityDollars = opportunities.reduce(
+    (s, b) => s + (b.totalOriginal * fleetRatio * costRate) / (1024 * 1024 * 1024),
+    0,
+  );
+  const worstScanned = cachedRows
+    .filter(r => r.totalOriginal > 1024 * 1024)
+    .reduce<BucketRow | null>(
+      (worst, r) => (worst === null || r.savingsPercent < worst.savingsPercent ? r : worst),
+      null,
+    );
 
   const isScanning = !!liveProgress || queue.length > 0;
 
+  // Buckets-panel header subline: coverage + freshness in one quiet line.
+  const coverageSubtitle = [
+    `${cachedRows.length} of ${bucketRows.length} scanned`,
+    newestCompletedAt ? `newest ${ageLabel(newestCompletedAt)}` : null,
+    oldestCompletedAt && oldestCompletedAt !== newestCompletedAt
+      ? `oldest ${ageLabel(oldestCompletedAt)}`
+      : null,
+    staleCount > 0 ? `${staleCount} stale` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
     <>
-      <ScanStatusBanner
-        colors={colors}
-        liveProgress={liveProgress}
-        queue={queue}
-        cachedCount={cachedRows.length}
-        bucketCount={bucketRows.length}
-        newestCompletedAt={newestCompletedAt}
-        oldestCompletedAt={oldestCompletedAt}
-        unscannedCount={unscannedCount}
-        staleCount={staleCount}
-        allBucketsCount={allBuckets.length}
-        scansLoaded={scansLoaded}
-        isScanning={isScanning}
-        onStop={handleStop}
-        onScanMissing={handleScanMissing}
-        onRescanAll={handleRescanAll}
-      />
+      {/* The banner survives only as a live-scan strip — static scan
+          plumbing moved into the Buckets panel header so the page
+          opens on the money shot, not on cron-job chrome. */}
+      {isScanning && (
+        <ScanStatusBanner
+          colors={colors}
+          liveProgress={liveProgress}
+          queue={queue}
+          cachedCount={cachedRows.length}
+          bucketCount={bucketRows.length}
+          newestCompletedAt={newestCompletedAt}
+          oldestCompletedAt={oldestCompletedAt}
+          unscannedCount={unscannedCount}
+          staleCount={staleCount}
+          allBucketsCount={allBuckets.length}
+          scansLoaded={scansLoaded}
+          isScanning={isScanning}
+          onStop={handleStop}
+          onScanMissing={handleScanMissing}
+          onRescanAll={handleRescanAll}
+        />
+      )}
 
     <DashboardGrid>
       {/* ── Row 1: HERO ─────────────────────────────────────────
-          One 12-col / 3-row panel replaces the old four-card KPI
-          strip. The hero composition (HeroSavingsPanel) shows the
-          % saved at billboard size, the scale-accurate before/after
-          bar, the dollar figure with a count-up animation, and the
-          cache-age line — all in one read. Animation fires once per
-          session via sessionStorage; honours prefers-reduced-motion.
+          The money shot: multiplier at billboard size in gradient
+          ink, before/after two-bar proof (ghost "without" + the real
+          bar where luminous green = saved), dollar line ($/mo + $/yr),
+          and one quiet footer strip of derived facts. Animation fires
+          once per session; honours prefers-reduced-motion.
       */}
-      <Panel
-        title="Total savings"
-        subtitle={
-          totalObjects > 0
-            ? `${fmtNum(totalObjects)} objects across ${bucketRows.length} bucket${bucketRows.length === 1 ? '' : 's'}`
-            : undefined
-        }
-        colSpan={12}
-        rowSpan={3}
-        accent="green"
-      >
+      <Panel title="Total savings" colSpan={12} rowSpan={3} accent="green">
         <HeroSavingsPanel
           totalOriginal={totalOriginal}
           totalStored={totalStored}
@@ -478,60 +465,79 @@ export default function AnalyticsSection({ config }: Props) {
           monthlySavings={monthlySavings}
           costRate={costRate}
           onChangeCostRate={saveCostRate}
-          cacheAgeNewest={newestCompletedAt ? ageLabel(newestCompletedAt) : null}
-          cacheAgeOldest={oldestCompletedAt ? ageLabel(oldestCompletedAt) : null}
+          totalObjects={totalObjects}
+          bucketCount={bucketRows.length}
+          biggestSave={
+            biggestSaveRow && biggestSaveRow.savings > 0
+              ? { bucket: biggestSaveRow.bucket, bytes: biggestSaveRow.savings }
+              : null
+          }
+          referenceShare={referenceShare}
           unscannedCount={unscannedCount}
+          onScanMissing={handleScanMissing}
           liveScanning={!!liveProgress}
         />
       </Panel>
 
-      {/* ── Row 2: Bucket fleet view + Top-5 table ───────────── */}
-      {/*
-        The old "Storage by bucket" recharts stacked bar collapsed
-        into a single line when one bucket dwarfed the rest (beshu @
-        1.4 TB next to dgp-conf @ 88 KB → small buckets invisible).
-        This replacement gives each bucket TWO bars per row:
-         - **Ratio bar** (always full-width): the kept|saved split
-           in the same teal+dotted style as the hero panel. Tells the
-           viewer "how well is THIS bucket compressing" regardless
-           of its absolute size.
-         - **Footprint bar** (scale-relative): a thin under-bar
-           showing this bucket's original-size share of the largest
-           bucket. Preserves the magnitude story.
-        Sorted by original size, descending. No overlapping axis
-        labels because every bucket name renders ABOVE its row, not
-        inside a chart axis.
+      {/* ── Row 2: THE bucket list ───────────────────────────────
+          One full-width list replaces the old fleet view + Top-5
+          table (which showed the same rows twice). Scan plumbing
+          (coverage subline, sort, Scan missing / Re-scan all) lives
+          in this panel's header.
       */}
       <Panel
-        title="Bucket fleet"
-        subtitle="Ratio per bucket · footprint relative to largest"
-        colSpan={8}
-        // Panel height adapts to bucket count: 1 row for 1-2 buckets,
-        // 2 rows for 3-6, 3 rows beyond. Avoids the giant empty void
-        // beneath the rows when the fleet has only a handful of
-        // entries (the rowSpan was always 3 even with 3 buckets).
-        rowSpan={(bucketRows.length <= 2 ? 1 : bucketRows.length <= 6 ? 2 : 3) as 1 | 2 | 3}
-        empty={bucketRows.length === 0 ? { title: 'No bucket data yet', hint: 'Create a bucket and upload a few objects to populate analytics.' } : undefined}
+        title="Buckets"
+        subtitle={
+          bucketRows.length > 0
+            ? `${coverageSubtitle} · sorted by ${SORT_LABELS[topBucketsSort]}`
+            : undefined
+        }
+        colSpan={12}
+        rowSpan={(bucketRows.length <= 3 ? 1 : bucketRows.length <= 7 ? 2 : 3) as 1 | 2 | 3}
+        empty={
+          bucketRows.length === 0
+            ? {
+                title: 'No buckets yet',
+                hint: 'Create a bucket and upload a few objects to populate analytics.',
+              }
+            : undefined
+        }
+        actions={
+          bucketRows.length > 0 ? (
+            <>
+              <TopBucketsSortSelect
+                value={topBucketsSort}
+                onChange={setTopBucketsSort}
+                colors={colors}
+              />
+              {unscannedCount > 0 && (
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<CaretRightOutlined />}
+                  onClick={handleScanMissing}
+                  disabled={!scansLoaded || isScanning}
+                  title={`Scan the ${unscannedCount} bucket${unscannedCount === 1 ? '' : 's'} with no cached scan`}
+                >
+                  Scan missing ({unscannedCount})
+                </Button>
+              )}
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                onClick={handleRescanAll}
+                disabled={!scansLoaded || isScanning}
+                title="Re-scan every bucket"
+              >
+                Re-scan all
+              </Button>
+            </>
+          ) : undefined
+        }
       >
         {bucketRows.length > 0 && (
-          <BucketFleetList bucketRows={bucketRows} colors={colors} />
-        )}
-      </Panel>
-      <Panel
-        title="Top buckets"
-        subtitle={`Sorted by ${SORT_LABELS[topBucketsSort]}`}
-        colSpan={4}
-        // Mirror Bucket fleet's adaptive height so they end the same
-        // row together — no orphan column trailing into empty space.
-        rowSpan={(bucketRows.length <= 2 ? 1 : bucketRows.length <= 6 ? 2 : 3) as 1 | 2 | 3}
-        empty={topBuckets.length === 0 ? { title: 'No buckets' } : undefined}
-        actions={topBuckets.length > 0 ? (
-          <TopBucketsSortSelect value={topBucketsSort} onChange={setTopBucketsSort} colors={colors} />
-        ) : undefined}
-      >
-        {topBuckets.length > 0 && (
-          <TopBucketsList
-            topBuckets={topBuckets}
+          <BucketFleetList
+            bucketRows={sortedRows}
             colors={colors}
             config={config}
             queue={queue}
@@ -543,91 +549,186 @@ export default function AnalyticsSection({ config }: Props) {
         )}
       </Panel>
 
-      {/* ── Row 3: By the numbers · Compression health · Live scan ──
-          The old row was empty 90% of the time ("No scan running" /
-          "Nothing to flag"). Replaced with derived facts that
-          ALWAYS have content, plus a live-stream panel that takes
-          over the whole row when a scan is actively in flight.
-      */}
-      {liveProgress ? (
-        // Active-scan mode: dedicate the row to the streaming chart.
-        <Panel
-          title={`Scan progress · ${liveProgress.bucket}`}
-          subtitle={`${fmtNum(liveProgress.objects)} objects · ${formatBytes(liveProgress.original_bytes)} seen · ${liveProgress.pages_done} pages`}
-          colSpan={12}
-          rowSpan={2}
-          accent="blue"
-          empty={scanTimeline.length < 2 ? { title: 'Streaming…', hint: 'First point lands after a few pages.' } : undefined}
-        >
-          {scanTimeline.length >= 2 && (
-            <div style={{ flex: 1, minHeight: 0 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={scanTimeline} margin={{ top: 8, right: 8, bottom: 0, left: -20 }}>
-                  <XAxis dataKey="time" tick={axisTickStyle(colors, true)} axisLine={false} tickLine={false} minTickGap={40} />
-                  <YAxis tickFormatter={v => fmtNum(Number(v))} tick={axisTickStyle(colors)} axisLine={false} tickLine={false} width={56} />
-                  <RechartsTooltip
-                    {...tt}
-                    formatter={(v, name) =>
-                      name === 'objects'
-                        ? [fmtNum(Number(v)), 'Objects']
-                        : [formatBytes(Number(v)), 'Bytes']
-                    }
-                  />
-                  <Area type="monotone" dataKey="objects" stroke={CHART_PALETTE[5]} fill={`${CHART_PALETTE[5]}33`} strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </Panel>
-      ) : (
+      {/* ── Row 3: Opportunity + Coverage (only once data exists) ── */}
+      {cachedRows.length > 0 && (
         <>
-          {/* By-the-numbers facts grid — always renders, no empty states. */}
           <Panel
-            title="By the numbers"
-            subtitle="Derived facts from the latest scan"
-            colSpan={8}
-            rowSpan={2}
-          >
-            <ByTheNumbersGrid bucketRows={bucketRows} colors={colors} />
-          </Panel>
-          {/*
-            Compression effectiveness gauge. The dial is BYTES-WEIGHTED
-            (a 1.4 TB bucket at 93% dominates a 88 KB bucket at 0%);
-            this matches the user's intuition of "how is my storage
-            cost behaving" rather than the unweighted average that
-            penalises trivial buckets. The subtitle counts the
-            operator-policy warnings — buckets where compression is
-            explicitly OFF — as a separate signal from compression
-            effectiveness, because "compression turned off on
-            purpose" is a different category from "compression on
-            but ratio is low".
-          */}
-          <Panel
-            title="Compression effectiveness"
+            title="Left on the table"
             subtitle={
               opportunities.length > 0
                 ? `${opportunities.length} bucket${opportunities.length === 1 ? '' : 's'} with compression OFF`
-                : 'Bytes-weighted across buckets'
+                : 'Every bucket is compressing'
             }
-            colSpan={4}
+            colSpan={8}
             rowSpan={2}
             accent={opportunities.length > 0 ? 'amber' : undefined}
           >
-            <FleetHealthGauge
-              bucketRows={bucketRows}
-              opportunities={opportunities}
+            {opportunities.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div
+                  style={{
+                    fontSize: 22,
+                    fontWeight: 800,
+                    color: colors.ACCENT_AMBER,
+                    fontFamily: 'var(--font-ui)',
+                    fontVariantNumeric: 'tabular-nums',
+                    letterSpacing: '-0.02em',
+                  }}
+                >
+                  est. +${opportunityDollars.toFixed(2)}/mo
+                  <span style={{ fontSize: 13, fontWeight: 500, color: colors.TEXT_MUTED, marginLeft: 8 }}>
+                    if these buckets compressed at the fleet ratio
+                  </span>
+                </div>
+                {opportunities.map(b => (
+                  <div
+                    key={b.bucket}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      gap: 12,
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 12,
+                      color: colors.TEXT_PRIMARY,
+                      borderTop: `1px solid ${colors.BORDER}`,
+                      paddingTop: 8,
+                    }}
+                  >
+                    <span>{b.bucket}</span>
+                    <span style={{ color: colors.TEXT_MUTED }}>
+                      {formatBytes(b.totalOriginal)} · est. +$
+                      {((b.totalOriginal * fleetRatio * costRate) / 1024 ** 3).toFixed(2)}/mo
+                    </span>
+                  </div>
+                ))}
+                <div style={{ fontSize: 11, color: colors.TEXT_MUTED, fontFamily: 'var(--font-ui)' }}>
+                  Compression is a per-bucket policy — flip it on under Storage → Buckets.
+                </div>
+              </div>
+            ) : (
+              <div
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'center',
+                  gap: 8,
+                  fontFamily: 'var(--font-ui)',
+                }}
+              >
+                <div style={{ fontSize: 16, fontWeight: 700, color: colors.SAVED_TEXT }}>
+                  Nothing left on the table
+                </div>
+                <div style={{ fontSize: 12, color: colors.TEXT_MUTED, maxWidth: 480, lineHeight: 1.5 }}>
+                  Compression is enabled on every bucket.
+                  {worstScanned && worstScanned.savingsPercent < 20 && (
+                    <>
+                      {' '}
+                      Weakest ratio: <span style={{ fontFamily: 'var(--font-mono)' }}>{worstScanned.bucket}</span>{' '}
+                      at {worstScanned.savingsPercent.toFixed(1)}% — content that's already
+                      compressed or rarely versioned won't delta well.
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </Panel>
+
+          <Panel title="Scan coverage" subtitle="Cached results survive restarts" colSpan={4} rowSpan={2}>
+            <CoverageStrip
               colors={colors}
+              freshCount={cachedRows.length - staleCount}
+              staleCount={staleCount}
+              unscannedCount={unscannedCount}
+              newestCompletedAt={newestCompletedAt}
+              oldestCompletedAt={oldestCompletedAt}
             />
           </Panel>
         </>
       )}
-
-      {/*
-        Row 4 (Per-bucket savings %) removed — the Bucket fleet panel
-        in row 2 now shows the per-bucket ratio with its 100%-wide
-        rendering, so a separate distribution chart was redundant.
-      */}
     </DashboardGrid>
     </>
+  );
+}
+
+/**
+ * Segmented coverage strip: fresh | stale | unscanned, with counts and
+ * the oldest/newest scan ages. Replaces the old gauge (which repeated
+ * the hero number at a fifth of the size).
+ */
+function CoverageStrip({
+  colors,
+  freshCount,
+  staleCount,
+  unscannedCount,
+  newestCompletedAt,
+  oldestCompletedAt,
+}: {
+  colors: ReturnType<typeof useColors>;
+  freshCount: number;
+  staleCount: number;
+  unscannedCount: number;
+  newestCompletedAt: string | null;
+  oldestCompletedAt: string | null;
+}) {
+  const total = Math.max(1, freshCount + staleCount + unscannedCount);
+  const seg = (n: number) => `${(n / total) * 100}%`;
+  const rows: Array<{ label: string; count: number; color: string }> = [
+    { label: 'fresh', count: freshCount, color: colors.ACCENT_GREEN },
+    { label: 'stale (>6h)', count: staleCount, color: colors.ACCENT_AMBER },
+    { label: 'not scanned', count: unscannedCount, color: colors.TEXT_FAINT },
+  ];
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontFamily: 'var(--font-ui)' }}>
+      <div
+        style={{
+          display: 'flex',
+          height: 14,
+          borderRadius: 5,
+          overflow: 'hidden',
+          border: `1px solid ${colors.BORDER}`,
+          background: colors.BAR_TRACK,
+        }}
+      >
+        {rows.map(
+          r =>
+            r.count > 0 && (
+              <div
+                key={r.label}
+                style={{ width: seg(r.count), background: r.color, opacity: r.label === 'not scanned' ? 0.45 : 0.85 }}
+                title={`${r.count} ${r.label}`}
+              />
+            ),
+        )}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {rows.map(r => (
+          <div
+            key={r.label}
+            style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: colors.TEXT_SECONDARY }}
+          >
+            <span
+              style={{ width: 8, height: 8, borderRadius: 2, background: r.color, opacity: r.label === 'not scanned' ? 0.45 : 0.85 }}
+            />
+            <span style={{ flex: 1 }}>{r.label}</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums', color: colors.TEXT_PRIMARY, fontWeight: 600 }}>
+              {r.count}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: colors.TEXT_MUTED, lineHeight: 1.5 }}>
+        {newestCompletedAt ? (
+          <>
+            Newest scan {ageLabel(newestCompletedAt)}
+            {oldestCompletedAt && oldestCompletedAt !== newestCompletedAt && (
+              <> · oldest {ageLabel(oldestCompletedAt)}</>
+            )}
+          </>
+        ) : (
+          'No scans yet'
+        )}
+      </div>
+    </div>
   );
 }
