@@ -123,8 +123,22 @@ YAML="${DIR}/deltaglider_proxy.yaml"
 # ── Derive expectations from the prod YAML itself ───────────────────────
 EXPECT_JSON="${DIR}/expect.json"
 python3 - "$YAML" > "${EXPECT_JSON}" <<'PY'
-import json, sys, yaml
-cfg = yaml.safe_load(open(sys.argv[1]))
+import json, os, re, sys, yaml
+raw = open(sys.argv[1]).read()
+# Resolve ${env:NAME} / ${env:NAME:-default} like the proxy does at load —
+# once prod's YAML moves to secret-free templates, expectations (incl. the
+# non-admin denial probe's credentials) must use the resolved values.
+def _resolve(m):
+    name, default = m.group(1), m.group(2)
+    val = os.environ.get(name, '')
+    if val:
+        return val
+    if default is not None:
+        return default
+    print(f'warning: ${{env:{name}}} unset while deriving expectations', file=sys.stderr)
+    return m.group(0)
+raw = re.sub(r'\$\{env:([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}', _resolve, raw)
+cfg = yaml.safe_load(raw)
 access = cfg.get('access') or {}
 storage = cfg.get('storage') or {}
 backends = {b['name']: b for b in (storage.get('backends') or [])}

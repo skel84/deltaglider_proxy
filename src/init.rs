@@ -327,6 +327,7 @@ pub fn run_init_inner(
         iam_groups: Vec::new(),
         auth_providers: Vec::new(),
         group_mapping_rules: Vec::new(),
+        env_refs: Default::default(),
     };
 
     // Show summary

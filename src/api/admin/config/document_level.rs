@@ -237,13 +237,23 @@ fn parse_and_validate_yaml(yaml: &str) -> Result<(crate::config::Config, Vec<Str
                 .to_string(),
         );
     }
+    // Expand `${env:NAME}` references against the SERVER environment, and
+    // record the provenance so persist/export re-emit the refs instead of
+    // the materialized secrets (the IaC round-trip: provision a secret-free
+    // template -> tweak in the GUI -> export -> back into IaC). The `config
+    // apply` CLI also expands client-side against the OPERATOR environment;
+    // this pass is idempotent on already-expanded text and covers documents
+    // POSTed raw (GUI import, curl) whose secrets live in the server env.
+    let (yaml, env_refs) = crate::config::expand_env_vars_recording(yaml)
+        .map_err(|e| format!("env expansion error: {}", e))?;
     // Go through the dual-shape deserializer so GitOps operators can POST
     // either the legacy flat shape or the Phase 3 sectioned shape
     // (admission/access/storage/advanced). Export round-trips re-emit
     // sectioned — if we used plain `serde_yaml::from_str::<Config>` here
     // the roundtrip would break.
-    let mut cfg = crate::config::Config::from_yaml_str(yaml)
+    let mut cfg = crate::config::Config::from_yaml_str(&yaml)
         .map_err(|e| format!("YAML parse error: {}", e))?;
+    cfg.env_refs = env_refs;
     // Validate the log filter up front so it can't silently enter runtime
     // state and then fail at the next process restart. An invalid filter is
     // a non-recoverable structural error for this doc, not a warning.
@@ -390,6 +400,19 @@ pub async fn apply_config_doc(
     //    emits its own warnings for credential transitions that would
     //    silently clear state — surface them to the caller.
     let preserve_warnings = preserve_runtime_secrets(&mut incoming, &cfg);
+
+    // 3b. Carry forward env-ref provenance from the running config. A doc
+    //     applied via the CLI arrives pre-expanded (operator-side env), so
+    //     the server-side recording in `parse_and_validate_yaml` may be
+    //     empty for refs the BOOT file resolved — without this merge those
+    //     secrets would persist materialized after the first apply. Newly
+    //     recorded names win over stale ones.
+    for (name, value) in &cfg.env_refs {
+        incoming
+            .env_refs
+            .entry(name.clone())
+            .or_insert_with(|| value.clone());
+    }
 
     // 4. Defense in depth: refuse to swap the bootstrap password hash
     //    through `apply`. The legitimate path is PUT /api/admin/password,

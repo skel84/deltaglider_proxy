@@ -547,6 +547,22 @@ pub struct Config {
     /// OAuth group-mapping rules declared in YAML (Phase 3c.3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_mapping_rules: Vec<crate::iam::DeclarativeMappingRule>,
+
+    /// `${env:NAME}` provenance: `name → value` for every env ref the loaded
+    /// document resolved from the environment. NEVER serialized — it exists
+    /// so persist/export can re-emit `${env:NAME}` instead of the
+    /// materialized secret, making the IaC round-trip lossless:
+    /// provision a secret-free template → tweak via the GUI (persisted with
+    /// refs intact) → export → put the export back into IaC.
+    ///
+    /// Populated by [`Self::from_yaml_file`] / [`Self::from_toml_file`] and
+    /// by the admin document-apply path (which expands against the SERVER
+    /// environment and merges the previous config's provenance). Refs whose
+    /// `:-default` was used are not recorded (see
+    /// [`expand_env_vars_recording`]).
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub env_refs: std::collections::BTreeMap<String, String>,
 }
 
 /// Per-backend encryption-at-rest configuration.
@@ -684,15 +700,22 @@ impl BackendEncryptionConfig {
     /// redacted surface still conveys "this backend is encrypted with
     /// mode X" to operators reading the exported YAML.
     pub fn redact_secrets(&mut self) {
+        // `${env:NAME}` references survive redaction — a reference is not a
+        // secret, and stripping it would break the env-ref round-trip.
+        fn clear_unless_ref(slot: &mut Option<String>) {
+            if !slot.as_deref().is_some_and(is_env_ref) {
+                *slot = None;
+            }
+        }
         match self {
             Self::None { legacy_key, .. } => {
-                *legacy_key = None;
+                clear_unless_ref(legacy_key);
             }
             Self::Aes256GcmProxy {
                 key, legacy_key, ..
             } => {
-                *key = None;
-                *legacy_key = None;
+                clear_unless_ref(key);
+                clear_unless_ref(legacy_key);
             }
             Self::SseKms {
                 legacy_key,
@@ -701,10 +724,10 @@ impl BackendEncryptionConfig {
             } => {
                 // kms_key_id is an ARN — NOT secret. Operators need to
                 // see it to know WHICH KMS key.
-                *legacy_key = None;
+                clear_unless_ref(legacy_key);
             }
             Self::SseS3 { legacy_key, .. } => {
-                *legacy_key = None;
+                clear_unless_ref(legacy_key);
             }
         }
     }
@@ -995,6 +1018,7 @@ impl Default for Config {
             iam_groups: Vec::new(),
             auth_providers: Vec::new(),
             group_mapping_rules: Vec::new(),
+            env_refs: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1223,8 +1247,9 @@ impl Config {
     pub fn from_toml_file(path: &str) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
         // Expand ${VAR} / ${VAR:-default} before parsing — see from_yaml_file.
-        let content = expand_env_vars(&content)?;
-        let config = Self::from_toml_str(&content)?;
+        let (content, env_refs) = expand_env_vars_recording(&content)?;
+        let mut config = Self::from_toml_str(&content)?;
+        config.env_refs = env_refs;
 
         // Phase 6 deprecation warn. Fires exactly once per load (no
         // per-request overhead — config loads only at startup and on
@@ -1267,8 +1292,10 @@ impl Config {
         // file from disk is unambiguously "render against my environment"; the
         // admin `config apply` path parses a doc body via `from_yaml_str` and is
         // deliberately NOT expanded (it would resolve against the server's env).
-        let content = expand_env_vars(&content)?;
-        Self::from_yaml_str(&content)
+        let (content, env_refs) = expand_env_vars_recording(&content)?;
+        let mut cfg = Self::from_yaml_str(&content)?;
+        cfg.env_refs = env_refs;
+        Ok(cfg)
     }
 
     /// Parse a YAML string into a `Config`. See [`Self::from_yaml_file`]
@@ -2017,6 +2044,80 @@ impl Config {
         print!("{extra}");
     }
 
+    /// Re-insert `${env:NAME}` references for every scalar whose value the
+    /// loaded document originally resolved from the environment (see
+    /// [`Self::env_refs`]). This is what makes the IaC round-trip lossless:
+    /// the persisted file and the exported document carry the refs, not the
+    /// materialized secrets.
+    ///
+    /// Mechanics: the config is serialized to a YAML value tree and every
+    /// String scalar that EXACTLY equals a recorded env value is replaced by
+    /// `${env:NAME}`. Deterministic on collisions (two names with the same
+    /// value → the lexicographically-first name wins). Non-string scalars
+    /// (a ref that expanded into a number/bool field) are left materialized.
+    /// Falls back to a plain clone (with a warn) if the round-trip through
+    /// the value tree fails — emitting expanded secrets is strictly better
+    /// than failing a persist.
+    pub fn with_env_refs_reinserted(&self) -> Self {
+        if self.env_refs.is_empty() {
+            return self.clone();
+        }
+        // Inverse map value → ref-string; BTreeMap iteration makes the
+        // first (lexicographically smallest) name win on duplicate values.
+        let mut inverse: std::collections::BTreeMap<&str, String> =
+            std::collections::BTreeMap::new();
+        for (name, value) in &self.env_refs {
+            if !value.is_empty() {
+                inverse
+                    .entry(value.as_str())
+                    .or_insert_with(|| format!("${{env:{name}}}"));
+            }
+        }
+
+        fn walk(v: &mut serde_yaml::Value, inverse: &std::collections::BTreeMap<&str, String>) {
+            match v {
+                serde_yaml::Value::String(s) => {
+                    if let Some(reference) = inverse.get(s.as_str()) {
+                        *s = reference.clone();
+                    }
+                }
+                serde_yaml::Value::Sequence(seq) => {
+                    for item in seq {
+                        walk(item, inverse);
+                    }
+                }
+                serde_yaml::Value::Mapping(map) => {
+                    for (_, value) in map.iter_mut() {
+                        walk(value, inverse);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let substituted = serde_yaml::to_value(self)
+            .map_err(|e| e.to_string())
+            .and_then(|mut tree| {
+                walk(&mut tree, &inverse);
+                serde_yaml::from_value::<Config>(tree).map_err(|e| e.to_string())
+            });
+        match substituted {
+            Ok(mut cfg) => {
+                // `env_refs` is #[serde(skip)] — restore it so chained
+                // serializers (and future persists) keep the provenance.
+                cfg.env_refs = self.env_refs.clone();
+                cfg
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "env-ref reinsertion failed ({e}); persisting/exporting \
+                     materialized values instead"
+                );
+                self.clone()
+            }
+        }
+    }
+
     /// Clone the config with *infrastructure* secrets redacted. Matches the
     /// Persistence variant: strips `bootstrap_password_hash` (it has its
     /// own dedicated rotation endpoint + sits in the encrypted IAM DB,
@@ -2080,12 +2181,17 @@ impl Config {
         // infra secrets that belong in env vars or a secret manager,
         // not in a downloadable YAML artifact. Persist-variant
         // preserves them (so a round-trip through PATCH → persist
-        // doesn't lose the operator's in-memory values).
+        // doesn't lose the operator's in-memory values). `${env:...}`
+        // references survive — they ARE the env-var/secret-manager form.
         for u in &mut export.iam_users {
-            u.secret_access_key.clear();
+            if !is_env_ref(&u.secret_access_key) {
+                u.secret_access_key.clear();
+            }
         }
         for p in &mut export.auth_providers {
-            p.client_secret = None;
+            if !p.client_secret.as_deref().is_some_and(is_env_ref) {
+                p.client_secret = None;
+            }
         }
         export
     }
@@ -2096,15 +2202,26 @@ impl Config {
     /// operator reading the exported YAML must refill secrets from their
     /// secret manager, not copy them out of an API response.
     pub fn redact_all_secrets(&self) -> Self {
-        let mut export = self.redact_for_export();
+        // `${env:NAME}` references survive every redaction tier — a
+        // reference is not a secret (see the env-ref round-trip docs on
+        // [`Self::env_refs`]).
+        fn clear_unless_ref(slot: &mut Option<String>) {
+            if !slot.as_deref().is_some_and(is_env_ref) {
+                *slot = None;
+            }
+        }
+        // Reinsert env refs FIRST: callers chain `redact_all_secrets()` into
+        // `to_canonical_yaml()`, and clearing a materialized secret before
+        // reinsertion could match it would lose the reference.
+        let mut export = self.with_env_refs_reinserted().redact_for_export();
         if let BackendConfig::S3 {
             ref mut access_key_id,
             ref mut secret_access_key,
             ..
         } = export.backend
         {
-            *access_key_id = None;
-            *secret_access_key = None;
+            clear_unless_ref(access_key_id);
+            clear_unless_ref(secret_access_key);
         }
         for named in &mut export.backends {
             if let BackendConfig::S3 {
@@ -2113,23 +2230,30 @@ impl Config {
                 ..
             } = named.backend
             {
-                *access_key_id = None;
-                *secret_access_key = None;
+                clear_unless_ref(access_key_id);
+                clear_unless_ref(secret_access_key);
             }
         }
-        export.access_key_id = None;
-        export.secret_access_key = None;
+        clear_unless_ref(&mut export.access_key_id);
+        clear_unless_ref(&mut export.secret_access_key);
         // Webhook header values may carry bearer tokens. Mask the VALUE but keep
         // the KEY so the GUI shows which headers exist; the section-PUT preserve
         // path restores any value left as this sentinel. Endpoint URLs are left
         // visible on purpose (operators must verify them; credentials belong in
         // headers, not the URL).
         for value in export.event_delivery.webhook_headers.values_mut() {
-            *value = REDACTED_SENTINEL.to_string();
+            if !is_env_ref(value) {
+                *value = REDACTED_SENTINEL.to_string();
+            }
         }
         // Slack bot token is a secret too — mask it (keep Some so the GUI shows a
         // token IS configured), preserved on an untouched round-trip.
-        if export.event_delivery.slack_bot_token.is_some() {
+        if export
+            .event_delivery
+            .slack_bot_token
+            .as_deref()
+            .is_some_and(|t| !is_env_ref(t))
+        {
             export.event_delivery.slack_bot_token = Some(REDACTED_SENTINEL.to_string());
         }
         // Slack INCOMING-WEBHOOK URLs are bearer-equivalent: the `hooks.slack.com`
@@ -2140,11 +2264,18 @@ impl Config {
         if export.event_delivery.format == crate::config_sections::EventDeliveryFormat::Slack
             && !export.event_delivery.uses_slack_bot_token()
         {
-            if export.event_delivery.webhook_url.is_some() {
+            if export
+                .event_delivery
+                .webhook_url
+                .as_deref()
+                .is_some_and(|u| !is_env_ref(u))
+            {
                 export.event_delivery.webhook_url = Some(REDACTED_SENTINEL.to_string());
             }
             for url in export.event_delivery.webhook_urls.iter_mut() {
-                *url = REDACTED_SENTINEL.to_string();
+                if !is_env_ref(url) {
+                    *url = REDACTED_SENTINEL.to_string();
+                }
             }
         }
         export
@@ -2160,7 +2291,7 @@ impl Config {
     /// deliberately does NOT go through this function — see
     /// [`Self::persist_to_file`] for the rationale.
     pub fn to_toml_string(&self) -> Result<String, ConfigError> {
-        let export = self.redact_for_export();
+        let export = self.with_env_refs_reinserted().redact_for_export();
         toml::to_string_pretty(&export).map_err(|e| ConfigError::Parse(e.to_string()))
     }
 
@@ -2178,7 +2309,7 @@ impl Config {
     /// we only ever *emit* sectioned — legacy readers eventually disappear,
     /// the canonical artifact must be forward-shaped.
     pub fn to_canonical_yaml(&self) -> Result<String, ConfigError> {
-        let export = self.redact_for_export();
+        let export = self.with_env_refs_reinserted().redact_for_export();
         let sectioned = crate::config_sections::SectionedConfig::from_flat(&export);
         serde_yaml::to_string(&sectioned).map_err(|e| ConfigError::Parse(e.to_string()))
     }
@@ -2195,12 +2326,12 @@ impl Config {
     /// plaintext. The operator's in-memory state is correct but their
     /// on-disk source of truth disagrees.
     fn to_toml_string_for_persist(&self) -> Result<String, ConfigError> {
-        let export = self.redact_for_persist();
+        let export = self.with_env_refs_reinserted().redact_for_persist();
         toml::to_string_pretty(&export).map_err(|e| ConfigError::Parse(e.to_string()))
     }
 
     fn to_canonical_yaml_for_persist(&self) -> Result<String, ConfigError> {
-        let export = self.redact_for_persist();
+        let export = self.with_env_refs_reinserted().redact_for_persist();
         let sectioned = crate::config_sections::SectionedConfig::from_flat(&export);
         serde_yaml::to_string(&sectioned).map_err(|e| ConfigError::Parse(e.to_string()))
     }
@@ -2386,11 +2517,50 @@ pub fn expand_env_vars(input: &str) -> Result<String, ConfigError> {
     expand_env_with(input, |name| std::env::var(name).ok())
 }
 
+/// True if `s` is exactly one `${env:NAME}` / `${env:NAME:-default}`
+/// reference. Redactors keep such values: a reference is not a secret, and
+/// stripping it would break the IaC round-trip that
+/// [`Config::with_env_refs_reinserted`] exists to enable.
+pub fn is_env_ref(s: &str) -> bool {
+    s.starts_with("${env:") && s.ends_with('}') && !s[2..s.len() - 1].contains('}')
+}
+
+/// [`expand_env_vars`] that additionally RECORDS which `${env:NAME}` refs
+/// resolved from the environment, as `name → resolved value`. The map is the
+/// provenance that lets persist/export re-emit the refs instead of the
+/// materialized secrets (see [`Config::env_refs`]). Refs satisfied by their
+/// `:-default` (var unset/empty) are NOT recorded — the literal default came
+/// from the file, and re-emitting it as a bare `${env:NAME}` would make the
+/// next load fail where the original template defaulted.
+pub fn expand_env_vars_recording(
+    input: &str,
+) -> Result<(String, std::collections::BTreeMap<String, String>), ConfigError> {
+    expand_env_with_recording(input, |name| std::env::var(name).ok())
+}
+
+/// Testable core of [`expand_env_vars_recording`].
+pub(crate) fn expand_env_with_recording(
+    input: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<(String, std::collections::BTreeMap<String, String>), ConfigError> {
+    let mut used = std::collections::BTreeMap::new();
+    let expanded = expand_env_with(input, |name| {
+        let v = lookup(name);
+        if let Some(val) = &v {
+            if !val.is_empty() {
+                used.insert(name.to_string(), val.clone());
+            }
+        }
+        v
+    })?;
+    Ok((expanded, used))
+}
+
 /// Testable core of [`expand_env_vars`]: `lookup` resolves a var name to its
 /// value (`None` = unset).
 pub(crate) fn expand_env_with(
     input: &str,
-    lookup: impl Fn(&str) -> Option<String>,
+    mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> Result<String, ConfigError> {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
@@ -4760,5 +4930,177 @@ mod prod_shape_tests {
         assert_eq!(re.buckets.len(), cfg.buckets.len());
         assert_eq!(re.replication.rules.len(), 1);
         assert_eq!(re.lifecycle.rules.len(), 1);
+    }
+}
+
+/// ── Env-ref round-trip tests ────────────────────────────────────────────
+///
+/// The IaC workflow this guards: provision a secret-free template with
+/// `${env:NAME}` refs → boot (refs expand, provenance recorded) → tweak
+/// via the GUI (persist re-emits refs, not secrets) → export (refs
+/// survive redaction) → put the export back into IaC.
+#[cfg(test)]
+mod env_ref_roundtrip_tests {
+    use super::*;
+
+    const TEMPLATE: &str = r#"
+access:
+  access_key_id: admin
+  secret_access_key: ${env:BOOTSTRAP_SECRET}
+  iam_mode: declarative
+  iam_users:
+  - name: ci-uploader
+    access_key_id: ci-uploader
+    secret_access_key: ${env:CI_UPLOADER_SECRET}
+    enabled: true
+    permissions:
+    - id: 0
+      effect: Allow
+      actions: [read, write, list]
+      resources: ["releases/*"]
+  auth_providers:
+  - name: google-sso
+    provider_type: oidc
+    enabled: true
+    priority: 0
+    client_id: dummy-client-id
+    client_secret: ${env:OIDC_CLIENT_SECRET}
+    issuer_url: https://accounts.google.com
+    scopes: openid email profile
+storage:
+  default_backend: remote
+  backends:
+  - name: remote
+    type: s3
+    endpoint: https://s3.example.test
+    region: x
+    access_key_id: ${env:REMOTE_KEY}
+    secret_access_key: ${env:REMOTE_SECRET}
+  - name: local
+    type: filesystem
+    path: ./data
+    encryption:
+      mode: aes256-gcm-proxy
+      key: ${env:LOCAL_AES_KEY}
+  buckets:
+    releases:
+      backend: remote
+    scratch:
+      backend: local
+      compression: ${env:UNSET_WITH_DEFAULT:-null}
+"#;
+
+    fn lookup(name: &str) -> Option<String> {
+        match name {
+            "BOOTSTRAP_SECRET" => Some("boot-secret-123".into()),
+            "CI_UPLOADER_SECRET" => Some("ci-secret-456".into()),
+            "OIDC_CLIENT_SECRET" => Some("GOCSPX-oidc-789".into()),
+            "REMOTE_KEY" => Some("AKREMOTE000000000000".into()),
+            "REMOTE_SECRET" => Some("remote-secret-abc".into()),
+            "LOCAL_AES_KEY" => {
+                Some("00000000000000000000000000000000000000000000000000000000000000ff".into())
+            }
+            _ => None,
+        }
+    }
+
+    fn load_template() -> Config {
+        let (expanded, refs) =
+            expand_env_with_recording(TEMPLATE, lookup).expect("template expands");
+        let mut cfg = Config::from_yaml_str(&expanded).expect("expanded template parses");
+        cfg.env_refs = refs;
+        cfg
+    }
+
+    #[test]
+    fn recording_captures_resolved_refs_but_not_defaults() {
+        let (_, refs) = expand_env_with_recording(TEMPLATE, lookup).unwrap();
+        assert_eq!(refs.len(), 6, "six refs resolved from env: {refs:?}");
+        assert_eq!(refs["CI_UPLOADER_SECRET"], "ci-secret-456");
+        // UNSET_WITH_DEFAULT fell back to its default — not recorded
+        // (re-emitting it as a bare ref would fail the next load).
+        assert!(!refs.contains_key("UNSET_WITH_DEFAULT"));
+    }
+
+    #[test]
+    fn is_env_ref_truth_table() {
+        assert!(is_env_ref("${env:FOO}"));
+        assert!(is_env_ref("${env:FOO:-bar}"));
+        assert!(!is_env_ref("plain"));
+        assert!(!is_env_ref("${iam:username}"));
+        assert!(!is_env_ref("${env:FOO} trailing"));
+        assert!(!is_env_ref("prefix ${env:FOO}"));
+    }
+
+    #[test]
+    fn export_reemits_refs_and_never_the_secrets() {
+        let cfg = load_template();
+        // The export-endpoint chain: redact_all_secrets → to_canonical_yaml.
+        let exported = cfg.redact_all_secrets().to_canonical_yaml().unwrap();
+        for r in [
+            "${env:BOOTSTRAP_SECRET}",
+            "${env:CI_UPLOADER_SECRET}",
+            "${env:OIDC_CLIENT_SECRET}",
+            "${env:REMOTE_KEY}",
+            "${env:REMOTE_SECRET}",
+            "${env:LOCAL_AES_KEY}",
+        ] {
+            assert!(exported.contains(r), "export must carry {r}:\n{exported}");
+        }
+        for s in [
+            "boot-secret-123",
+            "ci-secret-456",
+            "GOCSPX-oidc-789",
+            "remote-secret-abc",
+            "00000000000000000000000000000000000000000000000000000000000000ff",
+        ] {
+            assert!(!exported.contains(s), "export must not leak {s}");
+        }
+        // And the export must still parse as a config document.
+        Config::from_yaml_str(&exported.replace("${env:", "${noexpand:"))
+            .expect("exported template re-parses");
+    }
+
+    #[test]
+    fn persist_reemits_refs_even_after_runtime_mutation() {
+        let mut cfg = load_template();
+        // Simulate a GUI tweak: a non-secret change via the admin API.
+        cfg.max_object_size = 42 * 1024 * 1024;
+        let dir = std::env::temp_dir().join(format!("dgp-envref-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cfg.yaml");
+        cfg.persist_to_file(path.to_str().unwrap()).unwrap();
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(persisted.contains("max_object_size: 44040192"));
+        assert!(
+            persisted.contains("${env:CI_UPLOADER_SECRET}"),
+            "persisted file keeps the user-secret ref:\n{persisted}"
+        );
+        assert!(persisted.contains("${env:LOCAL_AES_KEY}"));
+        assert!(!persisted.contains("ci-secret-456"));
+        // The persisted file must re-load against the same env (boot path).
+        let (re_expanded, _) = expand_env_with_recording(&persisted, lookup).unwrap();
+        let re = Config::from_yaml_str(&re_expanded).unwrap();
+        assert_eq!(re.max_object_size, 44040192);
+        assert_eq!(re.iam_users[0].secret_access_key, "ci-secret-456");
+    }
+
+    #[test]
+    fn collision_resolves_deterministically() {
+        let mut cfg = Config {
+            access_key_id: Some("same-value".into()),
+            ..Default::default()
+        };
+        cfg.env_refs.insert("ZED".into(), "same-value".into());
+        cfg.env_refs.insert("ALPHA".into(), "same-value".into());
+        let out = cfg.with_env_refs_reinserted();
+        assert_eq!(out.access_key_id.as_deref(), Some("${env:ALPHA}"));
+    }
+
+    #[test]
+    fn no_refs_is_a_plain_clone() {
+        let cfg = Config::default();
+        assert_eq!(cfg.with_env_refs_reinserted(), cfg);
     }
 }

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- **`${env:NAME}` references round-trip.** The proxy now records which
+  config values were resolved from `${env:...}` references and re-emits
+  the references — instead of materialized secrets — when persisting the
+  config to disk (GUI changes) and in `GET /config/export`. Redactors
+  keep references intact (a reference is not a secret). The admin
+  `/config/apply` document path now also expands `${env:NAME}` against
+  the server environment. Together these make the IaC loop lossless:
+  provision a secret-free template, tweak via the GUI, export, and
+  commit the export straight back into IaC.
+
 ## v1.4.0 — 2026-06-12
 
 ### Added

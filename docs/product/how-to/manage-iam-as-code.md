@@ -83,7 +83,9 @@ Use `${env:NAME}` references in the committed file:
       secret_access_key: "${env:CI_UPLOADER_SECRET}"
 ```
 
-`config apply` expands `${env:NAME}` against the *operator's* environment before sending, and the server expands it when loading the config file from disk at startup. `config lint` fails loudly on an unset variable with no default — run it in CI to catch missing secrets before the apply. Two caveats: raw admin-API bodies (the section PUT) are **not** expanded — render secrets into the payload yourself on that path — and a `${env:NAME:-default}` default applies when the variable is unset. If you must keep a rendered file with plaintext secrets on disk, `chmod 0600` it and keep it out of the image and the repo.
+`config apply` expands `${env:NAME}` against the *operator's* environment before sending; the server expands the config file from disk at startup and expands document bodies POSTed to `/config/apply` against the *server's* environment. `config lint` fails loudly on an unset variable with no default — run it in CI to catch missing secrets before the apply. One caveat: raw section PUTs (the GUI's per-section editor) are **not** expanded — a literal `${env:...}` typed into a form field stays literal.
+
+**The references round-trip.** The proxy records which values came from `${env:NAME}` refs. When a GUI change persists the config to disk, and when you download `GET /config/export`, those values are re-emitted as `${env:NAME}` — not as materialized secrets, and not redacted away. The intended loop: provision a secret-free template → tweak in the GUI as needed → export → commit the export straight back into IaC. Secrets that never came from a ref behave as before (kept on disk, redacted in exports). A ref that expanded into a *non-string* field (a number, a boolean) does not round-trip — it persists as its literal value.
 
 ## 5. Switch back to GUI mode
 

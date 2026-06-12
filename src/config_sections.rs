@@ -1330,6 +1330,7 @@ impl SectionedConfig {
             iam_groups: self.access.iam_groups,
             auth_providers: self.access.auth_providers,
             group_mapping_rules: self.access.group_mapping_rules,
+            env_refs: Default::default(),
             bootstrap_password_hash: self.advanced.bootstrap_password_hash,
             codec_concurrency: self.advanced.codec_concurrency,
             blocking_threads: self.advanced.blocking_threads,
