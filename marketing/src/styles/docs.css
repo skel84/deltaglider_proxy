@@ -32,7 +32,9 @@
   display: grid;
   grid-template-columns: 250px minmax(0, 1fr);
   gap: 48px;
-  max-width: var(--shell);
+  /* Same cap as .has-toc below — the landing (no TOC) must not be narrower
+     than a doc page, or the layout visibly jumps when navigating. */
+  max-width: 1240px;
   margin: 0 auto;
   padding: 44px 24px 96px;
   align-items: start;
@@ -506,7 +508,7 @@
    Responsive
    ════════════════════════════════════════════════════════════════════════ */
 @media (max-width: 1100px) {
-  .docs-shell.has-toc { grid-template-columns: 250px minmax(0, 1fr); max-width: var(--shell); }
+  .docs-shell.has-toc { grid-template-columns: 250px minmax(0, 1fr); }
   .docs-toc { display: none; }
 }
 @media (max-width: 960px) {
