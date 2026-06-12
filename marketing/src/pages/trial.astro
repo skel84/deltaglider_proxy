@@ -1,10 +1,11 @@
 ---
 // /trial — 30-day production support trial. The software is GPL-3.0 and
-// free regardless; the trial is for the support relationship (eng Slack +
-// SLA + arch review call). Frame C: trial the relationship, not the
-// software. v2 layout: hero illustration (Gemini-generated, brand
-// palette, /illustrations/trial-pairing.jpg), glyph cards for what's
-// included, a visual 30-day timeline, honesty columns.
+// free regardless; the trial is for the support relationship (direct
+// engineering email + 12h SLA + arch review call). Frame C: trial the
+// relationship, not the software. v2 layout: hero illustration
+// (Gemini-generated, brand palette, /illustrations/trial-pairing.jpg),
+// glyph cards for what's included, a visual 30-day timeline, honesty
+// columns. We do NOT promise Slack channels or operating migrations.
 
 import BaseLayout from '../layouts/BaseLayout.astro';
 import JsonLd from '../components/JsonLd.astro';
@@ -17,52 +18,42 @@ import {
 
 const title = '30-day production support trial — DeltaGlider';
 const description =
-  "Try the relationship. Direct engineering Slack, response SLA, one architecture review call. The software stays free regardless — it's GPL-3.0.";
+  "Try the relationship. Direct engineering email, a 12-hour response SLA, one architecture review call. The software stays free regardless — it's GPL-3.0.";
 
 const included = [
   {
     glyph: 'pulse',
-    title: 'Direct engineering Slack',
-    desc: 'A shared channel with named contacts on the Beshu Tech side — the people whose names are in git log.',
+    title: 'Direct engineering email',
+    desc: 'Named senior engineers on the other end of the address — the people whose names are in git log. No outsourced first line.',
   },
   {
     glyph: 'clock',
-    title: '4h response SLA',
-    desc: 'Business-hours response commitment on questions and issues, from day one.',
+    title: '12h response SLA',
+    desc: '12-hour email response commitment on questions and issues, business hours, from day one.',
   },
   {
     glyph: 'bulb',
     title: 'Architecture review call',
     desc: '60 minutes on your deployment: what’s standard, what’s risky, what’s suboptimal, what’s outright broken.',
   },
-  {
-    glyph: 'chart',
-    title: 'Migration sizing',
-    desc: 'Moving an existing bucket? We size the migration with you before you commit to it.',
-  },
-  {
-    glyph: 'wrench',
-    title: 'Cutover cover',
-    desc: 'Tactical Slack help during your first cutover window, if you want us on call for it.',
-  },
 ] as const;
 
 const timeline = [
   {
     day: 'Day 0',
-    text: 'You email contact@beshu.tech with subject “DeltaGlider — Production support trial.” We respond within 1 business day with a Slack invite and a scheduling link.',
+    text: 'You email contact@beshu.tech with subject “DeltaGlider — Production support trial.” We respond within 1 business day with a scheduling link for the review call.',
   },
   {
     day: 'Days 1–7',
-    text: 'Slack onboarding. We learn your deployment shape, the workload, the storage backend, your SLOs.',
+    text: 'Email onboarding. We learn your deployment shape, the workload, the storage backend, your SLOs.',
   },
   {
     day: 'Days 8–14',
-    text: 'Architecture review call (60 min). Output: a short written summary of recommendations, in your shared channel.',
+    text: 'Architecture review call (60 min). Output: a short written summary of recommendations, by email.',
   },
   {
     day: 'Days 15–29',
-    text: 'Ongoing Slack support. You ask questions, file issues, get answers from the senior engineers who wrote the code.',
+    text: 'Ongoing email support. You ask questions, file issues, get answers from the senior engineers who wrote the code.',
   },
   {
     day: 'Day 30',
@@ -95,9 +86,9 @@ const timeline = [
         <p>
           DeltaGlider is GPL-3.0 — you can run the OSS build forever
           without paying us. The trial isn't for the software. It's for the
-          support relationship: direct Slack access to Beshu Tech's 10
-          senior engineers, a response SLA, and one architecture review
-          call.
+          support relationship: a direct email line to Beshu Tech's 10
+          senior engineers, a 12-hour response SLA, and one architecture
+          review call.
         </p>
 
         <p class="trial-no-strings">
@@ -168,8 +159,13 @@ const timeline = [
               help, not managed services.
             </li>
             <li>
+              We don't operate migrations or cutovers for you. We advise;
+              your team runs them.
+            </li>
+            <li>
               We don't sign DPAs / MSAs for the trial itself. Those come
-              with a paid contract — a separate sales conversation.
+              with a paid contract — a separate
+              <a href="mailto:sales@beshu.tech?subject=DeltaGlider%20-%20Contract%20inquiry">sales conversation</a>.
             </li>
             <li>
               We don't auto-bill you on day 31. Conversion is your decision
@@ -193,7 +189,8 @@ const timeline = [
             </li>
             <li>
               You need a contract signed before any interaction — skip the
-              trial, talk to sales directly.
+              trial,
+              <a href="mailto:sales@beshu.tech?subject=DeltaGlider%20-%20Sales%20inquiry">talk to sales directly</a>.
             </li>
           </ul>
         </div>

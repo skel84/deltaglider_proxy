@@ -241,6 +241,6 @@ describe('buildMarkdown', () => {
     const result = calculate(inputs);
     const md = buildMarkdown(inputs, result);
     expect(md).toContain('Enterprise');
-    expect(md).toContain('contact@beshu.tech');
+    expect(md).toContain('sales@beshu.tech');
   });
 });

@@ -235,7 +235,7 @@ export function trialOfferSchema({ durationDays }: TrialOfferInput) {
     '@id': `${SITE.url}/trial#offer`,
     name: `${durationDays}-day DeltaGlider production support trial`,
     description:
-      'Direct engineering Slack, response SLA, one architecture review call. The software is GPL-3.0 and remains free regardless.',
+      'Direct engineering email, a 12-hour response SLA, one architecture review call. The software is GPL-3.0 and remains free regardless.',
     price: '0',
     priceCurrency: 'USD',
     availability: 'https://schema.org/InStock',

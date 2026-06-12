@@ -273,7 +273,7 @@ function ResultCard({ result, onCopy, copyState, showFormula, onToggleFormula }:
           <a className="btn btn-primary" href="https://github.com/beshu-tech/deltaglider_proxy">
             Try the OSS build
           </a>
-          <a className="link-action" href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Different%20fit">
+          <a className="link-action" href="mailto:sales@beshu.tech?subject=DeltaGlider%20-%20Different%20fit">
             Email us
           </a>
         </div>
@@ -289,13 +289,13 @@ function ResultCard({ result, onCopy, copyState, showFormula, onToggleFormula }:
           Approximate annual savings: <strong>{formatUsd(result.savings)}</strong>.
         </p>
         <p>
-          At 250 TB+ stored footprint, you need a multi-region SLA, dedicated
-          channel, and custom terms — not a one-size-fits-all bracket.
+          At 250 TB+ stored footprint, you need a multi-region SLA, named
+          engineering contact, and custom terms — not a one-size-fits-all bracket.
         </p>
         <div className="card-ctas">
           <a
             className="btn btn-primary"
-            href="mailto:contact@beshu.tech?subject=DeltaGlider%20-%20Enterprise%20sales%20inquiry"
+            href="mailto:sales@beshu.tech?subject=DeltaGlider%20-%20Enterprise%20sales%20inquiry"
           >
             Schedule a sales call
           </a>

@@ -37,7 +37,7 @@ export const BRACKETS: readonly Bracket[] = [
     priceUsd: 0,
     priceLabel: 'Free, GPL-3.0',
     description:
-      'Full product. No footprint cap. Self-host. Community Slack + GitHub.',
+      'Full product. No footprint cap. Self-host. Community support on GitHub.',
   },
   {
     id: 'trial',
@@ -45,7 +45,7 @@ export const BRACKETS: readonly Bracket[] = [
     priceUsd: 0,
     priceLabel: 'Free, 30 days',
     description:
-      'Direct engineering Slack, response SLA, one architecture review call. See /trial.',
+      'Direct engineering email, 12h response SLA, one architecture review call. See /trial.',
   },
   {
     id: 'starter',
@@ -53,7 +53,7 @@ export const BRACKETS: readonly Bracket[] = [
     priceUsd: 2_500,
     priceLabel: '$2.5k/year',
     description:
-      'Up to 10 TB stored footprint. Eng Slack + 4h business-hours response SLA.',
+      'Up to 10 TB stored footprint. Direct engineering email, 12h business-hours response SLA.',
     rangeTb: [0, 10],
   },
   {
@@ -80,7 +80,7 @@ export const BRACKETS: readonly Bracket[] = [
     priceUsd: null,
     priceLabel: 'Talk to sales',
     description:
-      '250 TB+, multi-region, custom SLA, dedicated channel.',
+      '250 TB+, multi-region, custom SLA, named engineering contact.',
     rangeTb: [250, null],
   },
   {

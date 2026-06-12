@@ -223,7 +223,7 @@ export function buildMarkdown(inputs: CalculatorInputs, result: CalculatorResult
     lines.push('');
     lines.push(`Approximate annual storage savings: **${formatUsd(result.savings)}**.`);
     lines.push('');
-    lines.push('At this scale, you need an Enterprise contract — multi-region SLA, dedicated channel, custom terms. Email contact@beshu.tech.');
+    lines.push('At this scale, you need an Enterprise contract — multi-region SLA, a named engineering contact, custom terms. Email sales@beshu.tech.');
     return lines.join('\n');
   }
   // OK case
