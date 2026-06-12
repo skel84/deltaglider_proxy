@@ -1,0 +1,156 @@
+---
+// DropIn.astro — "adopting it is one line of config".
+// The adoption-cost section: an endpoint diff (the entire client-side
+// migration) plus the three trust facts that used to masquerade as stats
+// in the old stats band: verified reads, one binary, no format lock-in.
+---
+
+<section class="section section-alt dropin">
+  <div class="shell">
+    <div class="dropin-grid">
+      <div class="dropin-copy">
+        <span class="section-eyebrow">Drop-in</span>
+        <h2 class="dropin-title">Adopting it is one line of config</h2>
+        <p class="dropin-lede">
+          It speaks the S3 protocol your tools already speak — SigV4
+          signing, multipart uploads, range reads, presigned URLs.
+          Repoint the endpoint; the SDKs, CI scripts, and backup jobs
+          never notice.
+        </p>
+      </div>
+
+      <figure class="dropin-diff" aria-label="A configuration diff: the S3 endpoint line changes from the AWS endpoint to the DeltaGlider proxy endpoint. Nothing else changes.">
+        <figcaption class="diff-title">app/config.yaml</figcaption>
+        <pre class="diff-body"><code><span class="diff-ctx"> s3:</span>
+<span class="diff-del">-  endpoint: https://s3.eu-central-1.amazonaws.com</span>
+<span class="diff-add">+  endpoint: https://dgp.internal:9000</span>
+<span class="diff-ctx">   access_key_id: ${'{'}AWS_ACCESS_KEY_ID{'}'}      # unchanged</span>
+<span class="diff-ctx">   secret_access_key: ${'{'}AWS_SECRET_KEY{'}'}     # unchanged</span></code></pre>
+      </figure>
+    </div>
+
+    <ul class="dropin-facts">
+      <li>
+        <strong>Reads are verified, not assumed.</strong> Every delta read
+        rebuilds the original and checks it against the SHA-256 recorded
+        at upload before serving it.
+      </li>
+      <li>
+        <strong>One binary carries everything.</strong> Proxy, web UI,
+        IAM, jobs, metrics — run it with Docker, a bare binary, or Helm.
+        No sidecar zoo.
+      </li>
+      <li>
+        <strong>No format hostage-taking.</strong> Stored deltas are
+        standard <code>xdelta3</code> files next to a plain reference
+        object — the stock CLI can rebuild every version without the
+        proxy running.
+      </li>
+    </ul>
+  </div>
+</section>
+
+<style>
+  .dropin-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2rem;
+    align-items: center;
+    margin-bottom: 2.25rem;
+  }
+
+  @media (min-width: 880px) {
+    .dropin-grid {
+      grid-template-columns: 1fr 1.1fr;
+      gap: 3rem;
+    }
+  }
+
+  .dropin-title { margin-top: 0; }
+
+  .dropin-lede {
+    color: var(--ink-soft);
+    font-size: 1.05rem;
+    margin: 0;
+    max-width: 48ch;
+  }
+
+  .dropin-diff {
+    margin: 0;
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    background: var(--bg-card);
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .diff-title {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    color: var(--ink-mute);
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .diff-body {
+    margin: 0;
+    padding: 1rem 1.1rem 1.1rem;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    font-size: 0.82rem;
+    line-height: 1.65;
+    overflow-x: auto;
+  }
+
+  .diff-body code { display: block; }
+
+  .diff-ctx { color: var(--ink-faint); }
+  .diff-del {
+    display: inline-block;
+    width: 100%;
+    color: #fda4af;
+    background: rgba(244, 63, 94, 0.09);
+    border-radius: 3px;
+  }
+  .diff-add {
+    display: inline-block;
+    width: 100%;
+    color: var(--brand-dark);
+    background: rgba(34, 211, 238, 0.1);
+    border-radius: 3px;
+    font-weight: 600;
+  }
+
+  .dropin-facts {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1rem;
+    max-width: none;
+  }
+
+  @media (min-width: 880px) {
+    .dropin-facts { grid-template-columns: 1fr 1fr 1fr; }
+  }
+
+  .dropin-facts li {
+    padding: 1.1rem 1.25rem;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: var(--bg-card);
+    color: var(--ink-soft);
+    font-size: 0.93rem;
+    line-height: 1.55;
+    margin: 0;
+  }
+
+  .dropin-facts strong {
+    display: block;
+    color: var(--ink-strong);
+    margin-bottom: 0.3rem;
+  }
+</style>

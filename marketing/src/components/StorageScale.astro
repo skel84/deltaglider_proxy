@@ -1,0 +1,246 @@
+---
+// StorageScale.astro — "the claim, drawn to scale".
+// Replaces the old stats band + abstract flow diagram. Instead of telling
+// the visitor numbers, it draws what ten uploads of the same artifact do
+// to a bucket: full copies on the left, one reference + hairline deltas on
+// the right. The figures are the verified 614× datapoint family used
+// site-wide (91 MB artifact → 148 KB delta), and the v100 projection lands
+// on the real 88.5× catalog number from the migration log — on purpose.
+const VERSIONS = 10;
+const rows = Array.from({ length: VERSIONS }, (_, i) => i + 1);
+---
+
+<section class="section scale">
+  <div class="shell">
+    <span class="section-eyebrow">Drawn to scale</span>
+    <h2 class="scale-title">What ten releases do to a bucket</h2>
+    <p class="scale-sub">
+      The same ten uploads of a 91&nbsp;MB build artifact, stored two ways.
+      The bars are proportional — we had to give the deltas a two-pixel
+      floor so you could see them at all.
+    </p>
+
+    <div
+      class="scale-chart"
+      role="img"
+      aria-label="Bar chart comparing ten versions of a 91 megabyte artifact. In a plain S3 bucket every version is a full 91 megabyte copy, totalling 910 megabytes. Behind DeltaGlider, version one is a full 91 megabyte reference and versions two through ten are 148 kilobyte deltas, totalling 92.3 megabytes."
+    >
+      <div class="scale-row scale-head-row" aria-hidden="true">
+        <span class="vlabel"></span>
+        <span class="scale-head">Plain S3 bucket</span>
+        <span class="scale-head scale-head-b">Behind DeltaGlider</span>
+      </div>
+
+      {rows.map((v) => (
+        <div class="scale-row" style={`--i:${v}`} aria-hidden="true">
+          <span class="vlabel">v{v}</span>
+          <span class="track">
+            <i class="fill fill-a">{v === 1 ? '91 MB' : ''}</i>
+          </span>
+          <span class="track">
+            {v === 1 ? (
+              <i class="fill fill-ref">91 MB · reference</i>
+            ) : (
+              <>
+                <i class="fill fill-d"></i>
+                {v === 2 && <span class="d-label">148 KB</span>}
+              </>
+            )}
+          </span>
+        </div>
+      ))}
+
+      <div class="scale-row scale-more" aria-hidden="true">
+        <span class="vlabel">⋮</span>
+        <span class="more-text">every further version: +91 MB</span>
+        <span class="more-text more-text-b">+148 KB</span>
+      </div>
+
+      <div class="scale-row scale-totals" aria-hidden="true">
+        <span class="vlabel"></span>
+        <span class="total total-a">910 MB <em>billed</em></span>
+        <span class="total total-b">92.3 MB <em>billed</em></span>
+      </div>
+    </div>
+
+    <p class="scale-projection">
+      The gap widens with every release. By v100 it's <strong>9.1&nbsp;GB</strong>
+      against <strong>~106&nbsp;MB</strong> — 86× less. Our own release catalog
+      hit <a href="/case-studies/readonlyrest-builds">88.5× on a real
+      release line</a>.
+    </p>
+
+    <p class="scale-mech">
+      The mechanism, in one sentence: each upload is stored as a binary
+      diff against a full reference copy kept beside it, and every read
+      rebuilds the exact original — behind the same S3 API your tools
+      already speak.
+    </p>
+  </div>
+</section>
+
+<style>
+  .scale-title { margin-top: 0; }
+
+  .scale-sub {
+    color: var(--ink-soft);
+    max-width: 56ch;
+    margin: 0 0 2.25rem;
+    font-size: 1.05rem;
+  }
+
+  .scale-chart {
+    display: grid;
+    gap: 7px;
+    max-width: var(--measure-wide);
+    padding: 1.5rem 1.6rem 1.4rem;
+    border: 1px solid var(--rule);
+    border-radius: 14px;
+    background: var(--bg-card);
+  }
+
+  .scale-row {
+    display: grid;
+    grid-template-columns: 2.4rem 1fr 1fr;
+    column-gap: 1.4rem;
+    align-items: center;
+  }
+
+  .scale-head-row { margin-bottom: 0.4rem; }
+
+  .scale-head {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--ink-mute);
+  }
+  .scale-head-b { color: var(--brand-dark); }
+
+  .vlabel {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    color: var(--ink-mute);
+    text-align: right;
+    padding-right: 0.2rem;
+  }
+
+  .track {
+    display: flex;
+    align-items: center;
+    height: 20px;
+    min-width: 0;
+  }
+
+  .fill {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    border-radius: 3px;
+    padding-inline: 7px;
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    font-style: normal;
+    white-space: nowrap;
+    overflow: hidden;
+    transform-origin: left center;
+    animation: scale-grow 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    animation-delay: calc(var(--i, 0) * 55ms);
+  }
+
+  .fill-a {
+    width: 100%;
+    background: rgba(148, 163, 184, 0.22);
+    border: 1px solid var(--rule);
+    color: var(--ink-soft);
+  }
+
+  .fill-ref {
+    width: 100%;
+    background: rgba(217, 70, 239, 0.16);
+    border: 1px solid rgba(217, 70, 239, 0.45);
+    color: #f0abfc;
+  }
+
+  /* 148 KB / 91 MB = 0.163% — the 2px floor is the only generosity */
+  .fill-d {
+    width: max(2px, 0.163%);
+    padding: 0;
+    background: var(--brand);
+    box-shadow: 0 0 7px rgba(34, 211, 238, 0.65);
+  }
+
+  .d-label {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    color: var(--brand-dark);
+    margin-left: 0.55rem;
+    white-space: nowrap;
+  }
+
+  .scale-more {
+    margin-top: 0.15rem;
+  }
+  .more-text {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    color: var(--ink-mute);
+    letter-spacing: 0.02em;
+  }
+  .more-text-b { color: var(--brand-dark); }
+
+  .scale-totals {
+    margin-top: 0.55rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--rule);
+  }
+  .total {
+    font-family: var(--font-mono);
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--ink-strong);
+  }
+  .total em {
+    font-style: normal;
+    font-weight: 400;
+    font-size: 0.68rem;
+    color: var(--ink-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-left: 0.4rem;
+  }
+  .total-b { color: var(--brand-dark); }
+
+  .scale-projection {
+    max-width: var(--measure-wide);
+    margin: 1.75rem 0 0;
+    color: var(--ink-strong);
+    font-size: 1.02rem;
+  }
+
+  .scale-mech {
+    max-width: var(--measure-wide);
+    margin: 0.75rem 0 0;
+    color: var(--ink-soft);
+    font-size: 0.95rem;
+  }
+
+  @keyframes scale-grow {
+    from { transform: scaleX(0); opacity: 0; }
+    to   { transform: scaleX(1); opacity: 1; }
+  }
+
+  @media (max-width: 640px) {
+    .scale-chart { padding: 1.1rem 1rem 1rem; }
+    .scale-row { column-gap: 0.8rem; grid-template-columns: 2rem 1fr 1fr; }
+    .fill { font-size: 0.56rem; padding-inline: 5px; }
+    .more-text { font-size: 0.58rem; }
+    .total { font-size: 0.95rem; }
+    .total em { display: block; margin: 0.1rem 0 0; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .fill { animation: none !important; }
+  }
+</style>

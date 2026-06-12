@@ -3,8 +3,8 @@
 // each section answers exactly one question, in the order a skeptical
 // engineer asks them:
 //   hero        what is it, why do I care
-//   stats       is the claim real
-//   HowItWorks  how does it work
+//   Scale       the claim drawn to scale (ten versions, two buckets)
+//   DropIn      what adoption costs (one config line) + trust facts
 //   Mechanism   "but ZIPs won't diff" — the obvious objection
 //   Capabilities what else do I get
 //   Proof       who runs it in anger
@@ -24,7 +24,8 @@ import WorkloadFitTable from '../components/WorkloadFitTable.astro';
 import ComparisonTable from '../components/ComparisonTable.astro';
 import ScreenshotGallery from '../components/ScreenshotGallery.astro';
 import HeroSlideshow from '../components/HeroSlideshow.tsx';
-import HowItWorks from '../components/HowItWorks.astro';
+import StorageScale from '../components/StorageScale.astro';
+import DropIn from '../components/DropIn.astro';
 import Capabilities from '../components/Capabilities.astro';
 import {
   organizationSchema,
@@ -90,40 +91,14 @@ import {
     </div>
   </section>
 
-  {/* ============================ STATS STRIP ========================= */}
-  <section class="section stats-band" aria-label="Key numbers">
-    <div class="shell">
-      <div class="stats-grid">
-        <div class="stat">
-          <div class="stat-big">88.5×</div>
-          <p class="stat-text">
-            One real plugin release: 2,866&nbsp;MB stored as 32.4&nbsp;MB.
-            <a href="/case-studies/readonlyrest-builds">From the migration log</a>.
-          </p>
-        </div>
-        <div class="stat">
-          <div class="stat-big">SHA-256</div>
-          <p class="stat-text">
-            Every read reconstructs the original bytes and verifies the
-            hash. Integrity is checked, not assumed.
-          </p>
-        </div>
-        <div class="stat">
-          <div class="stat-big">1 binary</div>
-          <p class="stat-text">
-            Proxy, web UI, IAM, jobs, metrics — no sidecar zoo. Run it
-            with Docker, a binary, or Helm.
-          </p>
-        </div>
-      </div>
-    </div>
-  </section>
+  {/* ===================== THE CLAIM, DRAWN TO SCALE ================== */}
+  <StorageScale />
 
-  {/* ============================ HOW IT WORKS ======================== */}
-  <HowItWorks />
+  {/* ============================ DROP-IN ============================= */}
+  <DropIn />
 
   {/* ===================== THE OBVIOUS OBJECTION ====================== */}
-  <section class="section section-alt">
+  <section class="section">
     <div class="shell">
       <MechanismExplanation />
     </div>
@@ -267,47 +242,6 @@ import {
   .hero-lede-secondary {
     font-size: 0.98rem;
     margin-top: 0.75rem;
-  }
-
-  .stats-band {
-    padding-top: 2.5rem;
-    padding-bottom: 2.5rem;
-  }
-
-  .stats-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 1.25rem;
-    max-width: var(--measure-wide);
-  }
-
-  @media (min-width: 720px) {
-    .stats-grid {
-      grid-template-columns: 1fr 1fr 1fr;
-    }
-  }
-
-  .stat {
-    padding: 1.5rem 1.6rem;
-    background: var(--bg-card);
-    border: 1px solid var(--rule);
-    border-radius: 10px;
-    box-shadow: var(--shadow-sm);
-  }
-
-  .stat-big {
-    font-size: 2rem;
-    font-weight: 800;
-    color: var(--brand);
-    letter-spacing: -0.02em;
-    margin-bottom: 0.35rem;
-  }
-
-  .stat-text {
-    margin: 0;
-    color: var(--ink-soft);
-    font-size: 0.95rem;
-    line-height: 1.5;
   }
 
   .proof-list {
