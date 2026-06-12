@@ -3,6 +3,7 @@
 // The adoption-cost section: an endpoint diff (the entire client-side
 // migration) plus the three trust facts that used to masquerade as stats
 // in the old stats band: verified reads, one binary, no format lock-in.
+import Glyph from './Glyph.astro';
 ---
 
 <section class="section section-alt dropin">
@@ -31,20 +32,29 @@
 
     <ul class="dropin-facts">
       <li>
-        <strong>Reads are verified, not assumed.</strong> Every delta read
-        rebuilds the original and checks it against the SHA-256 recorded
-        at upload before serving it.
+        <Glyph name="verify" size={38} />
+        <div>
+          <strong>Reads are verified, not assumed.</strong> Every delta read
+          rebuilds the original and checks it against the SHA-256 recorded
+          at upload before serving it.
+        </div>
       </li>
       <li>
-        <strong>One binary carries everything.</strong> Proxy, web UI,
-        IAM, jobs, metrics — run it with Docker, a bare binary, or Helm.
-        No sidecar zoo.
+        <Glyph name="binary" size={38} />
+        <div>
+          <strong>One binary carries everything.</strong> Proxy, web UI,
+          IAM, jobs, metrics — run it with Docker, a bare binary, or Helm.
+          No sidecar zoo.
+        </div>
       </li>
       <li>
-        <strong>No format hostage-taking.</strong> Stored deltas are
-        standard <code>xdelta3</code> files next to a plain reference
-        object — the stock CLI can rebuild every version without the
-        proxy running.
+        <Glyph name="escape" size={38} />
+        <div>
+          <strong>No format hostage-taking.</strong> Stored deltas are
+          standard <code>xdelta3</code> files next to a plain reference
+          object — the stock CLI can rebuild every version without the
+          proxy running.
+        </div>
       </li>
     </ul>
   </div>
@@ -99,7 +109,7 @@
     background: transparent;
     border: 0;
     box-shadow: none;
-    font-size: 1rem;
+    font-size: 0.9rem;
     line-height: 1.75;
     overflow-x: auto;
   }
@@ -138,14 +148,17 @@
   }
 
   .dropin-facts li {
-    padding: 1.1rem 1.25rem;
+    padding: 1.35rem 1.4rem;
     border: 1px solid var(--rule);
-    border-radius: 10px;
+    border-radius: 12px;
     background: var(--bg-card);
     color: var(--ink-soft);
-    font-size: 0.93rem;
+    font-size: 0.95rem;
     line-height: 1.55;
     margin: 0;
+    display: flex;
+    gap: 1.1rem;
+    align-items: flex-start;
   }
 
   .dropin-facts strong {

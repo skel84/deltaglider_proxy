@@ -1,0 +1,115 @@
+---
+// Glyph.astro — the site's pictogram set. Hand-drawn 48×48 stroke icons in
+// one consistent style: 2.6px round strokes, cyan base + fuchsia accent
+// (class="a"), soft glow. Use anywhere a section is "text only" — these are
+// the graphic vocabulary of the site, so add new glyphs HERE rather than
+// inlining one-off SVGs in pages.
+interface Props {
+  name:
+    | 'shield-key'
+    | 'replicate'
+    | 'lock'
+    | 'pulse'
+    | 'verify'
+    | 'binary'
+    | 'escape'
+    | 'flag'
+    | 'wrench'
+    | 'book'
+    | 'bulb'
+    | 'clock'
+    | 'chart';
+  size?: number;
+}
+const { name, size = 48 } = Astro.props;
+
+const PATHS: Record<string, string> = {
+  'shield-key': `
+    <path d="M24 5 L39 11 V23 C39 34 32.5 40.5 24 43.5 C15.5 40.5 9 34 9 23 V11 Z"/>
+    <circle class="a" cx="24" cy="20" r="4.5"/>
+    <path class="a" d="M24 24.5 V31"/>`,
+  replicate: `
+    <rect x="6" y="15" width="13" height="18" rx="3"/>
+    <rect x="29" y="15" width="13" height="18" rx="3"/>
+    <path class="a" d="M20 19 H27 M27 19 L24 16 M27 19 L24 22"/>
+    <path class="a" d="M28 29 H21 M21 29 L24 26 M21 29 L24 32"/>`,
+  lock: `
+    <rect x="12" y="21" width="24" height="19" rx="4"/>
+    <path d="M16 21 V15 a8 8 0 0 1 16 0 V21"/>
+    <circle class="a" cx="24" cy="30" r="3"/>
+    <path class="a" d="M24 33 V36"/>`,
+  pulse: `
+    <rect x="6" y="9" width="36" height="30" rx="4"/>
+    <path class="a" d="M11 26 H16 L20 16 L26 33 L30 24 H37"/>`,
+  verify: `
+    <path d="M24 4 L40 13 V31 L24 44 L8 31 V13 Z"/>
+    <path class="a" d="M16 24 L22 30 L33 18"/>`,
+  binary: `
+    <path d="M24 5 L41 13.5 V31 L24 43 L7 31 V13.5 Z"/>
+    <path class="a" d="M7 13.5 L24 22 L41 13.5"/>
+    <path class="a" d="M24 22 V43"/>`,
+  escape: `
+    <rect x="12" y="22" width="24" height="18" rx="4"/>
+    <path class="a" d="M20 22 V14 a8 8 0 0 1 15.5 -2.5"/>
+    <circle cx="24" cy="31" r="3"/>`,
+  flag: `
+    <path d="M11 6 V42"/>
+    <path class="a" d="M11 9 H36 L30 16.5 L36 24 H11"/>`,
+  wrench: `
+    <path d="M8 14 H40 M8 24 H40 M8 34 H40"/>
+    <circle class="a" cx="28" cy="14" r="4"/>
+    <circle class="a" cx="16" cy="24" r="4"/>
+    <circle class="a" cx="33" cy="34" r="4"/>`,
+  book: `
+    <path d="M24 11 C19 7 11 7 8 9 V38 C11 36 19 36 24 40 C29 36 37 36 40 38 V9 C37 7 29 7 24 11 Z"/>
+    <path class="a" d="M24 11 V40"/>`,
+  bulb: `
+    <path d="M24 6 a11 11 0 0 1 6 20.5 c-1.5 1 -2 2.5 -2 4.5 h-8 c0 -2 -0.5 -3.5 -2 -4.5 A11 11 0 0 1 24 6 Z"/>
+    <path d="M20 36 H28 M21 40 H27"/>
+    <path class="a" d="M24 13 a5 5 0 0 0 -5 5"/>`,
+  clock: `
+    <circle cx="24" cy="24" r="18"/>
+    <path class="a" d="M24 14 V24 L31 29"/>`,
+  chart: `
+    <path d="M7 7 V41 H41"/>
+    <rect class="a" x="13" y="15" width="6" height="20" rx="1.5"/>
+    <rect x="23" y="25" width="6" height="10" rx="1.5"/>
+    <rect x="33" y="32" width="6" height="3" rx="1.5"/>`,
+};
+---
+
+<span class="dg-glyph" style={`--glyph-size:${size}px`} aria-hidden="true">
+  <svg
+    viewBox="0 0 48 48"
+    width={size}
+    height={size}
+    fill="none"
+    stroke-width="2.6"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    set:html={PATHS[name]}
+  />
+</span>
+
+<style is:global>
+  .dg-glyph {
+    display: inline-grid;
+    place-items: center;
+    width: calc(var(--glyph-size) + 18px);
+    height: calc(var(--glyph-size) + 18px);
+    border-radius: 14px;
+    background:
+      radial-gradient(70% 70% at 50% 35%, rgba(34, 211, 238, 0.12), transparent 75%),
+      rgba(30, 41, 59, 0.45);
+    border: 1px solid rgba(34, 211, 238, 0.22);
+    flex: 0 0 auto;
+  }
+  .dg-glyph svg {
+    stroke: var(--brand-dark, #67e8f9);
+    filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.35));
+  }
+  .dg-glyph svg .a {
+    stroke: #f0abfc;
+    filter: drop-shadow(0 0 5px rgba(217, 70, 239, 0.4));
+  }
+</style>

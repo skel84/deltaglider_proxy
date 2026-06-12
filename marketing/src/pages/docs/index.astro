@@ -2,9 +2,20 @@
 // /docs — the documentation landing. Groups + ordering come from the shared
 // manifest, so it mirrors the in-product docs landing exactly.
 import DocsLayout from '../../layouts/DocsLayout.astro';
+import Glyph from '../../components/Glyph.astro';
 import { docsByGroup } from '../../lib/docs';
 
 const groups = docsByGroup();
+
+// Group id → pictogram (see Glyph.astro for the set).
+const GROUP_GLYPHS: Record<string, any> = {
+  'Start here': 'flag',
+  'Guides: deploy & operate': 'wrench',
+  'Guides: storage & data': 'replicate',
+  'Guides: access & security': 'shield-key',
+  'Reference': 'book',
+  'Concepts': 'bulb',
+};
 ---
 
 <DocsLayout
@@ -22,7 +33,10 @@ const groups = docsByGroup();
 
   {groups.map((g) => (
     <section class="docs-landing-group">
-      <h2>{g.group.id}</h2>
+      <h2 class="docs-landing-group-title">
+        <Glyph name={GROUP_GLYPHS[g.group.id] ?? 'book'} size={30} />
+        <span>{g.group.id}</span>
+      </h2>
       <p class="docs-landing-tagline">{g.group.tagline}</p>
       <ul class="docs-landing-list">
         {g.docs.filter((d) => d.slug !== '').map((d) => (

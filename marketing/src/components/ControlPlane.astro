@@ -7,22 +7,26 @@
 // with prev/next navigation.
 const features = [
   {
+    glyph: 'shield-key',
     title: 'Per-user auth & access control',
     desc: 'IAM with fine-grained ABAC permissions, plus OAuth/OIDC SSO with group mapping — an access layer your budget object store doesn’t have.',
   },
   {
+    glyph: 'replicate',
     title: 'Cross-cloud replication',
     desc: 'Replicate buckets between providers — event-driven or scheduled, with pause/resume. Migrate or run multi-cloud, without lock-in.',
   },
   {
+    glyph: 'lock',
     title: 'Encryption at rest',
     desc: 'AES-256-GCM before objects hit the bucket. Your key stays in your runtime; the backend only ever sees ciphertext.',
   },
   {
+    glyph: 'pulse',
     title: 'Jobs, events & audit',
     desc: 'Replication, lifecycle, migrations, and re-encryption run as resumable jobs with run history. Webhook or Slack on every event; an audit trail on every admin action.',
   },
-];
+] as const;
 
 const shots = [
   {
@@ -41,6 +45,7 @@ const shots = [
     caption: 'Per-bucket savings, measured live — not estimated.',
   },
 ];
+import Glyph from './Glyph.astro';
 ---
 
 <section class="section cp" aria-labelledby="cp-title">
@@ -60,9 +65,12 @@ const shots = [
     <div class="feat-grid">
       {features.map((f, i) => (
         <div class="feat">
-          <span class="feat-idx">{String(i + 1).padStart(2, '0')}</span>
-          <h3 class="feat-title">{f.title}</h3>
-          <p class="feat-desc">{f.desc}</p>
+          <Glyph name={f.glyph} size={42} />
+          <div class="feat-body">
+            <span class="feat-idx">{String(i + 1).padStart(2, '0')}</span>
+            <h3 class="feat-title">{f.title}</h3>
+            <p class="feat-desc">{f.desc}</p>
+          </div>
         </div>
       ))}
     </div>
@@ -166,8 +174,13 @@ const shots = [
 
   .feat {
     border-top: 2px solid var(--rule-strong);
-    padding-top: 1rem;
+    padding-top: 1.4rem;
+    display: flex;
+    gap: 1.3rem;
+    align-items: flex-start;
   }
+
+  .feat-body { min-width: 0; }
 
   .feat-idx {
     font-family: var(--font-mono);

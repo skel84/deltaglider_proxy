@@ -480,6 +480,11 @@
   font-family: var(--doc-display); font-weight: 700; letter-spacing: -0.015em;
   font-size: 1.35rem; margin: 0 0 4px;
 }
+.docs-landing-group-title {
+  display: flex; align-items: center; gap: 14px;
+}
+.docs-landing-group-title .dg-glyph { border-radius: 10px; }
+.docs-landing-group .docs-landing-tagline { margin: 0 0 14px 62px; }
 .docs-landing-tagline {
   font-family: var(--doc-label); font-size: 0.72rem; letter-spacing: 0.08em;
   text-transform: uppercase; color: var(--ink-500); margin: 0 0 14px;
