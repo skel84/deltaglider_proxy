@@ -1,0 +1,272 @@
+# Structure-true, SANITIZED snapshot of the production configuration.
+#
+# Every feature the real prod config exercises is present with the same
+# shape — declarative IAM (inline permissions, group membership,
+# ${iam:username} templates, StringLike s3:prefix conditions including the
+# empty-string prefix), an OIDC provider with mapping rules, a remote S3
+# backend plus an encrypted filesystem backend, bucket routing,
+# public_prefixes, a replication rule, a lifecycle rule, and advanced
+# overrides. All names use the docs example cast; every secret is a
+# same-shaped dummy.
+#
+# Guarded by `prod_shape_tests` in src/config.rs: if a change to the
+# config model makes THIS file stop parsing/validating, prod's real
+# config would break on upgrade. Update this fixture deliberately when
+# prod adopts new features (keep it sanitized — this repo is public).
+access:
+  iam_mode: declarative
+  access_key_id: admin
+  secret_access_key: bootstrap-dummy-secret-000
+  iam_users:
+  - name: Dana Admin
+    access_key_id: AKDUMMY00ADMIN000000
+    secret_access_key: DummySecret/Admin+0000000000000000000000
+    enabled: true
+    groups:
+    - Administrators
+    - Engineering
+  - name: ci-uploader
+    access_key_id: ci-uploader
+    secret_access_key: DummySecretCiUploader00000000
+    enabled: true
+    permissions:
+    - id: 0
+      effect: Allow
+      actions:
+      - list
+      - write
+      - read
+      resources:
+      - releases/firmware/*
+    - id: 0
+      effect: Allow
+      actions:
+      - read
+      - write
+      - list
+      resources:
+      - releases/reports/*
+  - name: api-reader
+    access_key_id: api-reader
+    secret_access_key: DummySecretApiReader00000000
+    enabled: true
+    permissions:
+    - id: 0
+      effect: Allow
+      actions:
+      - read
+      - list
+      resources:
+      - releases/*
+  - name: build-bot
+    access_key_id: build-bot
+    secret_access_key: DummySecretBuildBot0000000000000000
+    enabled: true
+    groups:
+    - Engineering
+  - name: customer-x
+    access_key_id: customer-x
+    secret_access_key: DummySecretCustomerX00000000000000000000
+    enabled: true
+    groups:
+    - Customers
+  - name: legacy-admin
+    access_key_id: admin
+    secret_access_key: bootstrap-dummy-secret-000
+    enabled: true
+    permissions:
+    - id: 0
+      effect: Allow
+      actions:
+      - '*'
+      resources:
+      - '*'
+  iam_groups:
+  - name: Engineering
+    description: Read builds and reports, RW own scrap space
+    permissions:
+    - id: 0
+      effect: Allow
+      actions:
+      - read
+      - list
+      resources:
+      - releases/firmware/*
+    - id: 0
+      effect: Allow
+      actions:
+      - '*'
+      resources:
+      - db-archive/scrap/*
+    - id: 0
+      effect: Allow
+      actions:
+      - read
+      - list
+      resources:
+      - releases/reports/*
+    - id: 0
+      effect: Allow
+      actions:
+      - list
+      resources:
+      - releases/*
+      conditions:
+        StringLike:
+          s3:prefix:
+          - firmware/
+          - firmware/widget-3000/
+          - reports/
+          - lib/
+    - id: 0
+      effect: Allow
+      actions:
+      - list
+      - read
+      resources:
+      - downloads/lib/*
+  - name: Administrators
+    description: DGP Admins
+    permissions:
+    - id: 0
+      effect: Allow
+      actions:
+      - '*'
+      resources:
+      - '*'
+  - name: Customers
+    description: Scrap upload folder for customers
+    permissions:
+    - id: 0
+      effect: Allow
+      actions:
+      - read
+      - write
+      - delete
+      resources:
+      - db-archive/scrap/customers/${iam:username}/*
+    - id: 0
+      effect: Allow
+      actions:
+      - list
+      resources:
+      - db-archive
+      conditions:
+        StringLike:
+          s3:prefix:
+          - ''
+          - scrap/
+          - scrap/customers/
+          - scrap/customers/${iam:username}/
+          - scrap/customers/${iam:username}/*
+  auth_providers:
+  - name: google-sso
+    provider_type: oidc
+    enabled: true
+    priority: 0
+    display_name: Google
+    client_id: 000000000000-dummyclientid0000000000000000.apps.googleusercontent.com
+    client_secret: GOCSPX-dummy0secret0value000000000
+    issuer_url: https://accounts.google.com
+    scopes: openid email profile
+  group_mapping_rules:
+  - priority: 0
+    match_type: email_domain
+    match_field: email
+    match_value: acme.example
+    group: Engineering
+  - priority: 0
+    match_type: email_exact
+    match_field: email
+    match_value: dana@acme.example
+    group: Administrators
+storage:
+  backends:
+  - name: hetzner-fsn1
+    type: s3
+    endpoint: https://fsn1.your-objectstorage.com
+    region: fsn1
+    force_path_style: true
+    access_key_id: DUMMYBACKENDKEY00000
+    secret_access_key: DummyBackendSecret000000000000000000000a
+  - name: local-disk
+    type: filesystem
+    path: ./data
+    encryption:
+      mode: aes256-gcm-proxy
+      key: 0000000000000000000000000000000000000000000000000000000000000000
+  default_backend: hetzner-fsn1
+  buckets:
+    releases:
+      compression: null
+      max_delta_ratio: null
+      public_prefixes:
+      - firmware/public/
+    db-archive:
+      compression: null
+      max_delta_ratio: null
+      backend: local-disk
+    didi:
+      compression: null
+      max_delta_ratio: null
+      backend: local-disk
+    downloads:
+      compression: null
+      max_delta_ratio: null
+      backend: local-disk
+    ml-models:
+      compression: null
+      max_delta_ratio: null
+      backend: local-disk
+    pippo:
+      compression: null
+      max_delta_ratio: null
+      backend: local-disk
+    reenc-demo:
+      compression: null
+      max_delta_ratio: null
+      backend: local-disk
+    scratch:
+      compression: null
+      max_delta_ratio: null
+      backend: local-disk
+  replication:
+    enabled: true
+    tick_interval: 30s
+    lease_ttl: 60s
+    heartbeat_interval: 20s
+    max_failures_retained: 100
+    rules:
+    - name: mirror-releases-to-dr
+      enabled: false
+      source:
+        bucket: releases
+        prefix: firmware/
+      destination:
+        bucket: pippo
+        prefix: mirror/
+      interval: 24h
+      batch_size: 100
+      replicate_deletes: false
+      conflict: newer-wins
+      include_globs: []
+      exclude_globs:
+      - .deltaglider/**
+  lifecycle:
+    enabled: false
+    tick_interval: 1h
+    max_failures_retained: 100
+    rules:
+    - name: expire-old-builds
+      enabled: false
+      bucket: db-archive
+      prefix: nightly/
+      action: delete
+      expire_after: 30d
+      include_globs: []
+      exclude_globs:
+      - .deltaglider/**
+      batch_size: 100
+advanced:
+  listen_addr: 127.0.0.1:9000
+  max_object_size: 536870912

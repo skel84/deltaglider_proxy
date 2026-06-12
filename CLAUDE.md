@@ -218,6 +218,8 @@ Async rebuild barrier: after any IAM mutation, use `get_iam_version(&http, &endp
 
 Property tests via `proptest` (dev-dep) live in the same module as the pure functions they exercise (see `src/security.rs` for `validate_bucket_name` / `bucket_name_is_ip_like`). Coverage is collected via `cargo-llvm-cov` as a non-blocking CI job — use it as signal, not a gate.
 
+**Prod-config regression** is two-layered: `prod_shape_tests` in `src/config.rs` (lib tests, in the CI gate) validate `tests/fixtures/prod_shape_config.yaml` — a SANITIZED, structure-true snapshot of the production config (declarative IAM + conditions + `${iam:username}`, OIDC + mapping rules, s3 + encrypted-filesystem backends, routing, public_prefixes, replication/lifecycle rules) — through parse, reconciler validation, auth classification, and canonical-export round-trip. Update the fixture deliberately when prod adopts new features; keep it sanitized (public repo). `scripts/test-prod-config.sh` (local-only, pre-release) boots the current branch's release binary against the REAL prod state (backup zip, or a clone of `/private/tmp/dgp-prod-local` incl. the `.deltaglider_bootstrap_hash` sidecar) with expectations derived dynamically from the prod YAML itself; it only ever writes to filesystem-routed buckets, never to remote backends.
+
 ## Conventions
 
 - Clippy warnings are errors in CI (`-D warnings`)
