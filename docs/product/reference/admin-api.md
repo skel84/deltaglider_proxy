@@ -48,12 +48,12 @@ All three scopes route through the same `apply_config_transition` path, so hot-r
 | Method | Path | Body | Purpose |
 |---|---|---|---|
 | `GET` | `/_/api/admin/config/export[?section=<name>]` | — | Canonical YAML (secrets redacted) |
-| `GET` | `/_/api/admin/config/declarative-iam-export` | — | Project current DB IAM into `access:` YAML fragment (for declarative GitOps seeding; see [declarative-iam.md](declarative-iam.md#workflow-a-already-populated-db--gitops)) |
+| `GET` | `/_/api/admin/config/declarative-iam-export` | — | Project current DB IAM into `access:` YAML fragment (for declarative GitOps seeding; see [declarative-iam.md](declarative-iam.md)) |
 | `POST` | `/_/api/admin/config/declarative-iam-validate` | `{yaml: <access fragment>}` | Dry-run the declarative IAM reconcile (`diff_iam` preview, zero DB writes) |
 | `POST` | `/_/api/admin/config/declarative-iam-apply` | `{yaml: <access fragment>}` | Atomic single-transaction IAM reconcile from the YAML fragment |
 | `GET` | `/_/api/admin/config/defaults[?section=<name>]` | — | JSON Schema (for YAML LSP and Monaco) |
 | `POST` | `/_/api/admin/config/validate` | `{yaml: <doc>}` | Dry-run full-document apply |
-| `POST` | `/_/api/admin/config/section/:name/validate` | `{<section-body>}` | Dry-run section apply; in declarative mode warns with `diff_iam` preview (see [declarative-iam.md](declarative-iam.md#preview-before-applying)) |
+| `POST` | `/_/api/admin/config/section/:name/validate` | `{<section-body>}` | Dry-run section apply; in declarative mode warns with `diff_iam` preview (see [declarative-iam.md](declarative-iam.md)) |
 | `POST` | `/_/api/admin/config/apply` | `{yaml: <doc>}` | Atomic full-document apply + persist |
 | `POST` | `/_/api/admin/config/trace` | synthetic request body | Evaluate against the admission chain |
 | `GET` | `/_/api/admin/config/trace?method=&path=&...` | — | Query-param variant (bookmarkable trace URLs) |
@@ -65,7 +65,7 @@ CLI wrapper:
 
 ```bash
 export DGP_BOOTSTRAP_PASSWORD=...
-deltaglider_proxy config apply deltaglider_proxy.yaml --server https://dgp.example.com
+deltaglider_proxy config apply deltaglider_proxy.yaml --server https://s3.acme.example
 ```
 
 ## Backends
@@ -119,7 +119,7 @@ deltaglider_proxy config apply deltaglider_proxy.yaml --server https://dgp.examp
 | `GET` | `/_/api/admin/oauth/authorize/:provider` | Kick off OAuth (PKCE, state, nonce) |
 | `GET` | `/_/api/admin/oauth/callback` | Provider callback → issue session cookie |
 
-## Full Backup (Wave 11.1)
+## Full Backup
 
 | Method | Path | Purpose |
 |---|---|---|

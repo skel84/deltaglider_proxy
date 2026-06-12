@@ -69,7 +69,7 @@ The first sync doesn't have to wait for events or the interval:
 
 ```bash
 curl -b cookies -X POST \
-  https://dgp.example.com/_/api/admin/jobs/replication:mirror-releases-to-dr/run-now
+  https://s3.acme.example/_/api/admin/jobs/replication:mirror-releases-to-dr/run-now
 ```
 
 ```json
@@ -95,8 +95,8 @@ If you get `409 Conflict`, the rule is already running (or paused) — check the
 The same data via the API:
 
 ```bash
-curl -b cookies https://dgp.example.com/_/api/admin/jobs/replication:mirror-releases-to-dr/runs?limit=10
-curl -b cookies https://dgp.example.com/_/api/admin/jobs/replication:mirror-releases-to-dr/failures
+curl -b cookies https://s3.acme.example/_/api/admin/jobs/replication:mirror-releases-to-dr/runs?limit=10
+curl -b cookies https://s3.acme.example/_/api/admin/jobs/replication:mirror-releases-to-dr/failures
 ```
 
 Pause and resume from the job row (or `POST …/pause` / `…/resume`); paused rules are skipped by events, the scheduler, and run-now alike, and the pause survives restarts.
@@ -106,20 +106,20 @@ Pause and resume from the job row (or `POST …/pause` / `…/resume`); paused r
 1. The destination has the objects:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 ls s3://releases-dr/firmware/widget-3000/
+   aws --endpoint-url https://s3.acme.example s3 ls s3://releases-dr/firmware/widget-3000/
    ```
 
 2. Content is byte-identical:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 cp s3://releases-dr/firmware/widget-3000/fw-2.4.1.tar - | sha256sum
+   aws --endpoint-url https://s3.acme.example s3 cp s3://releases-dr/firmware/widget-3000/fw-2.4.1.tar - | sha256sum
    ```
 
 3. Near-real-time copy works — upload a new object to `releases` and watch it appear on `releases-dr` within seconds:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 cp fw-2.4.2.tar s3://releases/firmware/widget-3000/fw-2.4.2.tar
-   aws --endpoint-url https://dgp.example.com s3 ls s3://releases-dr/firmware/widget-3000/
+   aws --endpoint-url https://s3.acme.example s3 cp fw-2.4.2.tar s3://releases/firmware/widget-3000/fw-2.4.2.tar
+   aws --endpoint-url https://s3.acme.example s3 ls s3://releases-dr/firmware/widget-3000/
    ```
 
 4. The run history shows `succeeded` with `errors: 0`.
@@ -129,4 +129,5 @@ Pause and resume from the job row (or `POST …/pause` / `…/resume`); paused r
 - [Replication reference](../reference/replication.md) — rule grammar, conflict policies, failure modes, what doesn't replicate.
 - [Jobs reference](../reference/jobs.md) — the unified jobs API the rule appears on.
 - [Event outbox reference](../reference/event-outbox.md) — the event stream that drives near-real-time copies.
+- [Jobs and durability](../explanation/jobs-and-durability.md) — why replication is a durable job, not a cron script.
 - [How to expire and archive objects](expire-and-archive-objects.md) — age-based moves instead of mirroring.

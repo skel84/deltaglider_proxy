@@ -10,7 +10,7 @@ Each IAM user carries one or more permission rules, evaluated per request after 
 {
   "effect": "Allow",
   "actions": ["read", "write", "list"],
-  "resources": ["releases/builds/*"],
+  "resources": ["releases/firmware/*"],
   "conditions": {
     "IpAddress": { "aws:SourceIp": "203.0.113.0/24" }
   }
@@ -50,8 +50,8 @@ Glob patterns matched against `bucket/key`:
 | `*` | Every bucket and key |
 | `releases` | Bucket-level operations only (list, create) |
 | `releases/*` | Every object in `releases` |
-| `releases/builds/*` | Objects under the `builds/` prefix |
-| `releases/builds/v2.*` | Glob on the object key |
+| `releases/firmware/*` | Objects under the `firmware/` prefix |
+| `releases/firmware/fw-2.*` | Glob on the object key |
 
 Bucket-level operations match the bare bucket name (no `/*`); object operations match `bucket/*`. Full access to one bucket therefore requires both rules:
 
@@ -98,7 +98,7 @@ Conditions within a single rule are ANDed — all must match for the rule to app
 
 | Operator | Description | Example |
 |----------|-------------|---------|
-| `StringEquals` | Exact string match | `s3:prefix` = `"builds/"` |
+| `StringEquals` | Exact string match | `s3:prefix` = `"firmware/"` |
 | `StringNotEquals` | Exact string non-match | `s3:prefix` != `"internal/"` |
 | `StringLike` | Glob pattern match | `s3:prefix` LIKE `"home/dana/*"` |
 | `StringNotLike` | Glob pattern non-match | `s3:prefix` NOT LIKE `".*"` |

@@ -32,7 +32,7 @@ Use this when the existing data can stay where it is. Example: the legacy AWS bu
 2. Apply the config and list through the proxy — every existing object is already visible:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 ls s3://releases/firmware/widget-3000/
+   aws --endpoint-url https://s3.acme.example s3 ls s3://releases/firmware/widget-3000/
    ```
 
 3. Done. Existing objects are served as passthrough (the proxy reads them as-is). New uploads — say `ci-uploader` pushing `firmware/widget-3000/fw-2.4.1.tar` — go through the delta router and start saving space immediately.
@@ -56,7 +56,7 @@ Use this when you want the version history itself stored as deltas. The proxy re
 
    ```bash
    aws s3 sync s3://acme-firmware /tmp/acme-firmware          # pull from AWS
-   aws --endpoint-url https://dgp.example.com \
+   aws --endpoint-url https://s3.acme.example \
        s3 sync /tmp/acme-firmware s3://releases               # push through the proxy
    ```
 
@@ -67,7 +67,7 @@ Use this when you want the version history itself stored as deltas. The proxy re
 4. Spot-check the savings on the stats endpoint before cutting over:
 
    ```bash
-   curl https://dgp.example.com/_/stats?metadata=true
+   curl https://s3.acme.example/_/stats?metadata=true
    ```
 
 ## Cut clients over
@@ -85,7 +85,7 @@ Do not keep writing to the backend bucket directly (e.g. with the Python DeltaGl
 1. List and read an old object through the proxy:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 cp s3://releases/firmware/widget-3000/fw-2.3.0.tar - | sha256sum
+   aws --endpoint-url https://s3.acme.example s3 cp s3://releases/firmware/widget-3000/fw-2.3.0.tar - | sha256sum
    ```
 
    The hash must match the original — the proxy is byte-exact.
@@ -97,6 +97,7 @@ Do not keep writing to the backend bucket directly (e.g. with the Python DeltaGl
 ## Related
 
 - [How to route a bucket to a different backend](route-a-bucket-to-a-backend.md) — the alias/routing mechanics in full.
+- [Configuration reference](../reference/configuration.md) — the `storage.backends` and `storage.buckets` (alias) fields used here.
 - [How to set per-bucket compression and quotas](set-bucket-compression-and-quotas.md) — tune what gets compressed.
 - [Your first delta savings](../tutorials/first-delta-savings.md) — see the compression pipeline end to end.
 - [Delta compression](../explanation/delta-compression.md) — why compression happens only at write time.

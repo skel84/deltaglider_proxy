@@ -84,7 +84,7 @@ Reads and lists keep working; every write is rejected.
 1. The policy applied:
 
    ```bash
-   curl -b cookies https://dgp.example.com/_/api/admin/config/section/storage?format=yaml
+   curl -b cookies https://s3.acme.example/_/api/admin/config/section/storage?format=yaml
    ```
 
 2. Compression behaves as configured — upload two versions of a file and check the `x-amz-storage-type` header on a HEAD: `delta` means compressed, `passthrough` means not.
@@ -92,7 +92,7 @@ Reads and lists keep working; every write is rejected.
 3. The quota bites — on a frozen bucket, a PUT should fail with `403`:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 cp probe.txt s3://db-archive/probe.txt
+   aws --endpoint-url https://s3.acme.example s3 cp probe.txt s3://db-archive/probe.txt
    ```
 
 4. Savings show up per bucket on the Metrics page and at `/_/stats?metadata=true`.

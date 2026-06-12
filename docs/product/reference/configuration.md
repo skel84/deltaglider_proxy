@@ -10,35 +10,35 @@ deltaglider_proxy config migrate deltaglider_proxy.toml --out deltaglider_proxy.
 
 See the [How to upgrade the proxy](../how-to/upgrade.md) for the full TOML → YAML migration path.
 
-## Table of Contents
+## Table of contents
 
-- [YAML Layout](#yaml-layout)
+- [YAML layout](#yaml-layout)
 - [Shorthands](#shorthands)
-- [Config-File Search Order](#config-file-search-order)
+- [Config-file search order](#config-file-search-order)
 - [Server / Advanced](#server--advanced)
-- [Delta Engine](#delta-engine)
-- [Storage Backend](#storage-backend)
+- [Delta engine](#delta-engine)
+- [Storage backend](#storage-backend)
   - [Filesystem](#filesystem-backend)
   - [S3](#s3-backend)
-- [Access — Authentication](#access--authentication)
-- [Access — IAM Mode](#access--iam-mode)
-- [Admission Chain](#admission-chain)
+- [Access — authentication](#access--authentication)
+- [Access — IAM mode](#access--iam-mode)
+- [Admission chain](#admission-chain)
 - [Security](#security)
-  - [Rate Limiting](#rate-limiting)
+  - [Rate limiting](#rate-limiting)
 - [TLS](#tls)
-- [Config Sync](#config-sync)
-- [Multi-Backend Routing](#multi-backend-routing)
-- [Bucket Policies](#bucket-policies)
-- [Lifecycle Rules](#lifecycle-rules)
-- [Event Delivery](#event-delivery)
-- [Encryption at Rest](#encryption-at-rest)
-- [CLI Subcommands](#cli-subcommands)
-- [Full Example](#full-example)
-- [Environment Variable Registry](#environment-variable-registry)
+- [Config sync](#config-sync)
+- [Multi-backend routing](#multi-backend-routing)
+- [Bucket policies](#bucket-policies)
+- [Lifecycle rules](#lifecycle-rules)
+- [Event delivery](#event-delivery)
+- [Encryption at rest](#encryption-at-rest)
+- [CLI subcommands](#cli-subcommands)
+- [Full example](#full-example)
+- [Environment variable registry](#environment-variable-registry)
 
 ---
 
-## YAML Layout
+## YAML layout
 
 The canonical YAML has four optional top-level sections:
 
@@ -116,7 +116,7 @@ Mixing `public: true` and a non-empty `public_prefixes` is a hard error.
 
 ---
 
-## Config-File Search Order
+## Config-file search order
 
 `Config::resolve_config_path` returns the first match from:
 
@@ -247,7 +247,7 @@ When `DGP_CONFIG` is set, the path is returned unconditionally — a missing fil
 
 ---
 
-## Delta Engine
+## Delta engine
 
 ### `max_delta_ratio`
 
@@ -319,9 +319,9 @@ Maximum time for an xdelta3 subprocess. Hung processes are killed after this.
 
 ---
 
-## Storage Backend
+## Storage backend
 
-### Filesystem Backend
+### Filesystem backend
 
 Local filesystem. Activated by setting `DGP_DATA_DIR` or a `backend:` block with `type = "filesystem"`.
 
@@ -350,7 +350,7 @@ storage:
 
 Paths containing `..` components are rejected at load time.
 
-### S3 Backend
+### S3 backend
 
 AWS S3 / MinIO / Hetzner / Backblaze / any S3-compatible service. Activated by setting `DGP_S3_ENDPOINT` or a `backend:` block with `type = "s3"`.
 
@@ -387,7 +387,7 @@ Endpoint URLs must start with `http://` or `https://` (scheme-less values reject
 
 ---
 
-## Access — Authentication
+## Access — authentication
 
 The proxy **refuses to start** without credentials unless you set `authentication = "none"`.
 
@@ -443,7 +443,7 @@ Plaintext bootstrap password for the `config apply` / `admission trace` admin CL
 
 ---
 
-## Access — IAM Mode
+## Access — IAM mode
 
 The `access.iam_mode` YAML selector controls where IAM state (users, groups, OAuth providers, mapping rules) lives. Orthogonal to the `authentication` selector.
 
@@ -463,7 +463,7 @@ The initial `gui → declarative` flip is guarded: if YAML contains no users or 
 
 ---
 
-## Admission Chain
+## Admission chain
 
 Operator-authored pre-auth request gating. Blocks are evaluated top-to-bottom; first match wins. Operator blocks fire *before* synthesized public-prefix blocks derived from `storage.buckets[*].public_prefixes`.
 
@@ -473,7 +473,7 @@ admission:
     - name: deny-known-bad-ips
       match:
         source_ip_list:
-          - "203.0.113.5"
+          - "198.51.100.17"
           - "198.51.100.0/24"
       action: deny
 
@@ -578,7 +578,7 @@ Require HTTPS for admin session cookies (`Secure` flag).
 | **Default** | `true` |
 | **Hot-reload** | No |
 
-### Rate Limiting
+### Rate limiting
 
 Per-IP brute-force protection for auth endpoints. See [Rate limits and concurrency](rate-limits.md) for the full model.
 
@@ -612,7 +612,7 @@ When `cert_path` and `key_path` are both absent, a self-signed certificate is ge
 
 ---
 
-## Config Sync
+## Config sync
 
 Multi-instance IAM sync via S3. When enabled, the encrypted config DB file is replicated to a shared S3 bucket.
 
@@ -625,47 +625,47 @@ Multi-instance IAM sync via S3. When enabled, the encrypted config DB file is re
 
 ```yaml
 advanced:
-  config_sync_bucket: my-config-bucket
+  config_sync_bucket: dgp-iam-sync
 ```
 
 Sync uses the same S3 credentials as the storage backend (`DGP_BE_AWS_*`) and only works when the storage backend is S3 (not filesystem). On every IAM mutation, the DB is uploaded to `s3://<bucket>/.deltaglider/config.db`; readers poll the S3 ETag every 5 minutes and download on change.
 
 ---
 
-## Multi-Backend Routing
+## Multi-backend routing
 
 Route different buckets to different storage backends. When `backends` is non-empty, the legacy single `backend` is ignored at runtime.
 
 ```yaml
 storage:
-  default_backend: primary
+  default_backend: hetzner-fsn1
   backends:
-    - name: primary
+    - name: hetzner-fsn1
       type: s3
-      endpoint: https://s3.us-east-1.amazonaws.com
-      region: us-east-1
-      access_key_id: AWS_KEY
-      secret_access_key: AWS_SECRET
-    - name: europe
-      type: s3
-      endpoint: https://hel1.your-objectstorage.com
-      region: hel1
+      endpoint: https://fsn1.your-objectstorage.com
+      region: fsn1
       access_key_id: HETZNER_KEY
       secret_access_key: HETZNER_SECRET
-    - name: local
+    - name: aws-dr
+      type: s3
+      endpoint: https://s3.eu-west-1.amazonaws.com
+      region: eu-west-1
+      access_key_id: AWS_KEY
+      secret_access_key: AWS_SECRET
+    - name: local-disk
       type: filesystem
-      path: /data/cache
+      path: /var/lib/dgp-local
   buckets:
-    archive:
-      backend: europe
-      alias: prod-archive-2024
+    db-archive:
+      backend: hetzner-fsn1
+      alias: acme-db-archive-prod
 ```
 
 Backends can be added/removed via the admin GUI (**Storage → Backends**) without restart. `default_backend` is validated against the `backends` list at load time — invalid references are cleared with a warning.
 
 ---
 
-## Bucket Policies
+## Bucket policies
 
 Per-bucket overrides. All fields optional.
 
@@ -675,10 +675,11 @@ storage:
     releases:
       compression: true
       max_delta_ratio: 0.9
-      backend: europe
-      alias: prod-releases-2024
-      public_prefixes: ["builds/", "artifacts/"]
+      backend: hetzner-fsn1
+      alias: acme-prod-releases-fsn1
       quota_bytes: 10737418240    # 10 GiB
+    downloads:
+      public_prefixes: ["public/"]
     docs-site:
       public: true                # shorthand for public_prefixes: [""]
 ```
@@ -693,13 +694,13 @@ storage:
 | `public` | bool | — | Shorthand for `public_prefixes: [""]` (entire bucket public) |
 | `quota_bytes` | u64 | — | Soft storage quota (may overshoot by up to 5 minutes of writes); `0` = freeze bucket |
 
-### Public Prefixes
+### Public prefixes
 
-When `public_prefixes` (or `public: true`) is set, anonymous users can GET, HEAD, and LIST objects under the prefix. Writes always require authentication. Use trailing `/` for directory-aligned matching (`"builds/"` matches `builds/v1.zip` but not `buildscripts/`). The empty string `""` makes the entire bucket public (logged as a warning). Prefixes containing `..`, null bytes, or `//` are rejected. The proxy synthesizes `public-prefix:<bucket>` admission blocks from this config.
+When `public_prefixes` (or `public: true`) is set, anonymous users can GET, HEAD, and LIST objects under the prefix. Writes always require authentication. Use trailing `/` for directory-aligned matching (`"public/"` matches `public/installer.zip` but not `publicity/`). The empty string `""` makes the entire bucket public (logged as a warning). Prefixes containing `..`, null bytes, or `//` are rejected. The proxy synthesizes `public-prefix:<bucket>` admission blocks from this config.
 
 ---
 
-## Lifecycle Rules
+## Lifecycle rules
 
 Expiration (delete) and transition/archive rules live under `storage.lifecycle`. Disabled by default; every delete and copy goes through the DeltaGlider engine.
 
@@ -724,7 +725,7 @@ Use `POST /_/api/admin/jobs/lifecycle:<name>/preview` (or the Preview button on 
 
 ---
 
-## Event Delivery
+## Event delivery
 
 Durable object mutation events are always appended to the encrypted config DB
 when it is available. HTTP delivery is disabled by default; enabling
@@ -778,13 +779,13 @@ advanced:
     # slack_channel: "C0123456"          # channel id or #name (required in this mode)
     # Scope what gets posted:
     slack_notify_kinds: ["ObjectCreated"]   # add ObjectDeleted, etc.
-    slack_include_globs: ["builds/**"]      # empty = all user objects
+    slack_include_globs: ["firmware/**"]    # empty = all user objects
     slack_exclude_globs: ["**/*.tmp"]       # exclude wins over include
     # Per-bucket/prefix routing (bot-token mode only):
     slack_routes:
       - name: "Releases → #ci"
         bucket: releases
-        prefix_globs: ["builds/**"]      # empty = any key in the bucket
+        prefix_globs: ["firmware/**"]    # empty = any key in the bucket
         channel: "C_CI"
 ```
 
@@ -799,12 +800,12 @@ advanced:
 | `slack_routes` | Per-bucket / per-prefix → channel routing (**bot-token mode only**). When non-empty, an eligible event posts to every matching route; `slack_channel` is the fallback for events matching no route. |
 
 The whole thing is editable from the admin GUI at **Integrations →
-Event delivery** (toggle the format to *Slack*). See [Event outbox](event-outbox.md#slack-notifications)
+Event delivery** (toggle the format to *Slack*). See [Event outbox](event-outbox.md#slack-format)
 for delivery semantics.
 
 ---
 
-## Encryption at Rest
+## Encryption at rest
 
 Per-backend encryption with four modes: `none`, `aes256-gcm-proxy`, `sse-kms`, `sse-s3`. Each backend carries its own `encryption` block — operators can mix (e.g. SSE-KMS for the production backend, plaintext for a public-CDN backend) without sharing a single blast-radius key.
 
@@ -813,17 +814,19 @@ Per-backend encryption with four modes: `none`, `aes256-gcm-proxy`, `sse-kms`, `
 ```yaml
 storage:
   backends:
-    - name: archive
-      s3: { ... }
+    - name: hetzner-fsn1
+      type: s3
+      # endpoint, region, credentials …
       encryption:
         mode: aes256-gcm-proxy
-        key: "${DGP_BACKEND_ARCHIVE_ENCRYPTION_KEY}"
-        key_id: archive-2026-04   # optional; derived from SHA-256(name + key) when absent
-    - name: kms-prod
-      s3: { ... }
+        key: "${env:DGP_BACKEND_HETZNER_FSN1_ENCRYPTION_KEY}"
+        key_id: hetzner-2026-06   # optional; derived from SHA-256(name + key) when absent
+    - name: aws-dr
+      type: s3
+      # region, credentials …
       encryption:
         mode: sse-kms
-        kms_key_id: arn:aws:kms:us-east-1:123456789012:key/abc-def
+        kms_key_id: arn:aws:kms:eu-west-1:123456789012:key/abcd-ef01
         bucket_key_enabled: true
 ```
 
@@ -834,7 +837,7 @@ storage:
   backend: { ... }
   backend_encryption:
     mode: aes256-gcm-proxy
-    key: "${DGP_ENCRYPTION_KEY}"
+    key: "${env:DGP_ENCRYPTION_KEY}"
 ```
 
 **Env vars** (infra secrets — these are the recommended key source; every `key` / `kms_key_id` field in YAML is stripped by canonical exports):
@@ -846,7 +849,7 @@ storage:
 | `DGP_SSE_KMS_KEY_ID` | `backend_encryption.kms_key_id` (singleton SSE-KMS) |
 | `DGP_BACKEND_<NAME>_SSE_KMS_KEY_ID` | named SSE-KMS override |
 
-Name normalisation: `<NAME>` is uppercased; `-` and `.` become `_` (so `eu-archive` → `DGP_BACKEND_EU_ARCHIVE_ENCRYPTION_KEY`).
+Name normalisation: `<NAME>` is uppercased; `-` and `.` become `_` (so `hetzner-fsn1` → `DGP_BACKEND_HETZNER_FSN1_ENCRYPTION_KEY`).
 
 **Defaults:** absent `encryption` block → `mode: none` (plaintext).
 
@@ -856,13 +859,13 @@ Rotation within a single mode is not automated — use the `legacy_key` / `legac
 
 ---
 
-## CLI Subcommands
+## CLI subcommands
 
 See [Command-line tools](cli.md).
 
 ---
 
-## Full Example
+## Full example
 
 A kitchen-sink YAML covering every top-level section. Fields omitted here inherit their defaults.
 
@@ -874,7 +877,7 @@ admission:
   blocks:
     - name: deny-known-bad-ips
       match:
-        source_ip_list: ["203.0.113.0/24"]
+        source_ip_list: ["198.51.100.0/24"]
       action: deny
 
     - name: allow-public-zips
@@ -892,32 +895,31 @@ access:
 
 # Backends + per-bucket overrides
 storage:
-  default_backend: primary
+  default_backend: hetzner-fsn1
   backends:
-    - name: primary
+    - name: hetzner-fsn1
       type: s3
-      endpoint: https://hel1.your-objectstorage.com
-      region: hel1
+      endpoint: https://fsn1.your-objectstorage.com
+      region: fsn1
       force_path_style: true
       access_key_id: HETZNER_KEY
       secret_access_key: HETZNER_SECRET
-    - name: cold
+    - name: aws-dr
       type: s3
-      endpoint: https://s3.us-east-1.amazonaws.com
-      region: us-east-1
+      endpoint: https://s3.eu-west-1.amazonaws.com
+      region: eu-west-1
       access_key_id: AWS_KEY
       secret_access_key: AWS_SECRET
   buckets:
     releases:
-      backend: primary
+      backend: hetzner-fsn1
       compression: true
-      public_prefixes: ["builds/", "artifacts/"]
-    archive:
-      backend: cold
-      alias: prod-archive-2024
+    db-archive:
+      backend: aws-dr
+      alias: acme-db-archive-prod
       compression: false
-    docs-site:
-      public: true
+    downloads:
+      public_prefixes: ["public/"]
 
 # Process-level tunables
 advanced:
@@ -927,7 +929,7 @@ advanced:
   cache_size_mb: 2048
   metadata_cache_mb: 100
   codec_concurrency: 32
-  config_sync_bucket: my-config-sync-bucket
+  config_sync_bucket: dgp-iam-sync
   event_delivery:
     enabled: true
     webhook_urls:
@@ -953,9 +955,9 @@ DGP_LOG_LEVEL=deltaglider_proxy=info,tower_http=warn
 DGP_ACCESS_KEY_ID=admin
 DGP_SECRET_ACCESS_KEY=changeme
 DGP_BOOTSTRAP_PASSWORD_HASH=JDJiJDEyJENYbDVPRm84bDg2...
-DGP_CONFIG_SYNC_BUCKET=my-config-sync-bucket
-DGP_S3_ENDPOINT=https://hel1.your-objectstorage.com
-DGP_S3_REGION=hel1
+DGP_CONFIG_SYNC_BUCKET=dgp-iam-sync
+DGP_S3_ENDPOINT=https://fsn1.your-objectstorage.com
+DGP_S3_REGION=fsn1
 DGP_S3_PATH_STYLE=true
 DGP_BE_AWS_ACCESS_KEY_ID=HETZNER_KEY
 DGP_BE_AWS_SECRET_ACCESS_KEY=HETZNER_SECRET
@@ -966,7 +968,7 @@ DGP_TLS_KEY=/etc/ssl/private/proxy-key.pem
 
 ---
 
-## Environment Variable Registry
+## Environment variable registry
 
 Exhaustive list of every `DGP_*` variable the server reads. The unit test `test_registry_completeness` in `src/config.rs` enforces that this list and `ENV_VAR_REGISTRY` stay in sync.
 

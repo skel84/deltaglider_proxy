@@ -85,9 +85,9 @@ export AWS_ACCESS_KEY_ID=ci-uploader-key
 export AWS_SECRET_ACCESS_KEY=ci-uploader-secret
 export AWS_ENDPOINT_URL=http://localhost:9000
 
-aws s3 cp app-v2.4.0.zip s3://releases/builds/app-v2.4.0.zip
-aws s3 ls s3://releases/builds/
-aws s3 presign s3://releases/builds/app-v2.4.0.zip --expires-in 3600
+aws s3 cp fw-2.4.0.tar s3://releases/firmware/widget-3000/fw-2.4.0.tar
+aws s3 ls s3://releases/firmware/widget-3000/
+aws s3 presign s3://releases/firmware/widget-3000/fw-2.4.0.tar --expires-in 3600
 ```
 
 boto3:
@@ -113,9 +113,9 @@ Per-bucket configuration grants anonymous read-only access to specific prefixes:
 ```yaml
 storage:
   buckets:
-    releases:
-      public_prefixes: ["builds/"]
     downloads:
+      public_prefixes: ["public/"]
+    docs-site:
       public: true        # shorthand for public_prefixes: [""]
 ```
 
@@ -125,7 +125,7 @@ Semantics for requests without credentials:
 - **Denied**: PUT, DELETE, COPY, and multipart uploads, always.
 - **Identity**: anonymous requests run as a synthesized `$anonymous` user with scoped read+list permissions (including `s3:prefix` conditions for LIST). All anonymous access is audit-logged as `user=$anonymous`.
 - **Credentials win**: a request carrying valid SigV4 credentials gets full IAM evaluation regardless of public-prefix configuration.
-- **Matching**: a trailing `/` is significant — `builds/` matches `builds/...` but not `buildscripts/`. The empty prefix `""` makes the entire bucket public (logged as a startup warning). Prefixes containing `..`, null bytes, or `//` are rejected.
+- **Matching**: a trailing `/` is significant — `public/` matches `public/...` but not `publicity/`. The empty prefix `""` makes the entire bucket public (logged as a startup warning). Prefixes containing `..`, null bytes, or `//` are rejected.
 
 Public prefixes are synthesized into admission blocks named `public-prefix:*`, evaluated after any operator-authored `admission.blocks[]` (see [Configuration](configuration.md#admission-chain)).
 

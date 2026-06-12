@@ -97,7 +97,7 @@ storage:
         mode: sse-s3
 ```
 
-Keys can also be set in the admin GUI (Admin → Storage → Backends); GUI-generated keys are produced in-browser via `crypto.getRandomValues` and do not round-trip through the server before Apply.
+Keys can also be set in the admin GUI (Settings → Storage → Backends); GUI-generated keys are produced in-browser via `crypto.getRandomValues` and do not round-trip through the server before Apply.
 
 ## Key IDs
 

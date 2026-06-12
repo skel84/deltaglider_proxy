@@ -73,14 +73,14 @@ The bot token is masked on export and in the GUI; an unchanged round-trip preser
 1. Apply the config, then upload something:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 cp probe.txt s3://releases/probe.txt
+   aws --endpoint-url https://s3.acme.example s3 cp probe.txt s3://releases/probe.txt
    ```
 
 2. Within one `tick_interval` (10s default) the dispatcher claims the row and POSTs it. Check your endpoint logs or the Slack channel.
 3. Check the row's status in the outbox at **Settings → Integrations → Event outbox**, or:
 
    ```bash
-   curl -b cookies "https://dgp.example.com/_/api/admin/event-outbox?limit=10"
+   curl -b cookies "https://s3.acme.example/_/api/admin/event-outbox?limit=10"
    ```
 
 ## 5. Retries and requeue
@@ -89,9 +89,9 @@ Failed attempts retry with exponential backoff. After `max_attempts` (default 8)
 
 ```bash
 # one row
-curl -b cookies -X POST https://dgp.example.com/_/api/admin/event-outbox/123/requeue
+curl -b cookies -X POST https://s3.acme.example/_/api/admin/event-outbox/123/requeue
 # several
-curl -b cookies -X POST https://dgp.example.com/_/api/admin/event-outbox/requeue \
+curl -b cookies -X POST https://s3.acme.example/_/api/admin/event-outbox/requeue \
   -H 'Content-Type: application/json' -d '{"ids": [123, 124]}'
 ```
 
@@ -112,6 +112,7 @@ The outbox list response carries per-status counts (`pending`, `in_progress`, `d
 ## Related
 
 - [Event outbox reference](../reference/event-outbox.md) — payload schema, all delivery knobs, admin API.
+- [Jobs and durability](../explanation/jobs-and-durability.md) — why delivery rides a durable outbox instead of blocking the write path.
 - [How to replicate a bucket to another backend](replicate-a-bucket.md) — the other consumer of the same outbox.
 - [How to expire and archive objects](expire-and-archive-objects.md) — the lifecycle events you'll see.
 - [Metrics reference](../reference/metrics.md) — alerting on delivery health.

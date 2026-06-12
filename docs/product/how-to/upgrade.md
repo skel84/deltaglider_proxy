@@ -191,7 +191,7 @@ becomes:
 storage:
   backend_encryption:
     mode: aes256-gcm-proxy
-    key: "${DGP_ENCRYPTION_KEY}"   # move the hex to the env
+    key: "${env:DGP_ENCRYPTION_KEY}"   # move the hex to the env
 ```
 
 With `DGP_ENCRYPTION_KEY` in the environment unchanged.

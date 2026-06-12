@@ -55,7 +55,7 @@ From the admin UI: **Settings → Storage → Buckets** — each bucket is a row
 
 ![Per-bucket storage form](/_/screenshots/config-storage-form.jpg)
 
-If the bucket doesn't exist yet on the target backend, create it through the proxy after applying the route — `aws s3 mb s3://downloads --endpoint-url https://dgp.example.com` — and the proxy creates it on the backend the route points at. If a client creates a bucket that has no `storage.buckets` entry at all, it lands on `default_backend`.
+If the bucket doesn't exist yet on the target backend, create it through the proxy after applying the route — `aws s3 mb s3://downloads --endpoint-url https://s3.acme.example` — and the proxy creates it on the backend the route points at. If a client creates a bucket that has no `storage.buckets` entry at all, it lands on `default_backend`.
 
 ## 3. Alias an upstream bucket name
 
@@ -90,20 +90,20 @@ Routing never moves data. Pointing an existing bucket at a new backend makes the
 1. The config applied:
 
    ```bash
-   curl -b cookies https://dgp.example.com/_/api/admin/config/section/storage?format=yaml
+   curl -b cookies https://s3.acme.example/_/api/admin/config/section/storage?format=yaml
    ```
 
 2. A SigV4 client sees the bucket:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 ls
+   aws --endpoint-url https://s3.acme.example s3 ls
    ```
 
 3. A round-trip works through the alias:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 cp test.txt s3://db-archive/test.txt
-   aws --endpoint-url https://dgp.example.com s3 cp s3://db-archive/test.txt -
+   aws --endpoint-url https://s3.acme.example s3 cp test.txt s3://db-archive/test.txt
+   aws --endpoint-url https://s3.acme.example s3 cp s3://db-archive/test.txt -
    ```
 
 4. The object landed on the right backend — for a filesystem backend, check the path directly; for S3, list the real (aliased) bucket on the provider:

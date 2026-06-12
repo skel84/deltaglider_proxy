@@ -54,7 +54,7 @@ Each POST body is JSON:
     "id": 123,
     "kind": "ObjectCreated",
     "bucket": "releases",
-    "key": "builds/app.zip",
+    "key": "firmware/widget-3000/fw-2.4.1.tar",
     "source": "s3_api",
     "occurred_at": 1777900000,
     "payload": {},
@@ -87,7 +87,7 @@ Per-bucket / per-prefix channel routing (`slack_routes`) is bot-token-mode-only.
   slack_routes:
     - name: "Releases → #ci"
       bucket: "releases"
-      prefix_globs: ["builds/**"]   # empty = any key in the bucket
+      prefix_globs: ["firmware/**"]   # empty = any key in the bucket
       channel: "C_CI"
     - name: "DB archive → #ops"
       bucket: "db-archive"          # no prefix_globs = the whole bucket

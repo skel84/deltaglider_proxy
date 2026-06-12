@@ -30,7 +30,7 @@ This guide shows you how to change a backend's encryption key or mode without lo
 3. Run a **Re-encrypt job** to rewrite the historical objects under the new key: **Settings → Jobs → + New job → Re-encrypt buckets…**, or:
 
    ```bash
-   curl -b cookies -X POST https://dgp.example.com/_/api/admin/jobs/reencrypt \
+   curl -b cookies -X POST https://s3.acme.example/_/api/admin/jobs/reencrypt \
      -H 'Content-Type: application/json' \
      -d '{"buckets": ["db-archive", "releases"]}'
    ```
@@ -88,7 +88,7 @@ New writes are plaintext; historical encrypted objects stay readable through the
 2. Every object still reads — spot-check old and new objects through the proxy:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 cp s3://db-archive/nightly/2025-01-01.dump - | sha256sum
+   aws --endpoint-url https://s3.acme.example s3 cp s3://db-archive/nightly/2025-01-01.dump - | sha256sum
    ```
 
 3. On the raw backend, a rewritten object's `dg-encryption-key-id` metadata shows the **new** key id.

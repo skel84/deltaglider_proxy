@@ -19,7 +19,7 @@ Or via the API:
 
 ```bash
 curl -b cookies -X POST \
-  https://dgp.example.com/_/api/admin/buckets/db-archive/migrate \
+  https://s3.acme.example/_/api/admin/buckets/db-archive/migrate \
   -H 'Content-Type: application/json' \
   -d '{"target_backend": "hetzner-fsn1", "delete_source": false}'
 ```
@@ -37,8 +37,8 @@ Open **Settings → Jobs**. The migration appears as a `maintenance:<n>` row wit
 Same data via the API:
 
 ```bash
-curl -b cookies https://dgp.example.com/_/api/admin/jobs
-curl -b cookies https://dgp.example.com/_/api/admin/jobs/maintenance:7/failures
+curl -b cookies https://s3.acme.example/_/api/admin/jobs
+curl -b cookies https://s3.acme.example/_/api/admin/jobs/maintenance:7/failures
 ```
 
 If something looks wrong, cancel from the job row (or `POST /_/api/admin/jobs/maintenance:7/cancel`). A cancel before the routing flip unwinds cleanly, and the source is never deleted on a failed or cancelled run.
@@ -51,13 +51,13 @@ A proxy restart mid-job does not orphan the bucket: the job is re-queued on boot
 2. Read an object through the proxy and compare it to a pre-migration checksum:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 cp s3://db-archive/nightly/2026-06-10.dump - | sha256sum
+   aws --endpoint-url https://s3.acme.example s3 cp s3://db-archive/nightly/2026-06-10.dump - | sha256sum
    ```
 
 3. Writes work again:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 cp probe.txt s3://db-archive/probe.txt
+   aws --endpoint-url https://s3.acme.example s3 cp probe.txt s3://db-archive/probe.txt
    ```
 
 4. Object counts match — list through the proxy and compare against the source backend's own listing.

@@ -41,6 +41,10 @@ cargo bench --bench codec    # criterion harness for delta encode/decode hot pat
 docker build -t deltaglider-proxy .
 ```
 
+## Documentation (Diátaxis)
+
+`docs/product/` follows Diátaxis strictly — every page is exactly ONE of: `tutorials/` (lessons, executed end-to-end before merge), `how-to/` (goal-named recipes), `reference/` (austere facts), `explanation/` (concepts). Six manifest groups mirror the quadrants (Start here · 3× Guides · Reference · Concepts). manifest.json + docs-imports.ts must stay in tri-parity with disk (CI: check-docs-registry.sh); `# validate` YAML blocks are linted. Running examples use ONE fixed cast (backends hetzner-fsn1/local-disk/aws-dr; buckets releases/db-archive/downloads; users ci-uploader/backup-bot/dana; group Engineering) — never invent new example names. Marketing 301s for old slugs live in marketing/astro.config.mjs REDIRECTS (sitemap filter derives from it). New docs: pick the quadrant first; mixed-type pages are a regression.
+
 CI merge gate: `verify-integration-test-registry` → `fmt` → `clippy -D warnings` → parallel test jobs (lib, curated integration + extended admin/IAM/replication, delta) → `e2e-smoke` → RustSec audit → Cargo deny → frontend (lint, tsc, knip, Node scripts) → docs/schema → claude-review. See `ci.yml` for the exact `--test` lists.
 
 ## Architecture

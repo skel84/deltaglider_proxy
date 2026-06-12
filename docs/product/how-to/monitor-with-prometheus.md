@@ -7,7 +7,7 @@ Three always-on endpoints are exempt from SigV4 auth so monitoring systems can h
 ## 1. Configure the scrape
 
 ```yaml
-# validate
+# prometheus.yml
 scrape_configs:
   - job_name: deltaglider
     metrics_path: /_/metrics

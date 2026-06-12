@@ -97,8 +97,8 @@ Restart the proxy (or apply from the UI) so the env var and config load together
 1. Write and read back through the proxy — clients must notice nothing:
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 cp dump.sql s3://db-archive/nightly/dump.sql
-   aws --endpoint-url https://dgp.example.com s3 cp s3://db-archive/nightly/dump.sql - | sha256sum
+   aws --endpoint-url https://s3.acme.example s3 cp dump.sql s3://db-archive/nightly/dump.sql
+   aws --endpoint-url https://s3.acme.example s3 cp s3://db-archive/nightly/dump.sql - | sha256sum
    ```
 
    The hash must match the original.

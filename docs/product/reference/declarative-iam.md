@@ -29,7 +29,7 @@ access:
         - effect: Allow
           actions: ["*"]
           resources: ["*"]
-    - name: readers
+    - name: Engineering
       description: "Read-only releases/"
       permissions:
         - effect: Allow
@@ -48,11 +48,11 @@ access:
       access_key_id: AKIACIUP00001
       secret_access_key: "replace-with-secret-before-apply"
       enabled: true
-      groups: ["readers"]
+      groups: ["Engineering"]
       permissions:
         - effect: Allow
           actions: ["write"]
-          resources: ["releases/*"]
+          resources: ["releases/firmware/*"]
 
   auth_providers:
     - name: google-corp
@@ -70,8 +70,8 @@ access:
       priority: 10
       match_type: email_domain
       match_field: email
-      match_value: corp.example
-      group: admins              # by NAME
+      match_value: acme.example
+      group: Engineering         # by NAME
 ```
 
 **Names, not IDs.** Users reference groups by name. Mapping rules reference providers and groups by name. DB row IDs are ephemeral autoincrement values and never appear in YAML. The reconciler resolves names → IDs at apply time.

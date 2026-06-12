@@ -47,7 +47,7 @@ Always dry-run before enabling. Preview works even while the rule is disabled, i
 
 ```bash
 curl -b cookies -X POST \
-  https://dgp.example.com/_/api/admin/jobs/lifecycle:expire-nightly-dumps/preview
+  https://s3.acme.example/_/api/admin/jobs/lifecycle:expire-nightly-dumps/preview
 ```
 
 From the admin UI: the **Preview** button on the rule's row on the Jobs screen.
@@ -62,7 +62,7 @@ Flip the rule's `enabled: true` and apply. The scheduler now executes it when du
 
 ```bash
 curl -b cookies -X POST \
-  https://dgp.example.com/_/api/admin/jobs/lifecycle:expire-nightly-dumps/run-now
+  https://s3.acme.example/_/api/admin/jobs/lifecycle:expire-nightly-dumps/run-now
 ```
 
 A `409` means the rule is disabled, paused, or already running.
@@ -74,8 +74,8 @@ If you need to stop the rule temporarily (incident, audit freeze), pause it from
 Every execution is persisted. On the Jobs screen, the rule's drawer shows **Runs** (when, triggered by scheduler or run-now, objects/bytes affected, terminal status) and **Failures** (per-object errors with the run that observed them). Via the API:
 
 ```bash
-curl -b cookies https://dgp.example.com/_/api/admin/jobs/lifecycle:expire-nightly-dumps/runs?limit=10
-curl -b cookies https://dgp.example.com/_/api/admin/jobs/lifecycle:expire-nightly-dumps/failures
+curl -b cookies https://s3.acme.example/_/api/admin/jobs/lifecycle:expire-nightly-dumps/runs?limit=10
+curl -b cookies https://s3.acme.example/_/api/admin/jobs/lifecycle:expire-nightly-dumps/failures
 ```
 
 ## The guardrails that protect you
@@ -95,8 +95,8 @@ And structurally: a transition copy failure never deletes the source; deletes ar
 2. An expired key is gone (or landed in the cold prefix for transitions):
 
    ```bash
-   aws --endpoint-url https://dgp.example.com s3 ls s3://db-archive/nightly/
-   aws --endpoint-url https://dgp.example.com s3 ls s3://db-archive/cold/nightly/
+   aws --endpoint-url https://s3.acme.example s3 ls s3://db-archive/nightly/
+   aws --endpoint-url https://s3.acme.example s3 ls s3://db-archive/cold/nightly/
    ```
 
 3. Excluded keys (`nightly/golden/**`) are still there.
