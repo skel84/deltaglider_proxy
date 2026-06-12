@@ -4,6 +4,54 @@
 
 ## v1.4.0 — 2026-06-12
 
+### Added
+
+- **One Jobs surface.** Replication rules, lifecycle rules, and one-off
+  maintenance jobs (bucket migration, re-encryption) now live on a single
+  admin screen backed by a unified API (`GET /jobs`, per-kind
+  pause / resume / run-now / preview / cancel, `POST /jobs/reencrypt`,
+  `POST /buckets/:bucket/migrate`). The old per-subsystem
+  `/replication*`, `/lifecycle*`, `/maintenance*` admin routes are gone.
+- **Bucket migration between backends** as a resumable background job
+  (stage → copy → verify → flip → cleanup) with a per-bucket write gate:
+  writes to a bucket under maintenance get `503 Slow Down`, reads pass.
+  Re-encrypt jobs use the same machinery, survive restarts, and never
+  resurrect a peer instance's live job after an IAM-DB sync.
+- **Redesigned Analytics dashboard.** Percent-led savings hero
+  ("270% smaller") with a before/after proof bar, one unified bucket list
+  (ratio + footprint per bucket, per-row scan), an "est. $ left on the
+  table" panel for compression-off buckets, a scan-coverage strip, and a
+  designed empty state. The old gauge / facts-grid / duplicate top-buckets
+  panels are gone.
+- **App-wide keyboard shortcuts**: ⌘K command palette over the whole admin
+  IA, ⌘S apply-current-section, `?` shortcuts help, arrow-key navigation
+  in the object browser.
+- **Multi-backend bucket management**: create-a-bucket-on-a-named-backend
+  admin API + UI, backend origin badges across the browser and admin.
+- **Documentation rewritten to Diátaxis** — 3 executed tutorials, 25
+  goal-named how-to guides, 13 reference pages, 5 explanations; 14 new
+  product screenshots; the marketing site renders the same corpus.
+- **Prod-config regression tests**: a sanitized structure-true snapshot of
+  the production config validated in the CI gate (parse, declarative-IAM
+  reconciler validation, export round-trip) plus a local harness
+  (`scripts/test-prod-config.sh`) that boots the current branch against
+  the real prod backup with dynamically derived assertions.
+
+### Fixed
+
+- Creating a bucket on a non-default backend could land it on the wrong
+  backend on case-mismatched names.
+- Lifecycle crash-resume could replay a stale cursor after a same-named
+  rule was redefined with a different scope (cursor is now scope-stamped).
+- Maintenance requeue-on-boot is lease-aware — a synced config DB carrying
+  a peer's live job is no longer resurrected locally.
+- Phase machines (migrate / re-encrypt) now fail loudly when a pagination
+  page budget truncates a phase instead of silently advancing.
+- Admin bulk copy/move/delete now participates in the per-bucket write
+  gate instead of bypassing it.
+- Jobs table no longer renders job names one character per line in narrow
+  columns.
+
 ## v1.3.1 — 2026-06-05
 
 ## v1.3.0 — 2026-06-05
