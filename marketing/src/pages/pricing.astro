@@ -87,7 +87,7 @@ function renderDescription(id: string, description: string): string {
     <section class="tiers">
       <h2>What you'd pay</h2>
 
-      <h3>Open Source & Evaluation</h3>
+      <h3>Open source & evaluation</h3>
       <div class="pricing-stack">
         {
           freeTiers.map((b) => {
@@ -106,7 +106,7 @@ function renderDescription(id: string, description: string): string {
         }
       </div>
 
-      <h3 class="tiers-commercial-header">Production Support</h3>
+      <h3 class="tiers-commercial-header">Production support</h3>
       <div class="pricing-pillars">
         {
           commercialTiers.map((b) => {
@@ -126,7 +126,7 @@ function renderDescription(id: string, description: string): string {
         }
       </div>
 
-      <h3>Custom Licensing</h3>
+      <h3>Custom licensing</h3>
       <div class="pricing-stack">
         {
           customTiers.map((b) => {
@@ -215,8 +215,7 @@ function renderDescription(id: string, description: string): string {
             proxy. At your scale (typically 1–10 TB stored footprint = 100
             TB+ of source artifacts), the savings calculator above shows
             annual savings in the $30–60k range for typical SaaS deployments.
-            $2.5k lands in a defensible range relative to the value
-            delivered.
+            $2.5k is small next to that.
           </p>
         </div>
 
@@ -266,11 +265,12 @@ function renderDescription(id: string, description: string): string {
         <div class="faq-item">
           <h3>How do I get a real compression number on my own data?</h3>
           <p>
-            Run <code>docker run deltaglider/proxy</code> against your own
-            bucket and read the Delta Efficiency Panel at
-            <code>/_/admin/diagnostics/delta-efficiency</code>. No data
-            leaves your network. Or talk to us and we'll help you set it
-            up.
+            Run
+            <code>docker run --rm -it -p 9000:9000 -v dgp-data:/data -e DGP_AUTHENTICATION=none beshultd/deltaglider_proxy</code>,
+            copy a sample of your data in, and read the Delta Efficiency
+            Panel at <code>/_/admin/diagnostics/delta-efficiency</code>.
+            No data leaves your network. Or talk to us and we'll help you
+            set it up.
           </p>
         </div>
       </div>

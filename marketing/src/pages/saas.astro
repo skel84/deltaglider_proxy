@@ -51,7 +51,7 @@ const description =
           <div class="jar jar-3"></div>
           <div class="delta-block">
             <span class="delta-stat">148 KB</span>
-            <span class="delta-label">Encrypted Delta</span>
+            <span class="delta-label">Encrypted delta</span>
           </div>
         </div>
       </div>
@@ -81,7 +81,7 @@ const description =
         </div>
 
         <div class="data-col glass-card">
-          <h3 class="card-title">Latest Test Runs</h3>
+          <h3 class="card-title">Latest test runs</h3>
           <CompressionResultsTable detailed={false} />
         </div>
       </div>
@@ -117,8 +117,9 @@ const description =
           <div class="step-number">03</div>
           <h3>Stage</h3>
           <p>
-            Stage migration bucket-by-bucket using per-bucket aliases
-            and <code>quota=0</code> freeze mode during the window.
+            Stage migration bucket-by-bucket using per-bucket aliases.
+            Freeze writes during the window with
+            <code>quota_bytes: 0</code>.
           </p>
         </div>
 
@@ -127,7 +128,7 @@ const description =
           <h3>Cutover</h3>
           <p>
             Cut over your apps' S3 endpoint to DeltaGlider. Your SDKs
-            remain completely unchanged.
+            don't change.
           </p>
         </div>
 

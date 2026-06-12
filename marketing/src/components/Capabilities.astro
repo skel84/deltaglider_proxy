@@ -7,7 +7,7 @@
 // Self-contained: markup + scoped styles. Accessibility: all text colours are
 // WCAG-AA on the dark surface (no --ink-mute as readable text).
 const tier1Tags = ["IAM", "ABAC", "OAuth / OIDC", "Lifecycle"];
-const tier2Tags = ["Event-driven", "Pause / Resume"];
+const tier2Tags = ["Event-driven", "Scheduled", "Pause / resume"];
 const tier3aTags = ["10×–100×", "Same S3 API"];
 const tier3bTags = ["AES-256-GCM", "Your key"];
 ---
@@ -17,11 +17,11 @@ const tier3bTags = ["AES-256-GCM", "Your key"];
     <header class="caps-head">
       <span class="section-eyebrow">What you get</span>
       <h2 id="caps-title" class="caps-title">
-        The enterprise control plane, <span class="grad">on cheap storage</span>.
+        The control plane AWS charges for, <span class="grad">on cheap storage</span>.
       </h2>
       <p class="caps-intro">
-        Point DeltaGlider at Hetzner, Wasabi, MinIO, or any S3 bucket and get the
-        access control, governance, and data services AWS charges a premium for.
+        Point DeltaGlider at Hetzner, Wasabi, MinIO, or any S3 bucket and get
+        access control, replication, lifecycle, and encryption in front of it.
         Drop-in. Transparent. No lock-in.
       </p>
     </header>
@@ -35,7 +35,7 @@ const tier3bTags = ["AES-256-GCM", "Your key"];
             <span class="kicker">
               <span class="kicker-idx">01</span> Control plane
             </span>
-            <h3 class="tile-title">Enterprise auth &amp; access control</h3>
+            <h3 class="tile-title">Per-user auth &amp; access control</h3>
             <p class="tile-desc">
               Per-user IAM with fine-grained ABAC permissions, OAuth/OIDC SSO
               with group mapping, and object lifecycle rules — the access and
@@ -85,8 +85,9 @@ const tier3bTags = ["AES-256-GCM", "Your key"];
         </span>
         <h3 class="tile-title">Cross-cloud replication</h3>
         <p class="tile-desc">
-          Replicate objects between buckets across providers — event-driven,
-          with pause/resume. Migrate or run multi-cloud, without lock-in.
+          Replicate objects between buckets across providers — event-driven
+          or scheduled, with pause/resume. Migrate or run multi-cloud,
+          without lock-in.
         </p>
         <div class="repl-route" aria-hidden="true">
           <span class="rnode">S3</span>
@@ -107,8 +108,8 @@ const tier3bTags = ["AES-256-GCM", "Your key"];
         </span>
         <h3 class="tile-title tile-title--sm">Transparent delta compression</h3>
         <p class="tile-desc">
-          Versioned binaries stored as deltas — up to 10×–100× fewer bytes,
-          behind the same S3 API.
+          Versioned binaries stored as deltas — 10×–100× fewer bytes when
+          versions resemble each other, behind the same S3 API.
         </p>
         <ul class="chips" aria-label="Capabilities">
           {tier3aTags.map((t) => <li class="chip">{t}</li>)}

@@ -245,6 +245,6 @@ export function buildMarkdown(inputs: CalculatorInputs, result: CalculatorResult
   lines.push('');
   lines.push('---');
   lines.push('');
-  lines.push('Conservative assumptions. Real numbers depend on your data — run `docker run deltaglider/proxy` against your bucket and read the Delta Efficiency Panel for a verified compression ratio.');
+  lines.push('Conservative assumptions. Real numbers depend on your data — run the OSS build (`docker run --rm -it -p 9000:9000 -v dgp-data:/data -e DGP_AUTHENTICATION=none beshultd/deltaglider_proxy`) against a sample of your data and read the Delta Efficiency Panel for a verified compression ratio.');
   return lines.join('\n');
 }

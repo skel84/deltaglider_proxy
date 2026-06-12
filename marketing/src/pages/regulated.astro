@@ -55,21 +55,31 @@ const description =
         <h2>How the encryption works</h2>
 
         <ul>
-          <li>AES-256-GCM, per-object IV</li>
+          <li>AES-256-GCM, per-object IV, applied after delta compression</li>
           <li>
-            Encryption key supplied at process start (env var or
-            KMS-fetched secret); never written to disk by the proxy
+            Four modes, set per backend: <code>none</code>,
+            <code>aes256-gcm-proxy</code>, <code>sse-kms</code>,
+            <code>sse-s3</code>. No SSE-C.
           </li>
           <li>
-            Backend (S3, Hetzner, Wasabi, etc.) sees ciphertext only
+            In proxy-AES mode the key is supplied per backend — env var
+            or <code>{'${env:...}'}</code> reference — and stripped from
+            config exports. The backend (S3, Hetzner, Wasabi, etc.) sees
+            ciphertext only.
           </li>
           <li>
-            Bucket-level key rotation supported; old objects re-encrypted
-            via a background job
+            Key rotation is per backend, not in-place: the old key stays
+            as a decrypt-only shim while a background re-encrypt job
+            rewrites historical objects, then you delete it. Writes to a
+            bucket being re-encrypted get 503 until the job finishes;
+            reads pass.
           </li>
           <li>
-            Audit trail of every encrypt/decrypt operation in the
-            structured stdout stream
+            Every S3 operation lands in the structured stdout log. There
+            is no per-decrypt audit event in proxy-AES mode — the key
+            never leaves the process, so there's nothing to log it
+            against. If you need "who decrypted what, when," use
+            <code>sse-kms</code> and read CloudTrail.
           </li>
         </ul>
       </section>
@@ -82,7 +92,7 @@ const description =
             Proxy runs in YOUR VPC / on YOUR Kubernetes / on YOUR bare
             metal
           </li>
-          <li>Encryption key never leaves the proxy process</li>
+          <li>In proxy-AES mode, the encryption key never leaves the proxy process</li>
           <li>Backend credentials never leave the proxy process</li>
           <li>No phone-home, no telemetry, no SaaS dependency</li>
           <li>Source code is GPL-3.0 — your security team can read every line</li>
