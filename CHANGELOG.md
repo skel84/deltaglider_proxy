@@ -29,6 +29,17 @@
   provision a secret-free template, tweak via the GUI, export, and
   commit the export straight back into IaC.
 
+### Fixed
+
+- **Apply dialog showed "No changes detected" for credential
+  rotations.** The section diff redacted secrets on both sides before
+  comparing, so rotating a secret access key, encryption key, OAuth
+  client secret, or webhook header produced an empty diff. Secrets are
+  now projected to deterministic one-way fingerprints (`fp:xxxxxxxx`)
+  for the comparison: unchanged secrets compare equal, rotations
+  surface as a readable fingerprint swap, and no key material appears
+  in the dialog. `${env:NAME}` references stay readable verbatim.
+
 ## v1.4.0 — 2026-06-12
 
 ### Added

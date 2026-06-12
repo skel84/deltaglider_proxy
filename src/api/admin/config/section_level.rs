@@ -807,6 +807,87 @@ fn fingerprint_secret(plaintext: Option<&str>) -> Option<String> {
     })
 }
 
+/// Project a config for the Apply-dialog diff: every secret becomes a
+/// deterministic fingerprint (`fp:xxxxxxxx`) instead of being NULLED, so
+/// rotations SURFACE in the diff instead of vanishing. The old behaviour
+/// redacted both sides with `redact_all_secrets`, which nulls credentials
+/// on both sides — a credentials change produced an empty diff and the
+/// Apply dialog claimed "No changes detected" for an apply that very much
+/// changed them. Fingerprints fix that: unchanged secrets compare equal,
+/// rotations show `fp:a → fp:b`, nothing leaks (one-way truncated hash).
+/// `${env:NAME}` references stay readable verbatim; identifiers
+/// (access_key_id) stay plaintext — operators must see WHICH key rotated.
+fn fingerprint_secrets_for_diff(cfg: &crate::config::Config) -> crate::config::Config {
+    fn fp_str(s: &str) -> String {
+        if crate::config::is_env_ref(s) {
+            s.to_string()
+        } else {
+            fingerprint_secret(Some(s)).expect("input is Some")
+        }
+    }
+    fn fp_opt(o: &mut Option<String>) {
+        if let Some(v) = o {
+            *v = fp_str(v);
+        }
+    }
+    fn fp_enc(enc: &mut crate::config::BackendEncryptionConfig) {
+        use crate::config::BackendEncryptionConfig as E;
+        match enc {
+            E::None { legacy_key, .. } => fp_opt(legacy_key),
+            E::Aes256GcmProxy {
+                key, legacy_key, ..
+            } => {
+                fp_opt(key);
+                fp_opt(legacy_key);
+            }
+            E::SseKms { legacy_key, .. } => fp_opt(legacy_key),
+            E::SseS3 { legacy_key, .. } => fp_opt(legacy_key),
+        }
+    }
+    let mut out = cfg.clone();
+    out.bootstrap_password_hash = None; // never diffed (dedicated endpoint)
+    fp_opt(&mut out.secret_access_key);
+    if let crate::config::BackendConfig::S3 {
+        ref mut secret_access_key,
+        ..
+    } = out.backend
+    {
+        fp_opt(secret_access_key);
+    }
+    fp_enc(&mut out.backend_encryption);
+    for nb in &mut out.backends {
+        if let crate::config::BackendConfig::S3 {
+            ref mut secret_access_key,
+            ..
+        } = nb.backend
+        {
+            fp_opt(secret_access_key);
+        }
+        fp_enc(&mut nb.encryption);
+    }
+    for u in &mut out.iam_users {
+        if !u.secret_access_key.is_empty() {
+            u.secret_access_key = fp_str(&u.secret_access_key);
+        }
+    }
+    for pr in &mut out.auth_providers {
+        fp_opt(&mut pr.client_secret);
+    }
+    for v in out.event_delivery.webhook_headers.values_mut() {
+        *v = fp_str(v);
+    }
+    fp_opt(&mut out.event_delivery.slack_bot_token);
+    if out.event_delivery.format == crate::config_sections::EventDeliveryFormat::Slack
+        && !out.event_delivery.uses_slack_bot_token()
+    {
+        fp_opt(&mut out.event_delivery.webhook_url);
+        for url in out.event_delivery.webhook_urls.iter_mut() {
+            *url = fp_str(url);
+        }
+    }
+    out
+}
+
 fn compute_section_diff(
     section: SectionName,
     old_cfg: &crate::config::Config,
@@ -829,13 +910,13 @@ fn compute_section_diff(
     //   * rotations surface as a readable `fp:a→fp:b` swap.
     //   * neither side leaks key material (one-way hash truncated
     //     to 8 hex chars, matching the pre-refactor behaviour).
-    let old_redacted = old_cfg.redact_all_secrets();
-    let new_redacted = new_cfg.redact_all_secrets();
+    let old_fp = fingerprint_secrets_for_diff(old_cfg);
+    let new_fp = fingerprint_secrets_for_diff(new_cfg);
 
-    let old_sectioned = SectionedConfig::from_flat(&old_redacted);
-    let new_sectioned = SectionedConfig::from_flat(&new_redacted);
+    let old_sectioned = SectionedConfig::from_flat(&old_fp);
+    let new_sectioned = SectionedConfig::from_flat(&new_fp);
 
-    let (mut old_json, mut new_json) = match section {
+    let (old_json, new_json) = match section {
         SectionName::Admission => (
             serde_json::to_value(old_sectioned.admission.unwrap_or_default()).unwrap_or_default(),
             serde_json::to_value(new_sectioned.admission.unwrap_or_default()).unwrap_or_default(),
@@ -854,21 +935,6 @@ fn compute_section_diff(
         ),
     };
 
-    // Storage section gets the per-backend encryption fingerprint
-    // injection. Other sections have no encryption fields.
-    if matches!(section, SectionName::Storage) {
-        inject_encryption_fingerprints(
-            &mut old_json,
-            &old_cfg.backend_encryption,
-            &old_cfg.backends,
-        );
-        inject_encryption_fingerprints(
-            &mut new_json,
-            &new_cfg.backend_encryption,
-            &new_cfg.backends,
-        );
-    }
-
     let mut diff = serde_json::Map::new();
     shallow_diff("", &old_json, &new_json, &mut diff);
 
@@ -878,61 +944,6 @@ fn compute_section_diff(
         serde_json::Value::Object(diff),
     );
     serde_json::Value::Object(out)
-}
-
-/// Replace the nulled-by-redaction `key` / `legacy_key` fields in a
-/// `storage`-section JSON value with fingerprints derived from the
-/// real keys on the Config. Preserves the non-secret id fields
-/// (key_id, kms_key_id) as-is.
-fn inject_encryption_fingerprints(
-    storage_json: &mut serde_json::Value,
-    singleton_enc: &crate::config::BackendEncryptionConfig,
-    named_backends: &[crate::config::NamedBackendConfig],
-) {
-    let obj = match storage_json.as_object_mut() {
-        Some(m) => m,
-        None => return,
-    };
-    // Singleton.
-    if let Some(be) = obj.get_mut("backend_encryption") {
-        apply_fingerprints_to_enc_json(be, singleton_enc);
-    }
-    // List.
-    if let Some(arr) = obj.get_mut("backends").and_then(|v| v.as_array_mut()) {
-        for entry in arr {
-            let name = entry
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            if let Some(n) = name {
-                if let Some(enc_json) = entry.get_mut("encryption") {
-                    if let Some(named) = named_backends.iter().find(|nb| nb.name == n) {
-                        apply_fingerprints_to_enc_json(enc_json, &named.encryption);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Overwrite `key` / `legacy_key` fields on a single encryption JSON
-/// object with fingerprints derived from the source config variant.
-/// No-op when the source config has no key material (fingerprint
-/// stays as the redacted null).
-fn apply_fingerprints_to_enc_json(
-    enc_json: &mut serde_json::Value,
-    enc: &crate::config::BackendEncryptionConfig,
-) {
-    let obj = match enc_json.as_object_mut() {
-        Some(m) => m,
-        None => return,
-    };
-    if let Some(fp) = fingerprint_secret(enc.primary_key()) {
-        obj.insert("key".to_string(), serde_json::Value::String(fp));
-    }
-    if let Some(fp) = fingerprint_secret(enc.legacy_key()) {
-        obj.insert("legacy_key".to_string(), serde_json::Value::String(fp));
-    }
 }
 
 /// What the operator said about each encryption key field for one
@@ -1272,6 +1283,93 @@ mod tests {
             new.legacy_key(),
             Some(HEX32_B),
             "same-mode preserves legacy_key"
+        );
+    }
+}
+
+#[cfg(test)]
+mod diff_fingerprint_tests {
+    use super::*;
+
+    fn base_cfg() -> crate::config::Config {
+        crate::config::Config {
+            access_key_id: Some("admin".into()),
+            secret_access_key: Some("old-secret".into()),
+            ..Default::default()
+        }
+    }
+
+    /// The bug this guards: a credentials rotation used to produce an
+    /// EMPTY diff (both sides redacted to None) and the Apply dialog
+    /// claimed "No changes detected" for an apply that changed them.
+    #[test]
+    fn credential_rotation_surfaces_in_diff() {
+        let old_cfg = base_cfg();
+        let mut new_cfg = base_cfg();
+        new_cfg.secret_access_key = Some("new-secret".into());
+        let diff = compute_section_diff(SectionName::Access, &old_cfg, &new_cfg);
+        let access = diff.get("access").and_then(|v| v.as_object()).unwrap();
+        let change = access
+            .get("secret_access_key")
+            .and_then(|v| v.as_object())
+            .unwrap_or_else(|| panic!("rotation must appear in the diff: {diff}"));
+        let before = change["before"].as_str().unwrap();
+        let after = change["after"].as_str().unwrap();
+        assert!(
+            before.starts_with("fp:"),
+            "fingerprint, not plaintext: {before}"
+        );
+        assert!(after.starts_with("fp:"));
+        assert_ne!(before, after);
+        assert!(!diff.to_string().contains("old-secret"), "no leak");
+        assert!(!diff.to_string().contains("new-secret"), "no leak");
+    }
+
+    #[test]
+    fn preserved_credential_produces_no_diff() {
+        let old_cfg = base_cfg();
+        let new_cfg = base_cfg();
+        let diff = compute_section_diff(SectionName::Access, &old_cfg, &new_cfg);
+        let access = diff.get("access").and_then(|v| v.as_object()).unwrap();
+        assert!(
+            access.is_empty(),
+            "identical configs must diff empty, got {diff}"
+        );
+    }
+
+    #[test]
+    fn env_ref_secrets_stay_readable_in_diff() {
+        let old_cfg = base_cfg();
+        let mut new_cfg = base_cfg();
+        new_cfg.secret_access_key = Some("${env:DGP_BOOTSTRAP_SECRET_ACCESS_KEY}".into());
+        let diff = compute_section_diff(SectionName::Access, &old_cfg, &new_cfg);
+        let s = diff.to_string();
+        assert!(
+            s.contains("${env:DGP_BOOTSTRAP_SECRET_ACCESS_KEY}"),
+            "refs are not secrets — show them verbatim: {s}"
+        );
+    }
+
+    #[test]
+    fn iam_user_secret_rotation_surfaces_in_diff() {
+        let mk = |secret: &str| {
+            let mut c = base_cfg();
+            c.iam_users = vec![crate::iam::DeclarativeUser {
+                name: "ci-uploader".into(),
+                access_key_id: "ci-uploader".into(),
+                secret_access_key: secret.into(),
+                enabled: true,
+                groups: vec![],
+                permissions: vec![],
+            }];
+            c
+        };
+        let diff = compute_section_diff(SectionName::Access, &mk("a-secret"), &mk("b-secret"));
+        let s = diff.to_string();
+        assert!(s.contains("fp:"), "user secret rotation must surface: {s}");
+        assert!(
+            !s.contains("a-secret") && !s.contains("b-secret"),
+            "no leak"
         );
     }
 }
