@@ -14,9 +14,9 @@
 // entry (and vice versa).
 
 import README from '../../../../docs/product/README.md?raw';
-import QUICKSTART from '../../../../docs/product/01-quickstart.md?raw';
-import PROD_SECURITY from '../../../../docs/product/20-production-security-checklist.md?raw';
-import KUBERNETES_HELM from '../../../../docs/product/22-kubernetes-helm.md?raw';
+import TUT_DELTA from '../../../../docs/product/tutorials/first-delta-savings.md?raw';
+import TUT_SECURE from '../../../../docs/product/tutorials/secure-your-proxy.md?raw';
+import TUT_K8S from '../../../../docs/product/tutorials/kubernetes-hello-world.md?raw';
 import REF_RATE_LIMITS from '../../../../docs/product/reference/rate-limits.md?raw';
 import FAQ from '../../../../docs/product/42-faq.md?raw';
 import HT_GO_TO_PRODUCTION from '../../../../docs/product/how-to/go-to-production.md?raw';
@@ -76,9 +76,9 @@ import manifest from '../../../../docs/product/manifest.json';
  */
 const CONTENT_BY_PATH: Record<string, string> = {
   'README': README,
-  '01-quickstart': QUICKSTART,
-  '20-production-security-checklist': PROD_SECURITY,
-  '22-kubernetes-helm': KUBERNETES_HELM,
+  'tutorials/first-delta-savings': TUT_DELTA,
+  'tutorials/secure-your-proxy': TUT_SECURE,
+  'tutorials/kubernetes-hello-world': TUT_K8S,
   'reference/rate-limits': REF_RATE_LIMITS,
   '42-faq': FAQ,
   'how-to/go-to-production': HT_GO_TO_PRODUCTION,

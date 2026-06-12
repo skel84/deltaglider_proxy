@@ -29,19 +29,19 @@
       "order": 0
     },
     {
-      "path": "01-quickstart",
+      "path": "tutorials/first-delta-savings",
       "group": "Start here",
       "order": 10
     },
     {
-      "path": "20-production-security-checklist",
-      "group": "Deploy to production",
-      "order": 110
+      "path": "tutorials/secure-your-proxy",
+      "group": "Start here",
+      "order": 20
     },
     {
-      "path": "22-kubernetes-helm",
-      "group": "Deploy to production",
-      "order": 130
+      "path": "tutorials/kubernetes-hello-world",
+      "group": "Start here",
+      "order": 30
     },
     {
       "path": "reference/rate-limits",
