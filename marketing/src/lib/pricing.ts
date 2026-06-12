@@ -199,10 +199,12 @@ export function buildMarkdown(inputs: CalculatorInputs, result: CalculatorResult
   lines.push(`- Current artifact footprint: ${formatTb(inputs.sourceTb)}`);
   lines.push(`- Regions: ${inputs.regions}`);
   lines.push(`- Storage cost: $${inputs.costPerGbMonthUsd}/GB/month`);
-  // Show both ratio (engineering mental model) and % bytes saved (CFO mental
-  // model) — the markdown is meant to be shared with both audiences.
+  // Golden rule: savings magnitudes are presented as percentages, never as
+  // N× multipliers. Show both "% smaller" (ratio × 100) and % bytes saved —
+  // the markdown is meant to be shared with both audiences.
+  const pctSmaller = Math.round(inputs.compressionRatio * 100).toLocaleString('en-US');
   const pctSaved = Math.round((1 - 1 / inputs.compressionRatio) * 100);
-  lines.push(`- Compression: ${inputs.compressionRatio}× ratio (${pctSaved}% bytes saved)`);
+  lines.push(`- Compression: ${pctSmaller}% smaller stored footprint (${pctSaved}% bytes saved)`);
   lines.push(`- Annual growth: ${Math.round(inputs.annualGrowthRate * 100)}%`);
   lines.push('');
 

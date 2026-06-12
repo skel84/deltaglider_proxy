@@ -51,8 +51,8 @@ const description =
         <p>
           Beshu Tech is migrating its own ReadonlyREST build catalog
           from AWS S3 (eu-west-1) to Hetzner Object Storage (hel1)
-          via DeltaGlider. The first three verified versions
-          compressed 88.5×, 4.1×, and 3.8×. Sample so far: a 2.8 GB
+          via DeltaGlider. The first three verified versions stored
+          8,850%, 410%, and 380% smaller. Sample so far: a 2.8 GB
           plugin reduced to 32 MB, bit-perfect on SHA-256 round-trip.
         </p>
         <p>
@@ -68,8 +68,8 @@ const description =
         </p>
         <p>
           A synthesized scenario: daily Postgres dumps stored as
-          deltas against the previous day. Expected compression range
-          5-50× depending on workload churn. Reproducible end-to-end
+          deltas against the previous day. Expected result: 500%–5,000%
+          smaller, depending on workload churn. Reproducible end-to-end
           with a single Docker compose.
         </p>
       </article>
@@ -83,8 +83,8 @@ const description =
         <p>
           A Maven artifact mirror with thousands of JAR versions per
           package. Most JARs share 90%+ bytes with adjacent versions
-          (signatures, manifests, embedded CSS). Expected compression
-          range 10-50×.
+          (signatures, manifests, embedded CSS). Expected result:
+          1,000%–5,000% smaller.
         </p>
       </article>
     </section>

@@ -3,9 +3,10 @@
 // Replaces the old stats band + abstract flow diagram. Instead of telling
 // the visitor numbers, it draws what ten uploads of the same artifact do
 // to a bucket: full copies on the left, one reference + hairline deltas on
-// the right. The figures are the verified 614× datapoint family used
-// site-wide (91 MB artifact → 148 KB delta), and the v100 projection lands
-// on the real 88.5× catalog number from the migration log — on purpose.
+// the right. The figures are the verified 61,400%-smaller datapoint family
+// used site-wide (91 MB artifact → 148 KB delta), and the v100 projection
+// lands on the real 8,850%-smaller catalog number from the migration log —
+// on purpose.
 const VERSIONS = 10;
 const rows = Array.from({ length: VERSIONS }, (_, i) => i + 1);
 ---
@@ -65,9 +66,9 @@ const rows = Array.from({ length: VERSIONS }, (_, i) => i + 1);
 
     <p class="scale-projection">
       The gap widens with every release. By v100 it's <strong>9.1&nbsp;GB</strong>
-      against <strong>~106&nbsp;MB</strong> — 86× less. Our own release catalog
-      hit <a href="/case-studies/readonlyrest-builds">88.5× on a real
-      release line</a>.
+      against <strong>~106&nbsp;MB</strong> — 8,600% less. Our own release catalog
+      landed at <a href="/case-studies/readonlyrest-builds">8,850% smaller on a
+      real release line</a>.
     </p>
 
     <p class="scale-mech">
@@ -87,7 +88,7 @@ const rows = Array.from({ length: VERSIONS }, (_, i) => i + 1);
         version to version, the same entries land in the same order — same
         manifest, same icons, same bundled CSS — so the binary diff stays
         tiny. The 91&nbsp;MB artifact in the chart <em>is</em> a compressed
-        ZIP — a real ReadonlyREST plugin, stored 614× smaller.
+        ZIP — a real ReadonlyREST plugin, stored 61,400% smaller.
         <a href="/docs/explanation/delta-compression">The engineering
         note</a> walks through why.
       </p>
