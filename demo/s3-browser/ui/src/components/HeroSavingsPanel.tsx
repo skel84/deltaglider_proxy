@@ -14,7 +14,8 @@
  *     DeltaGlider", always full width) above the real bar ("with"),
  *     where the dense teal KEPT slice is dwarfed by the luminous green
  *     SAVED field. Green = money not spent; teal-ink = bytes kept.
- *     Then the dollar line: $/mo AND $/yr.
+ *     Then the bill line: the regular monthly bill struck through, the
+ *     compressed bill as a green headline, and the saving kept quiet.
  *   - FOOTER — one quiet strip of derived facts (objects · buckets ·
  *     biggest single save · reference share).
  *
@@ -244,6 +245,15 @@ function HeroInner({
   const savedBytes = Math.max(0, totalOriginal - totalStored);
   const keptPct = 100 - targetSavedWidth;
   const yearlySavings = targetDollars * 12;
+
+  // The two bills the dollar line tells: what you'd pay WITHOUT compression
+  // (struck through) vs. what you actually pay WITH it (the green headline).
+  // Convention matches AnalyticsSection: bill = (bytes / 1024³) × $/GB/mo.
+  const GIB = 1024 ** 3;
+  const regularBill = (totalOriginal / GIB) * costRate; // crossed-out
+  const currentBill = (totalStored / GIB) * costRate; // the green number
+  const fmtBill = (v: number) =>
+    v > 0 && v < 0.01 ? '<$0.01' : `$${v.toFixed(2)}`;
 
   const monoLabel: React.CSSProperties = {
     fontFamily: 'var(--font-mono)',
@@ -562,46 +572,63 @@ function HeroInner({
           </div>
         </div>
 
-        {/* Dollar line. Sub-cent savings render as "<$0.01" rather than a
-            broken-looking $0.00. */}
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+        {/* Dollar line — your BILL, before vs. after. The regular bill is
+            struck through; the compressed bill is the green headline; the
+            saving sits quietly underneath. Sub-cent values render "<$0.01". */}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+          {/* Regular bill — crossed out. Only shown when it differs meaningfully. */}
+          {regularBill - currentBill >= 0.01 && (
+            <span
+              aria-label={`Without DeltaGlider: ${fmtBill(regularBill)} per month`}
+              style={{
+                fontSize: 'clamp(16px, 1.3vw, 22px)',
+                fontWeight: 600,
+                color: colors.TEXT_MUTED,
+                textDecoration: 'line-through',
+                textDecorationColor: `${colors.TEXT_MUTED}aa`,
+                textDecorationThickness: 2,
+                fontVariantNumeric: 'tabular-nums',
+                letterSpacing: '-0.02em',
+              }}
+            >
+              {fmtBill(regularBill)}
+            </span>
+          )}
+          {/* Compressed bill — the green headline (what you actually pay). */}
           <span
+            aria-label={`With DeltaGlider: ${fmtBill(currentBill)} per month`}
             style={{
               fontSize: 'clamp(24px, 2vw, 34px)',
               fontWeight: 800,
-              color: colors.TEXT_PRIMARY,
+              color: colors.SAVED_TEXT,
               fontVariantNumeric: 'tabular-nums',
               letterSpacing: '-0.03em',
             }}
           >
-            {targetDollars > 0 && targetDollars < 0.01 ? (
-              <span>
-                <span style={{ color: colors.SAVED_TEXT }}>&lt;$</span>0.01
-              </span>
-            ) : (
-              <>
-                <span style={{ color: colors.SAVED_TEXT }}>$</span>
-                <m.span>{dollarDisplay}</m.span>
-              </>
-            )}
+            {fmtBill(currentBill)}
             <span style={{ fontSize: '0.55em', fontWeight: 600, color: colors.TEXT_MUTED }}>
               /mo
             </span>
           </span>
-          {yearlySavings >= 1 && (
-            <span
-              style={{
-                fontSize: 15,
-                fontWeight: 700,
-                color: colors.SAVED_TEXT_DEEP,
-                fontVariantNumeric: 'tabular-nums',
-              }}
-            >
-              ${yearlySavings >= 100 ? Math.round(yearlySavings).toLocaleString() : yearlySavings.toFixed(2)}/yr
+          {/* Saving — quiet, secondary. */}
+          {targetDollars >= 0.01 && (
+            <span style={{ fontSize: 12.5, color: colors.TEXT_MUTED, fontWeight: 500 }}>
+              save{' '}
+              <span style={{ color: colors.SAVED_TEXT_DEEP, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+                $<m.span>{dollarDisplay}</m.span>/mo
+              </span>
+              {yearlySavings >= 1 && (
+                <>
+                  {' · '}
+                  <span style={{ color: colors.SAVED_TEXT_DEEP, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+                    ${yearlySavings >= 100 ? Math.round(yearlySavings).toLocaleString() : yearlySavings.toFixed(2)}/yr
+                  </span>
+                </>
+              )}
             </span>
           )}
           <span style={{ fontSize: 12, color: colors.TEXT_MUTED, fontWeight: 500 }}>
-            saved at ${costRate}/GB
+            at ${costRate}/GB
           </span>
           <button
             ref={cogRef}
