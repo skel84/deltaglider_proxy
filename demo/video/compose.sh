@@ -49,7 +49,11 @@ ffmpeg -y -loop 1 -t "$TITLE_SEC" -i "$WORK/title.png" -r $FPS \
 ffmpeg -y -loop 1 -t "$OUTRO_SEC" -i "$WORK/outro.png" -r $FPS \
   -vf "scale=$W:$H,format=yuv420p" -c:v libx264 -crf 20 -preset medium "$WORK/outro.mp4" >/dev/null 2>&1
 
-# ── 2. Caption strips (transparent lower-third PNGs) ─────────────────────────
+# Caption band vertical position: 'top' (default) or 'bottom'. The strip is
+# 110px tall; top → y=0, bottom → y=H-110.
+CAP_POS="${DGP_CAPTION_POS:-top}"
+
+# ── 2. Caption strips (transparent top-band PNGs) ────────────────────────────
 echo "==> 2/4 caption strips"
 N=$(python3 -c "import json;print(len(json.load(open('$DIR/captions.json'))['captions']))")
 python3 - "$DIR/captions.json" "$WORK/caps" "$SANS" "$W" <<'PY'
@@ -78,6 +82,8 @@ cfg=json.load(open('$DIR/captions.json'))
 off=cfg['title_card_seconds']  # captions are relative to body; body sits AFTER title in final, but we overlay on the body BEFORE concat, so NO offset here
 for c in cfg['captions']: print(f\"{c['start']:.2f} {c['end']:.2f}\")
 ")
+if [ "$CAP_POS" = "bottom" ]; then CAP_Y="$H-110"; else CAP_Y="0"; fi
+echo "    caption band: $CAP_POS (y=$CAP_Y)"
 INPUTS=(-i "$RAW")
 for i in $(seq 0 $((N-1))); do INPUTS+=(-i "$WORK/caps/cap$i.png"); done
 FC="[0:v]fps=$FPS,scale=$W:$H[base];"
@@ -86,7 +92,7 @@ for i in $(seq 0 $((N-1))); do
   read -r s e <<< "${TIMES[$i]}"
   NEXT="v$i"
   IN=$((i+1))
-  FC+="[$PREV][$IN:v]overlay=x=0:y=$H-110:enable='between(t,$s,$e)'[$NEXT];"
+  FC+="[$PREV][$IN:v]overlay=x=0:y=$CAP_Y:enable='between(t,$s,$e)'[$NEXT];"
   PREV="$NEXT"
 done
 FC="${FC%;}"  # drop trailing semicolon; last label is $PREV

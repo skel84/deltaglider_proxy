@@ -6,9 +6,9 @@
 // 5 MB mp4 only downloads once the visitor hits play.
 ---
 
-<section class="section demo-video">
+<section class="section demo-video" id="demo-video">
   <div class="shell">
-    <span class="section-eyebrow">See it in action</span>
+    <span class="section-eyebrow">See video</span>
     <h2>Ninety seconds, end to end</h2>
     <p class="demo-video-lede">
       A real screen recording — not a mockup. Spin up an encrypted,
@@ -17,8 +17,9 @@
       disk</strong>, measured live.
     </p>
 
-    <figure class="demo-video-frame">
+    <figure class="demo-video-frame" id="demo-video-frame" data-state="idle">
       <video
+        id="demo-video-el"
         controls
         preload="none"
         playsinline
@@ -29,9 +30,40 @@
         Your browser can't play this video.
         <a href="/deltaglider-demo.mp4">Download it instead.</a>
       </video>
+
+      {/* Big play-icon overlay over the poster — hidden once playback starts.
+          A CSS circle (border-radius:50%) so it's always perfectly round;
+          the play glyph is a CSS triangle. */}
+      <button type="button" class="demo-video-play" aria-label="Play the 90-second demo">
+        <span class="demo-video-play__circle" aria-hidden="true">
+          <span class="demo-video-play__tri"></span>
+        </span>
+        <span class="demo-video-play__label">90s&nbsp;video</span>
+      </button>
     </figure>
   </div>
 </section>
+
+<script>
+  // Wire the custom play overlay to the native <video>: clicking it starts
+  // playback and flips the frame state so the overlay fades out; native
+  // controls take over from there. Re-show the overlay if the video is
+  // paused back to the start (so the poster + play CTA return).
+  const frame = document.getElementById('demo-video-frame');
+  const video = document.getElementById('demo-video-el') as HTMLVideoElement | null;
+  const overlay = frame?.querySelector('.demo-video-play') as HTMLButtonElement | null;
+  if (frame && video && overlay) {
+    overlay.addEventListener('click', () => {
+      frame.dataset.state = 'playing';
+      video.play();
+    });
+    video.addEventListener('play', () => { frame.dataset.state = 'playing'; });
+    video.addEventListener('pause', () => {
+      if (video.currentTime === 0 || video.ended) frame.dataset.state = 'idle';
+    });
+    video.addEventListener('ended', () => { frame.dataset.state = 'idle'; });
+  }
+</script>
 
 <style>
   .demo-video { text-align: center; }
@@ -40,6 +72,7 @@
     margin: 0.75rem auto 2rem;
   }
   .demo-video-frame {
+    position: relative;
     margin: 0 auto;
     max-width: 880px;
     border-radius: 16px;
@@ -53,5 +86,85 @@
     width: 100%;
     height: auto;
     display: block;
+  }
+
+  /* Big play-icon overlay: centered over the poster, fades out on play. */
+  .demo-video-play {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.9rem;
+    border: 0;
+    cursor: pointer;
+    /* A soft dark veil so the play icon reads over any poster frame. */
+    background:
+      radial-gradient(circle at center,
+        rgba(8, 13, 24, 0.30) 0%,
+        rgba(8, 13, 24, 0.46) 55%,
+        rgba(8, 13, 24, 0.58) 100%);
+    transition: opacity 0.25s ease, visibility 0.25s ease;
+  }
+  .demo-video-frame[data-state='playing'] .demo-video-play {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  /* Perfectly round CSS circle — border-radius:50% can't octagon-ify. */
+  .demo-video-play__circle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 92px;
+    height: 92px;
+    border-radius: 50%;
+    background: rgba(8, 13, 24, 0.55);
+    border: 3px solid #fff;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+  }
+  /* CSS triangle play glyph (right-pointing), nudged right to optically
+     center inside the circle. */
+  .demo-video-play__tri {
+    width: 0;
+    height: 0;
+    margin-left: 6px;
+    border-style: solid;
+    border-width: 16px 0 16px 26px;
+    border-color: transparent transparent transparent #fff;
+    transition: border-color 0.2s ease;
+  }
+  .demo-video-play:hover .demo-video-play__circle {
+    background: var(--brand, #22d3ee);
+    border-color: var(--brand, #22d3ee);
+    transform: scale(1.06);
+  }
+  .demo-video-play:hover .demo-video-play__tri {
+    border-left-color: #081018;
+  }
+  .demo-video-play:focus-visible {
+    outline: 3px solid var(--brand, #22d3ee);
+    outline-offset: -3px;
+  }
+
+  .demo-video-play__label {
+    font-family: var(--font-mono);
+    font-size: 0.92rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    line-height: 1;
+    color: #fff;
+    text-shadow: 0 1px 12px rgba(0, 0, 0, 0.6);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .demo-video-play,
+    .demo-video-play__circle,
+    .demo-video-play__tri { transition: none; }
   }
 </style>

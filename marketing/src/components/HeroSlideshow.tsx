@@ -24,7 +24,7 @@ interface Slide {
 // the landscape captures that follow are top-anchored inside the square frame.
 const SLIDES: Slide[] = [
   {
-    src: '/screenshots/analytics-hero.jpg',
+    src: '/screenshots/analytics.jpg',
     label: 'Storage analytics',
     alt: 'Live storage analytics dashboard: 1,174% smaller on disk, 2.3 TB stored as 197 GB, per-bucket compression ratios across releases, db-archive, ml-models and downloads.',
     caption: 'Live savings, measured — not estimated',
@@ -69,7 +69,14 @@ function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
-export default function HeroSlideshow() {
+interface HeroSlideshowProps {
+  /** 'window' (default) = framed faux-app slideshow; 'backdrop' = chromeless
+   *  full-cover crossfade used as the hero background layer. */
+  variant?: 'window' | 'backdrop';
+}
+
+export default function HeroSlideshow({ variant = 'window' }: HeroSlideshowProps) {
+  const backdrop = variant === 'backdrop';
   const [active, setActive] = useState(0);
   const [paused, setPaused] = useState(false);
   const [lightbox, setLightbox] = useState(false);
@@ -133,7 +140,7 @@ export default function HeroSlideshow() {
 
   return (
     <div
-      className={`hero-slideshow${reducedMotion ? ' is-reduced' : ''}`}
+      className={`hero-slideshow${reducedMotion ? ' is-reduced' : ''}${backdrop ? ' hero-slideshow--backdrop' : ''}`}
       role="group"
       aria-roledescription="carousel"
       aria-label="DeltaGlider admin UI screenshots"
@@ -143,32 +150,41 @@ export default function HeroSlideshow() {
       onBlurCapture={() => setPaused(false)}
       onKeyDown={onKeyDown}
     >
-      {/* Stacked depth plates behind the frame for a layered, premium feel. */}
-      <div className="hero-slideshow__stack" aria-hidden="true">
-        <span className="hero-slideshow__plate hero-slideshow__plate--2" />
-        <span className="hero-slideshow__plate hero-slideshow__plate--1" />
-      </div>
+      {/* Stacked depth plates behind the frame for a layered, premium feel.
+          Suppressed in backdrop mode (no frame to sit behind). */}
+      {!backdrop && (
+        <div className="hero-slideshow__stack" aria-hidden="true">
+          <span className="hero-slideshow__plate hero-slideshow__plate--2" />
+          <span className="hero-slideshow__plate hero-slideshow__plate--1" />
+        </div>
+      )}
 
       <div className="hero-slideshow__window">
-        {/* Faux app chrome */}
-        <div className="hero-slideshow__chrome">
-          <span className="hero-slideshow__dots" aria-hidden="true">
-            <i /><i /><i />
-          </span>
-          <span className="hero-slideshow__titlebar" aria-live="polite">
-            <span className="hero-slideshow__app">DeltaGlider</span>
-            <span className="hero-slideshow__sep">/</span>
-            <span className="hero-slideshow__label">{SLIDES[active].label}</span>
-          </span>
-          <span className="hero-slideshow__chrome-spacer" aria-hidden="true" />
-        </div>
+        {/* Faux app chrome — hidden in backdrop mode (chromeless full-bleed). */}
+        {!backdrop && (
+          <div className="hero-slideshow__chrome">
+            <span className="hero-slideshow__dots" aria-hidden="true">
+              <i /><i /><i />
+            </span>
+            <span className="hero-slideshow__titlebar" aria-live="polite">
+              <span className="hero-slideshow__app">DeltaGlider</span>
+              <span className="hero-slideshow__sep">/</span>
+              <span className="hero-slideshow__label">{SLIDES[active].label}</span>
+            </span>
+            <span className="hero-slideshow__chrome-spacer" aria-hidden="true" />
+          </div>
+        )}
 
-        {/* Stage — click to open the lightbox; image zooms on hover. */}
+        {/* Stage — click to open the lightbox; image zooms on hover.
+            In backdrop mode the stage is a plain div (no lightbox), so it
+            never traps clicks meant for the copy/CTAs above it. */}
         <button
           type="button"
           className="hero-slideshow__stage"
           aria-label={`View ${SLIDES[active].label} full size`}
-          onClick={() => setLightbox(true)}
+          onClick={() => !backdrop && setLightbox(true)}
+          tabIndex={backdrop ? -1 : 0}
+          aria-hidden={backdrop}
         >
           {SLIDES.map((slide, i) => {
             const isActive = i === active;
@@ -180,10 +196,13 @@ export default function HeroSlideshow() {
               >
                 {(loaded.has(i) || i === active || i === 0) && (
                   <img
+                    // Backdrop occupies a tall, narrow right column — use the
+                    // square capture (slide.src), which fills it without
+                    // cropping the billboard down to a sliver.
                     src={slide.src}
                     alt={slide.alt}
-                    width={1147}
-                    height={1440}
+                    width={1280}
+                    height={960}
                     loading={i === 0 ? 'eager' : 'lazy'}
                     // @ts-expect-error fetchpriority is valid HTML, not yet in React types
                     fetchpriority={i === 0 ? 'high' : 'auto'}
@@ -191,19 +210,21 @@ export default function HeroSlideshow() {
                     draggable={false}
                   />
                 )}
-                <figcaption className="hero-slideshow__caption">
-                  {slide.caption}
-                </figcaption>
+                {!backdrop && (
+                  <figcaption className="hero-slideshow__caption">
+                    {slide.caption}
+                  </figcaption>
+                )}
               </figure>
             );
           })}
-          <span className="hero-slideshow__zoomhint" aria-hidden="true">⤢</span>
+          {!backdrop && <span className="hero-slideshow__zoomhint" aria-hidden="true">⤢</span>}
           <span className="hero-slideshow__sheen" aria-hidden="true" />
         </button>
       </div>
 
-      {/* Prev / next arrows (replaces dot indicators). */}
-      <div className="hero-slideshow__nav">
+      {/* Prev / next arrows (replaces dot indicators). Hidden in backdrop. */}
+      <div className="hero-slideshow__nav" hidden={backdrop}>
         <button
           type="button"
           className="hero-slideshow__arrow"

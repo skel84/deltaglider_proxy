@@ -490,6 +490,113 @@ hr {
   position: relative;
 }
 
+/* ============================================================
+   Split full-bleed hero: the copy column is pinned to a fixed margin
+   from the LEFT viewport edge; the dashboard slideshow occupies the
+   right portion and bleeds off the RIGHT viewport edge. Below the
+   breakpoint the screenshot is dropped entirely (text-only hero).
+   ============================================================ */
+.hero--full {
+  position: relative;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  min-height: clamp(560px, 82vh, 900px);
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* Right-side image plate: starts ~52% across the viewport and runs to
+   the right edge. The image inside covers this plate. Starting later
+   keeps the bright dashboard clear of the headline's right end. */
+.hero-plate {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 52%;
+  z-index: 0;
+  pointer-events: none; /* clicks fall through to the copy/CTAs */
+}
+/* Left fade: a strong dark veil over the plate's left third so the copy
+   column ALWAYS has contrast where text can reach (the headline extends
+   past the plate's left edge). Holds near-opaque, then clears so the
+   dashboard reads on the right. */
+.hero-plate-fade {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(90deg,
+    var(--bg) 0%,
+    rgba(11, 15, 25, 0.92) 10%,
+    rgba(11, 15, 25, 0.70) 30%,
+    rgba(11, 15, 25, 0.0) 56%);
+}
+
+/* Copy column: fixed distance from the LEFT viewport edge, capped width
+   so the text never drifts under the screenshot. */
+.hero-full-inner {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  padding-left: clamp(1.25rem, 6vw, 7rem);
+  padding-right: 1.25rem;
+}
+.hero-full-inner .hero-copy {
+  max-width: 40rem;
+  padding: 4.5rem 0;
+}
+/* On the dark hero the eyebrow needs a lighter treatment than the
+   light-bg default. */
+.hero--full .hero-eyebrow {
+  background: rgba(34, 211, 238, 0.14);
+  border-color: rgba(34, 211, 238, 0.35);
+  color: #7dd3fc;
+}
+.hero--full .hero-lede { color: rgba(226, 232, 240, 0.92); }
+.hero--full .hero-trust { color: rgba(148, 163, 184, 0.9); }
+
+/* Backdrop variant of the slideshow: chromeless, image covers the
+   plate, crossfade only. */
+.hero-slideshow--backdrop,
+.hero-slideshow--backdrop .hero-slideshow__window,
+.hero-slideshow--backdrop .hero-slideshow__stage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  animation: none;           /* kill the float bob from the framed variant */
+  cursor: default;
+}
+.hero-slideshow--backdrop .hero-slideshow__window { border: none; }
+.hero-slideshow--backdrop .hero-slideshow__stage { aspect-ratio: auto; }
+.hero-slideshow--backdrop .hero-slideshow__slide { inset: 0; }
+.hero-slideshow--backdrop .hero-slideshow__slide img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Anchor the right edge of the dashboard to the right viewport edge so
+     the WITH/WITHOUT bars and the billboard number stay in frame. */
+  object-position: left center;
+}
+/* No hover-zoom on a background. */
+.hero-slideshow--backdrop:hover .hero-slideshow__slide.is-active img {
+  transform: none;
+}
+
+/* Narrow screens: drop the screenshot entirely, text-only hero. */
+@media (max-width: 900px) {
+  .hero--full { min-height: auto; }
+  .hero-plate { display: none; }
+  .hero-full-inner .hero-copy { padding: 3rem 0; max-width: none; }
+}
+
 /* Two-column hero: punchy copy left, screenshot slideshow right. Stacks on
    narrow screens (slideshow drops below the copy). */
 .hero-grid {

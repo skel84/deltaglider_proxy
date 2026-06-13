@@ -41,8 +41,19 @@ import {
   </Fragment>
 
   {/* ============================== HERO ============================== */}
-  <section class="hero">
-    <div class="shell hero-grid hero-grid--bleed">
+  {/* Split full-bleed: copy column pinned to a fixed left margin; the
+      dashboard slideshow occupies the right half and bleeds to the right
+      viewport edge. On narrow screens the screenshot is dropped entirely
+      (text-only hero). */}
+  <section class="hero hero--full">
+    {/* Right-side image plate — bleeds to the right viewport edge.
+        Hidden below the breakpoint (CSS). */}
+    <div class="hero-plate" aria-hidden="false">
+      <HeroSlideshow client:visible variant="backdrop" />
+      <div class="hero-plate-fade" aria-hidden="true"></div>
+    </div>
+
+    <div class="hero-full-inner">
       <div class="hero-copy">
         <span class="hero-eyebrow">
           <span class="hero-eyebrow-dot"></span>
@@ -69,7 +80,7 @@ import {
 
         <div class="hero-ctas">
           <a href="/trial" class="btn btn-brand">Start free trial&nbsp;&rarr;</a>
-          <a href="/docs/tutorials/first-delta-savings" class="btn">See it in 15 minutes</a>
+          <a href="#demo-video" class="btn">90s&nbsp;Video</a>
           <a href="https://github.com/beshu-tech/deltaglider_proxy" class="btn btn-ghost">GitHub</a>
         </div>
 
@@ -79,10 +90,6 @@ import {
           2017. Our own 1.71&nbsp;TB build catalog is migrating through it
           <a href="/case-studies/readonlyrest-builds">in public, bugs and all</a>.
         </p>
-      </div>
-
-      <div class="hero-visual hero-visual--bleed">
-        <HeroSlideshow client:visible />
       </div>
     </div>
   </section>
