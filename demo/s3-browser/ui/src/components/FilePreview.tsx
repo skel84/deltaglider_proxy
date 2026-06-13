@@ -22,7 +22,8 @@ export default function FilePreview({ open, object, onClose }: FilePreviewProps)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [textContent, setTextContent] = useState('');
-  const [imageUrl, setImageUrl] = useState('');
+  // Presigned URL for any binary media rendered inline (image / video / audio).
+  const [mediaUrl, setMediaUrl] = useState('');
 
   const filename = object ? getFileName(object.key) : '';
   const mode = object ? getPreviewMode(object.key) : null;
@@ -40,7 +41,7 @@ export default function FilePreview({ open, object, onClose }: FilePreviewProps)
     setLoading(true);
     setError('');
     setTextContent('');
-    setImageUrl('');
+    setMediaUrl('');
 
     if (mode === 'text' && !tooLarge) {
       downloadObject(object.key)
@@ -57,10 +58,13 @@ export default function FilePreview({ open, object, onClose }: FilePreviewProps)
         })
         .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load file'); })
         .finally(() => { if (!cancelled) setLoading(false); });
-    } else if (mode === 'image') {
+    } else if (mode === 'image' || mode === 'video' || mode === 'audio') {
+      // Stream the bytes straight from a presigned URL — the browser's native
+      // <img>/<video>/<audio> handles range requests and decoding, so large
+      // media never has to be buffered through JS.
       getPresignedUrl(object.key)
-        .then(url => { if (!cancelled) setImageUrl(url); })
-        .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load image'); })
+        .then(url => { if (!cancelled) setMediaUrl(url); })
+        .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load media'); })
         .finally(() => { if (!cancelled) setLoading(false); });
     } else {
       setLoading(false);
@@ -90,7 +94,7 @@ export default function FilePreview({ open, object, onClose }: FilePreviewProps)
       onCancel={onClose}
       title={<Text strong style={{ fontFamily: 'var(--font-mono)', fontSize: 14 }}>{filename}</Text>}
       centered
-      width={mode === 'image' ? 720 : 900}
+      width={mode === 'image' || mode === 'video' ? 820 : mode === 'audio' ? 560 : 900}
       footer={
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -149,10 +153,10 @@ export default function FilePreview({ open, object, onClose }: FilePreviewProps)
         </pre>
       )}
 
-      {!loading && !error && imageUrl && (
+      {!loading && !error && mediaUrl && mode === 'image' && (
         <div style={{ textAlign: 'center' }}>
           <img
-            src={imageUrl}
+            src={mediaUrl}
             alt={filename}
             style={{
               maxWidth: '100%',
@@ -161,6 +165,37 @@ export default function FilePreview({ open, object, onClose }: FilePreviewProps)
               border: `1px solid ${colors.BORDER}`,
             }}
             onError={() => setError('Failed to load image')}
+          />
+        </div>
+      )}
+
+      {!loading && !error && mediaUrl && mode === 'video' && (
+        <div style={{ textAlign: 'center' }}>
+          <video
+            src={mediaUrl}
+            controls
+            autoPlay
+            playsInline
+            style={{
+              maxWidth: '100%',
+              maxHeight: 600,
+              borderRadius: 8,
+              border: `1px solid ${colors.BORDER}`,
+              background: '#000',
+            }}
+            onError={() => setError('Failed to load video — the browser may not support this codec. Use Download to play it locally.')}
+          />
+        </div>
+      )}
+
+      {!loading && !error && mediaUrl && mode === 'audio' && (
+        <div style={{ textAlign: 'center', padding: '24px 8px' }}>
+          <audio
+            src={mediaUrl}
+            controls
+            autoPlay
+            style={{ width: '100%' }}
+            onError={() => setError('Failed to load audio — the browser may not support this codec. Use Download to play it locally.')}
           />
         </div>
       )}
