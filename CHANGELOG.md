@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Inline video & audio preview in the object browser.** Double-clicking
+  (or the inspector Preview button on) an `mp4` / `webm` / `mov` / `m4v` /
+  `ogv` object now plays it in a native `<video>` player, and `mp3` / `wav`
+  / `ogg` / `m4a` / `aac` / `flac` / `opus` in an `<audio>` player —
+  streamed from a presigned URL so the proxy's range support (`206 Partial
+  Content`) handles seeking without buffering through the browser tab. A
+  codec the browser can't decode falls back to the existing Download
+  affordance. Previously these fell through to "Preview not available".
+
 ## v1.4.1 — 2026-06-12
 
 ### Removed (breaking)
