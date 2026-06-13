@@ -62,7 +62,10 @@ ENTERPRISE_STRATEGY.md
 *.png
 !docs/*.png
 !docs/screenshots/*.png
-!demo/s3-browser/ui/public/screenshots/*
+# ui/public/screenshots/ is GENERATED at build time by
+# demo/s3-browser/ui/scripts/copy-screenshots.mjs (synced from the canonical
+# docs/screenshots/). Never commit it — docs/screenshots/ is the single source.
+demo/s3-browser/ui/public/screenshots/
 .playwright-mcp/
 
 # OS

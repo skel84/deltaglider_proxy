@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "sync:screenshots": "node scripts/copy-screenshots.mjs",
+    "predev": "node scripts/copy-screenshots.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/copy-screenshots.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "lint": "eslint 'src/**/*.{ts,tsx}'",
