@@ -62,22 +62,34 @@ const groups = docsByGroup();
         <kbd class="docs-search-kbd">⌘K</kbd>
       </button>
 
-      {groups.map((g) => (
-        <div class="docs-nav-group">
-          <div class="docs-nav-group-title">{g.group.id}</div>
-          <ul>
-            {g.docs.filter((d) => d.slug !== '').map((d) => (
-              <li>
-                <a
-                  href={d.url}
-                  class={d.slug === activeSlug ? 'is-active' : undefined}
-                  aria-current={d.slug === activeSlug ? 'page' : undefined}
-                >{d.title}</a>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ))}
+      {groups.map((g) => {
+        const items = g.docs.filter((d) => d.slug !== '');
+        // Open the group that contains the current page; others start open too
+        // on first load (no stored state yet) but collapse on click. A reader
+        // never lands on a doc whose group is shut.
+        const hasActive = items.some((d) => d.slug === activeSlug);
+        return (
+          <details class="docs-nav-group" data-group={g.group.id} data-has-active={hasActive ? 'true' : undefined} open>
+            <summary class="docs-nav-group-title">
+              <span>{g.group.id}</span>
+              <svg class="docs-nav-chevron" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 6l4 4 4-4" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </summary>
+            <ul class="docs-nav-children">
+              {items.map((d) => (
+                <li>
+                  <a
+                    href={d.url}
+                    class={d.slug === activeSlug ? 'is-active' : undefined}
+                    aria-current={d.slug === activeSlug ? 'page' : undefined}
+                  >{d.title}</a>
+                </li>
+              ))}
+            </ul>
+          </details>
+        );
+      })}
 
       {/* Version signal: the public site is built from `main`, so it can be
           ahead of a tagged release a reader is running. Point them at the
@@ -163,6 +175,34 @@ const groups = docsByGroup();
         } else if (e.key === 'Escape' && !overlay.hidden) {
           close();
         }
+      });
+    })();
+  </script>
+
+  {/* Sidebar group collapse/expand persistence. Groups render open (good
+      no-JS fallback); this restores each group's last open/closed state and
+      remembers changes. The group containing the current page is always forced
+      open so a reader never lands on a doc inside a collapsed group. */}
+  <script is:inline>
+    (function () {
+      var KEY = 'dg-docs-nav-collapsed';
+      var groups = document.querySelectorAll('.docs-nav-group[data-group]');
+      if (!groups.length) return;
+
+      var collapsed = {};
+      try { collapsed = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) {}
+
+      groups.forEach(function (g) {
+        var id = g.getAttribute('data-group');
+        if (g.getAttribute('data-has-active') === 'true') {
+          g.open = true; // never hide the active page's group
+        } else if (collapsed[id]) {
+          g.open = false;
+        }
+        g.addEventListener('toggle', function () {
+          if (g.open) delete collapsed[id]; else collapsed[id] = true;
+          try { localStorage.setItem(KEY, JSON.stringify(collapsed)); } catch (e) {}
+        });
       });
     })();
   </script>
