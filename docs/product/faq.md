@@ -1,6 +1,6 @@
-# FAQ
+# Common questions
 
-*The questions that come up often, each linked to the page that answers it properly.*
+*An index, not an FAQ: each question links straight to the page that answers it properly.*
 
 ## Deployment
 
@@ -24,6 +24,7 @@
 - [Do OAuth and IAM work together?](explanation/security-model.md)
 - [Can I disable auth entirely for dev?](reference/authentication.md)
 - [What if I lose the bootstrap password?](how-to/troubleshooting.md)
+- [Can I manage IAM entirely in YAML (GitOps)?](how-to/manage-iam-as-code.md)
 
 ## Encryption
 
@@ -43,7 +44,6 @@
 
 - [What does "Full Backup" include?](how-to/back-up-and-restore.md)
 - [Is Full Backup the same as config sync (`DGP_CONFIG_SYNC_BUCKET`)?](how-to/back-up-and-restore.md)
-- [Can I manage IAM entirely in YAML (GitOps)?](how-to/manage-iam-as-code.md)
 
 ## Limits
 

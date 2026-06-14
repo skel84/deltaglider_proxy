@@ -104,7 +104,12 @@ const showToc = props.kind === 'doc' && toc.length >= 2;
 
       {groupId && <p class="docs-kicker">{groupId}</p>}
 
-      <div class="docs-prose" set:html={html} />
+      <div
+        class="docs-prose"
+        data-pagefind-body
+        data-pagefind-meta={`title:${docTitle}, group:${groupId}`}
+        set:html={html}
+      />
 
       {(prev || next) && (
         <nav class="docs-pager" aria-label="Document navigation">

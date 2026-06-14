@@ -60,7 +60,7 @@ Patch and minor upgrades inside the `0.8.x` line are drop-in. The config file fo
 
 **Across minors:** schema migrations run automatically on first start. The config DB is on schema v6 in current builds (v6 adds replication runtime-state tables); any binary `0.8.0+` migrates forward on boot. **Forward migrations are one-way** — once the DB is upgraded, an older binary may not read it.
 
-**Across majors (future 0.x → 1.0):** pre-release — expect breaking changes. Always follow the release notes for that version, and always export a Full Backup before trying it.
+**Across majors (future 0.x → 1.0):** pre-release — expect breaking changes. Always follow the [release notes for that version](https://github.com/beshu-tech/deltaglider_proxy/releases), and always export a Full Backup before trying it.
 
 ## TOML → YAML migration (mandatory before v1.4.1)
 

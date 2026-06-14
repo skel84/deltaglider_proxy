@@ -11,11 +11,11 @@
     },
     {
       "id": "Guides: storage & data",
-      "tagline": "Routing, migration, compression, replication, lifecycle, encryption."
+      "tagline": "How to route, migrate, compress, replicate, expire, and encrypt your data."
     },
     {
       "id": "Guides: access & security",
-      "tagline": "IAM, SSO, admission rules, public folders."
+      "tagline": "How to create IAM users, set up SSO, gate requests, and publish public folders."
     },
     {
       "id": "Reference",
@@ -181,6 +181,11 @@
       "path": "reference/configuration",
       "group": "Reference",
       "order": 0
+    },
+    {
+      "path": "reference/s3-api-compatibility",
+      "group": "Reference",
+      "order": 5
     },
     {
       "path": "reference/cli",

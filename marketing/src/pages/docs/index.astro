@@ -24,11 +24,36 @@ const GROUP_GLYPHS: Record<string, any> = {
   activeSlug=""
 >
   <header class="docs-landing-head">
-    <h1>Documentation</h1>
-    <p>
-      Everything you need to run DeltaGlider Proxy — the same docs bundled into
-      the product, served here for easy linking.
+    <h1>DeltaGlider Proxy documentation</h1>
+    <p class="docs-landing-lede">
+      DeltaGlider is a transparent proxy that sits between your applications and
+      S3-compatible storage, compressing versioned binary artifacts with delta
+      encoding to cut storage costs — without changing your client code. It
+      speaks the S3 API, so your existing tools, SDKs, and workflows keep
+      working unchanged. Open source (GPL-3.0).
     </p>
+    <p class="docs-landing-sub">
+      These are the same docs bundled into the product, served here for easy
+      linking. New here? Start below, or press <kbd>⌘K</kbd> to search.
+    </p>
+
+    <div class="docs-landing-start">
+      <a class="docs-start-card" href="/docs/tutorials/first-delta-savings">
+        <span class="docs-start-eyebrow">Start here</span>
+        <span class="docs-start-title">See your first delta savings →</span>
+        <span class="docs-start-note">A guided tutorial from zero to a working proxy with measurable compression.</span>
+      </a>
+      <a class="docs-start-card" href="/docs/explanation/delta-compression">
+        <span class="docs-start-eyebrow">Understand it</span>
+        <span class="docs-start-title">How delta compression works →</span>
+        <span class="docs-start-note">The concept behind the savings — what compresses, what doesn't, and why.</span>
+      </a>
+      <a class="docs-start-card" href="/docs/reference/configuration">
+        <span class="docs-start-eyebrow">Reference</span>
+        <span class="docs-start-title">Configuration reference →</span>
+        <span class="docs-start-note">Every config field, with types, defaults, and hot-reload behavior.</span>
+      </a>
+    </div>
   </header>
 
   {groups.map((g) => (

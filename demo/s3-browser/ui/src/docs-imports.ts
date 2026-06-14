@@ -45,6 +45,7 @@ import HT_MANAGE_IAM_AS_CODE from '../../../../docs/product/how-to/manage-iam-as
 import HT_GATE_REQUESTS_WITH_ADMISSION_RULES from '../../../../docs/product/how-to/gate-requests-with-admission-rules.md?raw';
 import HT_PUBLISH_A_PUBLIC_FOLDER from '../../../../docs/product/how-to/publish-a-public-folder.md?raw';
 import REF_CONFIGURATION from '../../../../docs/product/reference/configuration.md?raw';
+import REF_S3_API_COMPATIBILITY from '../../../../docs/product/reference/s3-api-compatibility.md?raw';
 import REF_ADMIN_API from '../../../../docs/product/reference/admin-api.md?raw';
 import REF_AUTHENTICATION from '../../../../docs/product/reference/authentication.md?raw';
 import REF_IAM_PERMISSIONS from '../../../../docs/product/reference/iam-permissions.md?raw';
@@ -110,6 +111,7 @@ const CONTENT_BY_PATH: Record<string, string> = {
   'how-to/gate-requests-with-admission-rules': HT_GATE_REQUESTS_WITH_ADMISSION_RULES,
   'how-to/publish-a-public-folder': HT_PUBLISH_A_PUBLIC_FOLDER,
   'reference/configuration': REF_CONFIGURATION,
+  'reference/s3-api-compatibility': REF_S3_API_COMPATIBILITY,
   'reference/admin-api': REF_ADMIN_API,
   'reference/authentication': REF_AUTHENTICATION,
   'reference/iam-permissions': REF_IAM_PERMISSIONS,
