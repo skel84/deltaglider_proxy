@@ -24,7 +24,24 @@
   --doc-rule: var(--rule);
   --doc-callout-bg: rgba(34, 211, 238, 0.06);
   --doc-measure: 70ch;
-  --doc-code-bg: #070a12;
+
+  /* Code panel: lighter than the page (--bg #0b0f19) so the "this is a
+     copyable command" surface reads as a distinct panel, not a void. Was
+     #070a12 (DARKER than the page → ~1.03:1, invisible boundary). */
+  --doc-code-bg: #11192b;
+  --doc-code-border: #2a3344;
+
+  /* A softer, desaturated blue used as an ACCENT on small eyebrow text —
+     replaces raw brand cyan (#22d3ee), which vibrates on near-black at small
+     sizes. Syntax-token colours (shiki) are untouched; this is chrome only. */
+  --doc-accent-blue: #7dd3fc;
+
+  /* In-prose link colour. Deliberately a CORNFLOWER BLUE, not cyan/teal — the
+     inline-code chips are cyan (--brand-dark #67e8f9), so links get a clearly
+     different hue (blue, not green-blue) to stay unconfusable while still
+     reading as "this is a link" via colour, not just the underline. */
+  --doc-link: #8ab4ff;
+  --doc-link-hover: #b3ccff;
 }
 
 /* ── Layout shell ──────────────────────────────────────────────────────── */
@@ -102,10 +119,10 @@
   gap: 8px;
   padding: 8px 8px;
   font-family: var(--doc-label);
-  font-size: 0.72rem;
+  font-size: 0.8125rem; /* 13px — was 0.72rem */
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   color: var(--ink-strong);
   cursor: pointer;
   border-radius: 8px;
@@ -161,7 +178,7 @@
   gap: 16px;
   margin-bottom: 20px;
   font-family: var(--doc-label);
-  font-size: 0.74rem;
+  font-size: 0.8125rem; /* 13px — was 0.74rem */
   line-height: 1.4;
 }
 .docs-breadcrumb ol {
@@ -170,12 +187,13 @@
 }
 .docs-breadcrumb li { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
 .docs-breadcrumb a { color: var(--ink-soft); text-decoration: none; transition: color 0.12s; }
-.docs-breadcrumb a:hover { color: var(--brand-dark); }
+.docs-breadcrumb a:hover { color: var(--ink-strong); text-decoration: underline; text-underline-offset: 0.2em; }
 .docs-breadcrumb span[aria-current='page'] {
   color: var(--ink-strong);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch;
 }
-.docs-crumb-sep { color: var(--brand); opacity: 0.6; }
+/* Neutral slate separator — was brand cyan, which over-signals on a divider. */
+.docs-crumb-sep { color: var(--ink-500); opacity: 0.7; }
 .docs-edit-link {
   display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
   color: var(--ink-soft); text-decoration: none;
@@ -187,11 +205,11 @@
 
 .docs-kicker {
   font-family: var(--doc-label);
-  font-size: 0.72rem;
+  font-size: 0.8125rem; /* 13px — was 0.72rem (~11.5px) */
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--brand);
+  letter-spacing: 0.08em;
+  color: var(--doc-accent-blue); /* softer accent, not raw brand cyan */
   margin: 0 0 6px;
 }
 .docs-kicker + .docs-prose > h1:first-child { margin-top: 0; }
@@ -207,6 +225,9 @@
 }
 .docs-prose > :first-child { margin-top: 0; }
 .docs-prose p, .docs-prose ul, .docs-prose ol { max-width: var(--doc-measure); }
+/* Reading-level prose: 17px / 1.65 in rem so browser zoom + user font-size
+   prefs apply. Nothing a reader is meant to read sits below ~15px. */
+.docs-prose p, .docs-prose li { font-size: 1.0625rem; line-height: 1.65; }
 .docs-prose p { margin: 0 0 18px; color: var(--ink-700); }
 
 /* Headings (display face) */
@@ -248,14 +269,19 @@
   margin-left: 0.4em; opacity: 0.7;
 }
 
-/* Links */
+/* Links — cornflower blue + underline. The colour accent (not just the
+   underline) marks a link, and the blue hue stays clearly distinct from the
+   cyan inline-code chips so the two never read as the same thing. */
 .docs-prose a {
-  color: var(--ink-strong);
+  color: var(--doc-link);
   text-decoration: underline; text-decoration-thickness: 1px;
-  text-underline-offset: 0.2em; text-decoration-color: var(--rule-strong);
+  text-underline-offset: 0.2em; text-decoration-color: rgba(138, 180, 255, 0.45);
   transition: color 0.14s ease, text-decoration-color 0.14s ease;
 }
-.docs-prose a:hover { color: var(--brand-dark); text-decoration-color: var(--brand); }
+.docs-prose a:hover { color: var(--doc-link-hover); text-decoration-color: var(--doc-link-hover); }
+/* An inline-code chip that is ITSELF a link keeps the cyan chip but signals the
+   link with an underline, so a linked command still reads as clickable. */
+.docs-prose a > code, .docs-prose a code { text-decoration: underline; text-decoration-color: rgba(138, 180, 255, 0.6); }
 
 /* Lists — squared cyan tick + zero-padded ordered counters */
 .docs-prose ul { list-style: none; padding-left: 1.4em; margin: 0 0 18px; }
@@ -302,16 +328,18 @@
    button room) but NEVER set a colour on shiki spans. */
 .docs-prose pre {
   font-family: var(--font-mono);
-  background: var(--doc-code-bg);
+  background: var(--doc-code-bg); /* lighter than the page → visible panel */
   color: var(--ink-700);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--doc-code-border);
   border-radius: 10px;
   padding: 18px 20px;
   margin: 0 0 20px;
   overflow-x: auto;
-  font-size: 0.86rem;
+  font-size: 0.875rem; /* 14px */
   line-height: 1.6;
-  box-shadow: var(--shadow-md);
+  /* drop shadow for lift + a subtle inset top highlight so the panel reads as
+     a raised "copyable command" surface, not a hole in the page. */
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.04);
   position: relative;
 }
 /* thin cyan signal rail down the left edge of every code block */
@@ -429,8 +457,8 @@
 /* TOC eyebrow: the dim chrome label. --ink-500 (#94a3b8 ≈ 5.9:1 on the bg)
    passes WCAG AA for small text, where --ink-mute (#475569 ≈ 2.7:1) failed. */
 .docs-toc-eyebrow {
-  font-family: var(--doc-label); font-size: 0.7rem; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-500);
+  font-family: var(--doc-label); font-size: 0.8125rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-500);
   margin: 0 0 12px;
 }
 .docs-toc nav ul { list-style: none; margin: 0; padding: 0; }
@@ -455,7 +483,7 @@
 .docs-copy-btn {
   position: absolute; top: 8px; right: 8px;
   display: inline-flex; align-items: center;
-  font-family: var(--doc-label); font-size: 0.68rem; font-weight: 600; letter-spacing: 0.02em;
+  font-family: var(--doc-label); font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.02em;
   color: var(--ink-soft); background: var(--doc-code-bg);
   border: 1px solid var(--rule-strong); border-radius: 6px; padding: 4px 9px;
   cursor: pointer; opacity: 0; transform: translateY(-2px);
@@ -482,8 +510,8 @@
 .docs-pager-card:hover { border-color: var(--brand); transform: translateY(-2px); }
 .docs-pager-next { text-align: right; }
 .docs-pager-eyebrow {
-  font-family: var(--doc-label); font-size: 0.7rem; font-weight: 600;
-  letter-spacing: 0.04em; color: var(--brand);
+  font-family: var(--doc-label); font-size: 0.8125rem; font-weight: 600;
+  letter-spacing: 0.04em; color: var(--ink-500);
 }
 .docs-pager-title {
   font-size: 0.98rem; font-weight: 600; color: var(--ink-strong);
@@ -621,7 +649,7 @@
 .docs-search-kbd {
   flex: none;
   font-family: var(--doc-label);
-  font-size: 0.68rem;
+  font-size: 0.75rem; /* 12px — true micro-label */
   color: var(--ink-500);
   background: var(--bg);
   border: 1px solid var(--rule);
@@ -714,11 +742,11 @@
   padding-top: 16px;
   border-top: 1px solid var(--rule);
   font-family: var(--doc-label);
-  font-size: 0.72rem;
+  font-size: 0.8125rem; /* 13px — was 0.72rem */
   color: var(--ink-500);
 }
 .docs-version-badge code {
-  font-size: 0.72rem; color: var(--ink-strong);
+  font-size: 0.8125rem; color: var(--ink-strong);
   background: var(--bg-soft); border-radius: 4px; padding: 0 4px;
 }
 .docs-version-badge a { color: var(--brand); text-decoration: none; }

@@ -38,7 +38,7 @@ const groups = docsByGroup();
   </Fragment>
 
   <div class={`docs-shell${hasToc ? ' has-toc' : ''}`}>
-    <aside class="docs-sidebar" aria-label="Documentation" data-pagefind-ignore>
+    <aside class="docs-sidebar" aria-label="Documentation" data-pagefind-ignore role="complementary">
       <a href="/docs" class={`docs-nav-home${activeSlug === '' ? ' is-active' : ''}`}>
         Documentation
       </a>
@@ -62,6 +62,7 @@ const groups = docsByGroup();
         <kbd class="docs-search-kbd">⌘K</kbd>
       </button>
 
+      <nav class="docs-nav-groups" aria-label="Documentation sections">
       {groups.map((g) => {
         const items = g.docs.filter((d) => d.slug !== '');
         // Open the group that contains the current page; others start open too
@@ -90,6 +91,7 @@ const groups = docsByGroup();
           </details>
         );
       })}
+      </nav>
 
       {/* Version signal: the public site is built from `main`, so it can be
           ahead of a tagged release a reader is running. Point them at the

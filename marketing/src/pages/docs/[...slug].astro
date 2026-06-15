@@ -140,9 +140,9 @@ const showToc = props.kind === 'doc' && toc.length >= 2;
   )}
 
   {showToc && (
-    <aside class="docs-toc" slot="toc" aria-label="On this page">
-      <p class="docs-toc-eyebrow">On this page</p>
-      <nav>
+    <aside class="docs-toc" slot="toc">
+      <p class="docs-toc-eyebrow" id="docs-toc-label">On this page</p>
+      <nav aria-labelledby="docs-toc-label">
         <ul>
           {toc.map((h) => (
             <li class={h.depth === 3 ? 'docs-toc-sub' : undefined}>
@@ -197,12 +197,17 @@ const showToc = props.kind === 'doc' && toc.length >= 2;
     // ── Copy-to-clipboard on every code block ─────────────────────────────
     // Skip mermaid (it's a diagram, not copyable source).
     const blocks = document.querySelectorAll<HTMLElement>('.docs-prose pre:not(.mermaid)');
-    blocks.forEach((pre) => {
+    blocks.forEach((pre, i) => {
       pre.classList.add('has-copy');
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'docs-copy-btn';
-      btn.setAttribute('aria-label', 'Copy code to clipboard');
+      // Unique, descriptive accessible name so screen-reader users aren't faced
+      // with a page full of identical "Copy" buttons. Prefer the code block's
+      // language (from shiki's data-lang); fall back to a 1-based index.
+      const lang = pre.closest('.shiki-wrap')?.getAttribute('data-lang');
+      const which = lang && lang !== 'text' ? `${lang} code` : `code block ${i + 1}`;
+      btn.setAttribute('aria-label', `Copy ${which} to clipboard`);
       btn.innerHTML = '<span class="docs-copy-label">Copy</span>';
       const label = () => btn.querySelector('.docs-copy-label') as HTMLElement;
       let resetTimer = 0;
