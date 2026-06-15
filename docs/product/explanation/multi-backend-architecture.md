@@ -8,20 +8,7 @@ A common first question is "does this replace S3 or proxy to it?" Proxy. DeltaGl
 
 Your client speaks the standard S3 API to the proxy; the proxy authenticates the request, decides whether the object is delta-eligible, runs xdelta3 if so, and reads or writes the actual bytes on whichever backend that bucket is routed to.
 
-```text
-                       ┌─────────────────────────────────────────┐
-   S3 client           │            DeltaGlider Proxy            │        Backend
- (aws-cli, boto3,      │                                         │   (AWS S3, Hetzner,
-  Terraform, rclone)   │   Auth + admission  (IAM / SigV4)       │   Backblaze, filesystem)
-        │              │            │                            │           ▲
-        │  S3 API      │            ▼                            │           │
-        │  (SigV4)     │   Router   (bucket → backend)           │  baselines │
-        └─────────────▶│            │                            │  + deltas  │
-                       │            ▼                            │           │
-                       │   xdelta3 codec                         │───────────┘
-                       │   (encode on PUT, reconstruct on GET)   │
-                       └─────────────────────────────────────────┘
-```
+![The data path: an S3 client speaks the S3 API (SigV4) to the DeltaGlider Proxy, which runs auth and admission, routes the bucket to a backend, and runs the xdelta3 codec (encode on PUT, reconstruct on GET) before reading and writing baselines and deltas on the backend — AWS S3, Hetzner, Backblaze, or a local filesystem.](/_/screenshots/data-path-architecture.jpg)
 
 The control plane (IAM, routing table, per-object metadata, jobs) lives in the proxy; the data plane (your bytes) lives on the backends. Everything below follows from that split. For the encode/reconstruct mechanics see [how delta compression works](delta-compression.md); for the CPU/RAM cost of a proxy that actively rewrites payloads, see [capacity planning](../reference/capacity-planning.md).
 
