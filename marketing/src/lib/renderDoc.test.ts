@@ -1,0 +1,35 @@
+// renderDoc.test.ts — VERSION_HEADING_RE parses changelog version headings.
+// The same shape is matched on both render surfaces; this pins the contract
+// against the real CHANGELOG corpus + future edge cases so a format tweak
+// can't silently break the changelog page's hover-date / ToC logic.
+
+import { describe, it, expect } from 'vitest';
+import { VERSION_HEADING_RE } from './renderDoc';
+
+const parse = (h: string) => {
+  const m = h.match(VERSION_HEADING_RE);
+  return m ? { version: m[1], date: m[2], title: m[3] } : null;
+};
+
+describe('VERSION_HEADING_RE', () => {
+  it('parses every real changelog heading shape', () => {
+    expect(parse('v0.1.9')).toEqual({ version: 'v0.1.9', date: undefined, title: undefined });
+    expect(parse('v0.11.0 — 2026-05-16')).toEqual({ version: 'v0.11.0', date: '2026-05-16', title: undefined });
+    expect(parse('v1.0.0 — 2026-05-22 — Project-shape milestone'))
+      .toEqual({ version: 'v1.0.0', date: '2026-05-22', title: 'Project-shape milestone' });
+  });
+
+  it('handles future edge cases (prerelease, hyphen sep, multi-digit)', () => {
+    expect(parse('v2.0.0-rc.1 — 2027-01-01')?.version).toBe('v2.0.0-rc.1');
+    expect(parse('v1.5.0-beta — 2026-09-09 — Beta cut')).toEqual({ version: 'v1.5.0-beta', date: '2026-09-09', title: 'Beta cut' });
+    expect(parse('v1.4.4 - 2026-07-01')?.date).toBe('2026-07-01'); // hyphen separator
+    expect(parse('v10.20.30 — 2030-12-31')?.version).toBe('v10.20.30');
+  });
+
+  it('skips ordinary headings — even ones with a dash', () => {
+    for (const neg of ['Added', 'Fixed', 'Fixed — CI', 'Removed (breaking)', 'version 1.2.3',
+                       'Changed (breaking) — IAM permission templates are now `${iam:...}`']) {
+      expect(parse(neg)).toBeNull();
+    }
+  });
+});

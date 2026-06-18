@@ -814,6 +814,11 @@
   align-items: baseline;
   gap: 0.6em;
 }
+.docs-prose h2.cl-version .cl-title {
+  font-weight: 500;
+  color: inherit;
+  opacity: 0.85;
+}
 .docs-prose h2.cl-version .cl-date {
   font-family: var(--doc-label);
   font-size: 0.5em;

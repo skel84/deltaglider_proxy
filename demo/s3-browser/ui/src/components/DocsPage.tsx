@@ -145,16 +145,24 @@ interface TocItem {
 }
 
 /**
- * Split a changelog version heading ("v1.4.3 — 2026-06-18") into its
- * version and date parts. Returns null for any non-version heading so the
- * caller renders it untouched. Accepts an em-dash or a hyphen separator
- * and tolerates ReactMarkdown passing children as a string or an array.
+ * A changelog version heading: `v<X.Y.Z[suffix]>` then an optional
+ * ` — <YYYY-MM-DD>` date then an optional ` — <title>`. Capture groups:
+ * [1] version, [2] date, [3] title. Matches all three real shapes
+ * (version only / version+date / version+date+title) and skips ordinary
+ * headings — even "Fixed — CI" (no `v` prefix). Mirrors VERSION_HEADING_RE
+ * in marketing/src/lib/renderDoc.ts; verified against the full CHANGELOG corpus.
  */
-function splitVersionHeading(children: React.ReactNode): { version: string; date: string } | null {
-  const text = nodeToText(children).trim();
-  const m = text.match(/^(v\d+\.\d+\.\d+\S*)\s*[—-]\s*(.+)$/);
+const VERSION_HEADING_RE = /^(v\d+\.\d+\.\d+\S*)(?:\s*[—-]\s*(\d{4}-\d{2}-\d{2}))?(?:\s*[—-]\s*(.+))?$/;
+
+/**
+ * Split a changelog version heading into version / hover-date / title.
+ * Returns null for any non-version heading so the caller renders it
+ * untouched. Tolerates ReactMarkdown passing children as a string or array.
+ */
+function splitVersionHeading(children: React.ReactNode): { version: string; date?: string; title?: string } | null {
+  const m = nodeToText(children).trim().match(VERSION_HEADING_RE);
   if (!m) return null;
-  return { version: m[1], date: m[2].trim() };
+  return { version: m[1], date: m[2], title: m[3] };
 }
 
 /** Flatten ReactMarkdown heading children to plain text. */
@@ -175,8 +183,9 @@ function extractHeadings(markdown: string): TocItem[] {
       // only the DISPLAYED label drops the date for changelog versions, so
       // the ToC reads "v1.4.3" instead of "v1.4.3 — 2026-06-18".
       const id = raw.toLowerCase().replace(/[^\w]+/g, '-').replace(/(^-|-$)/g, '');
-      const ver = raw.match(/^(v\d+\.\d+\.\d+\S*)\s*[—-]\s*.+$/);
-      const text = ver ? ver[1] : raw;
+      // ToC shows version + title (no date) for changelog version headings.
+      const v = raw.match(VERSION_HEADING_RE);
+      const text = v ? [v[1], v[3]].filter(Boolean).join(' — ') : raw;
       items.push({ id, text, level: m[1].length });
     }
   }
@@ -388,7 +397,8 @@ export default function DocsPage({ docId, onBack, accountMenu, onShowShortcuts }
                         return (
                           <h2 {...props} className="cl-version">
                             <span className="cl-ver">{split.version}</span>
-                            <span className="cl-date">{split.date}</span>
+                            {split.title && <span className="cl-title">{split.title}</span>}
+                            {split.date && <span className="cl-date">{split.date}</span>}
                           </h2>
                         );
                       },

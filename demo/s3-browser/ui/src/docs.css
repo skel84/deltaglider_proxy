@@ -279,6 +279,11 @@
   align-items: baseline;
   gap: 12px;
 }
+.docs-content h2.cl-version .cl-title {
+  font-weight: 500;
+  color: inherit;
+  opacity: 0.85;
+}
 .docs-content h2.cl-version .cl-date {
   font-size: 13px;
   font-weight: 500;

@@ -38,6 +38,16 @@ function textOf(node: any): string {
 }
 
 /**
+ * A changelog version heading: `v<X.Y.Z[suffix]>` then an optional
+ * ` — <YYYY-MM-DD>` date then an optional ` — <title>`. Capture groups:
+ * [1] version, [2] date, [3] title. Matches all three real shapes
+ * (version only / version+date / version+date+title) and skips ordinary
+ * headings — even "Fixed — CI" (no `v` prefix). Verified against the full
+ * CHANGELOG.md corpus.
+ */
+export const VERSION_HEADING_RE = /^(v\d+\.\d+\.\d+\S*)(?:\s*[—-]\s*(\d{4}-\d{2}-\d{2}))?(?:\s*[—-]\s*(.+))?$/;
+
+/**
  * rehype plugin: rewrite links/images/headings/mermaid for one doc.
  * `fromPath` is the docs/product path of the doc being rendered, needed to
  * resolve relative `../` inter-doc links correctly.
@@ -67,12 +77,14 @@ function rehypeDocRewrites(fromPath: string) {
       // the heading-id logic below, which still slugifies the full text
       // (textOf) so anchors stay stable. Non-version headings untouched.
       if (node.tagName === 'h2') {
-        const m = textOf(node).trim().match(/^(v\d+\.\d+\.\d+\S*)\s*[—-]\s*(.+)$/);
+        const m = textOf(node).trim().match(VERSION_HEADING_RE);
         if (m) {
+          const [, ver, date, title] = m;
           node.properties = { ...node.properties, className: ['cl-version'] };
           node.children = [
-            { type: 'element', tagName: 'span', properties: { className: ['cl-ver'] }, children: [{ type: 'text', value: m[1] }] },
-            { type: 'element', tagName: 'span', properties: { className: ['cl-date'] }, children: [{ type: 'text', value: m[2].trim() }] },
+            { type: 'element', tagName: 'span', properties: { className: ['cl-ver'] }, children: [{ type: 'text', value: ver }] },
+            ...(title ? [{ type: 'element', tagName: 'span', properties: { className: ['cl-title'] }, children: [{ type: 'text', value: title }] }] : []),
+            ...(date ? [{ type: 'element', tagName: 'span', properties: { className: ['cl-date'] }, children: [{ type: 'text', value: date }] }] : []),
           ];
         }
       }
@@ -177,17 +189,28 @@ export function extractToc(html: string): TocEntry[] {
     // Drop the appended heading-anchor (<a class="docs-heading-anchor">#</a>)
     // before reading the label, or every TOC entry would end in a stray "#".
     const inner = m[3].replace(/<a\b[^>]*class=["'][^"']*docs-heading-anchor[^"']*["'][^>]*>[\s\S]*?<\/a>/i, '');
-    // Changelog version heading: the date lives in a `.cl-date` span that's
-    // hover-only on the page; in the TOC, show just the version (the
-    // `.cl-ver` span) instead of "v1.4.32026-06-18".
-    const verMatch = /class=["'][^"']*\bcl-ver\b[^"']*["'][^>]*>([\s\S]*?)<\/span>/i.exec(inner);
-    const isVersionHeading = /\bcl-version\b/.test(m[2]);
-    const text = isVersionHeading && verMatch
-      ? stripTags(verMatch[1]).trim()
-      : stripTags(inner).trim();
+    // Changelog version headings render version/date/title as separate spans;
+    // the date span is hover-only on the page and unwanted in the ToC. Read
+    // the version (+ title) spans directly — stripping all tags would mash
+    // the adjacent spans into "v1.4.32026-06-18". `clVerTitle` returns null
+    // for ordinary headings, so they fall through to plain stripTags.
+    const text = clVerTitle(inner) ?? stripTags(inner).trim();
     if (text) out.push({ depth, id: idMatch[1], text });
   }
   return out;
+}
+
+/** ToC label for a changelog version heading: the `.cl-ver` (+ `.cl-title`)
+ *  span text, never the hover-only `.cl-date`. Returns null when the heading
+ *  has no `.cl-ver` span (ordinary headings), so callers fall back to plain
+ *  text. Reading the spans avoids re-parsing the version out of mashed text. */
+function clVerTitle(headingInner: string): string | null {
+  const span = (cls: string) =>
+    new RegExp(`<span[^>]*class=["'][^"']*\\b${cls}\\b[^"']*["'][^>]*>([\\s\\S]*?)</span>`, 'i').exec(headingInner);
+  const ver = span('cl-ver');
+  if (!ver) return null;
+  const title = span('cl-title');
+  return [stripTags(ver[1]).trim(), title && stripTags(title[1]).trim()].filter(Boolean).join(' — ');
 }
 
 /** Strip inline tags + decode the entities that appear in heading text,
