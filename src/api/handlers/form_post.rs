@@ -657,6 +657,38 @@ fn form_post_replay_ttl(
 /// slot for more than 24 h regardless of the policy's claimed expiry.
 const MAX_FORM_POST_REPLAY_TTL_SECS: u64 = 24 * 60 * 60;
 
+/// A live entry in the form-POST replay cache.
+///
+/// `expiry` is the policy's expiration `Instant` (capped at 24 h);
+/// `fingerprint` identifies the (resolved key, body) that this signature
+/// first wrote. Re-sending the SAME signed request reproduces the same
+/// fingerprint — that's an idempotent retry and is allowed. Reusing the
+/// captured signature to write a DIFFERENT key or body yields a different
+/// fingerprint and is blocked as a replay (form-POST `key` is
+/// `starts-with ""`, so one signature would otherwise authorise writing
+/// to ANY key).
+#[derive(Clone, Copy, Debug)]
+pub struct ReplayEntry {
+    pub expiry: std::time::Instant,
+    pub fingerprint: u64,
+}
+
+/// Stable fingerprint of the (resolved key, body) a form-POST writes.
+/// Sha256 over `key`, a domain separator, and the body, folded to a
+/// `u64` — collision-resistant enough to tell "same object re-sent" from
+/// "signature reused for different content" without storing the full
+/// body. Pure.
+fn form_post_fingerprint(resolved_key: &str, body: &[u8]) -> u64 {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update((resolved_key.len() as u64).to_le_bytes());
+    hasher.update(resolved_key.as_bytes());
+    hasher.update([0u8]); // domain separator between key and body
+    hasher.update(body);
+    let digest = hasher.finalize();
+    u64::from_le_bytes(digest[..8].try_into().expect("sha256 >= 8 bytes"))
+}
+
 /// Cap on the replay-cache total entries. A flood of unique-signature
 /// form-POSTs (an attacker minting fresh policies) must not be able
 /// to OOM the proxy.
@@ -677,6 +709,9 @@ fn form_post_replay_evict_keys(
     entries: &[(String, std::time::Instant)],
     evict_count: usize,
 ) -> Vec<String> {
+    // Operates on (signature, expiry) pairs — the caller projects each
+    // `ReplayEntry` down to its `expiry` before calling, so the eviction
+    // policy stays purely a function of remaining TTL.
     if evict_count == 0 || entries.is_empty() {
         return Vec::new();
     }
@@ -704,7 +739,7 @@ fn enforce_form_post_replay(state: &Arc<AppState>, parsed: &ParsedFormPost) -> R
     // `FORM_POST_REPLAY_EVICT_FRACTION`% of the cap in one sweep to
     // create real headroom. Cheaper than a background sweeper task and
     // bounded by `MAX_FORM_POST_REPLAY_ENTRIES`.
-    cache.retain(|_, exp_instant| *exp_instant > now_instant);
+    cache.retain(|_, entry| entry.expiry > now_instant);
     if cache.len() > MAX_FORM_POST_REPLAY_ENTRIES {
         let evict_count = (MAX_FORM_POST_REPLAY_ENTRIES / FORM_POST_REPLAY_EVICT_FRACTION).max(1);
         // DashMap has no batch `pop`; snapshot (key, expiry) pairs,
@@ -712,7 +747,7 @@ fn enforce_form_post_replay(state: &Arc<AppState>, parsed: &ParsedFormPost) -> R
         // remove them.
         let snapshot: Vec<(String, std::time::Instant)> = cache
             .iter()
-            .map(|e| (e.key().clone(), *e.value()))
+            .map(|e| (e.key().clone(), e.value().expiry))
             .collect();
         let evicted = form_post_replay_evict_keys(&snapshot, evict_count);
         for k in &evicted {
@@ -738,19 +773,9 @@ fn enforce_form_post_replay(state: &Arc<AppState>, parsed: &ParsedFormPost) -> R
     let key = sig.to_ascii_lowercase();
     let ttl = form_post_replay_ttl(policy_b64, now);
     let new_expiry = now_instant + ttl;
-    let mut rejected = false;
-    cache
-        .entry(key.clone())
-        .and_modify(|existing| {
-            if *existing > now_instant {
-                rejected = true;
-            } else {
-                *existing = new_expiry;
-            }
-        })
-        .or_insert(new_expiry);
+    let fingerprint = form_post_fingerprint(&parsed.resolved_key, &parsed.file_data);
 
-    if rejected {
+    if !form_post_replay_check(cache, &key, fingerprint, new_expiry, now_instant) {
         tracing::warn!(
             "SECURITY | event=form_post_replay_blocked | sig_prefix={}",
             &key[..key.len().min(8)]
@@ -758,6 +783,44 @@ fn enforce_form_post_replay(state: &Arc<AppState>, parsed: &ParsedFormPost) -> R
         return Err(S3Error::SignatureDoesNotMatch);
     }
     Ok(())
+}
+
+/// Decide whether a form-POST may proceed, given its signature `key`, the
+/// `(key, body)` `fingerprint`, the entry's `new_expiry`, and `now`.
+/// Mutates the cache to record the accepted attempt. Returns `true` to
+/// allow, `false` to block as a replay. Factored out of
+/// [`enforce_form_post_replay`] so the three-way decision is unit-testable
+/// against a bare `DashMap` without an `AppState`. The decision:
+///
+/// No live entry → first use: insert and allow. Live entry with the SAME
+/// fingerprint → idempotent re-send of the same object (a CI retry or
+/// workflow re-run): refresh the expiry and allow, since the store is an
+/// overwrite with identical bytes. Live entry with a DIFFERENT fingerprint
+/// → the captured signature is being reused to write a different key/body:
+/// block it.
+fn form_post_replay_check(
+    cache: &dashmap::DashMap<String, ReplayEntry>,
+    key: &str,
+    fingerprint: u64,
+    new_expiry: std::time::Instant,
+    now_instant: std::time::Instant,
+) -> bool {
+    let mut rejected = false;
+    cache
+        .entry(key.to_string())
+        .and_modify(|existing| {
+            if existing.expiry > now_instant && existing.fingerprint != fingerprint {
+                rejected = true;
+            } else {
+                existing.expiry = new_expiry;
+                existing.fingerprint = fingerprint;
+            }
+        })
+        .or_insert(ReplayEntry {
+            expiry: new_expiry,
+            fingerprint,
+        });
+    !rejected
 }
 
 /// Run the full presigned-form-POST pipeline.
@@ -1004,18 +1067,85 @@ mod tests {
     /// is covered by integration tests.
     #[test]
     fn form_post_replay_cache_marks_signature_as_seen() {
-        let cache: std::sync::Arc<dashmap::DashMap<String, std::time::Instant>> =
+        let cache: std::sync::Arc<dashmap::DashMap<String, ReplayEntry>> =
             std::sync::Arc::new(dashmap::DashMap::new());
         let key = "deadbeef".to_string();
         let now = std::time::Instant::now();
         // Insert with 10-min TTL.
-        cache.insert(key.clone(), now + std::time::Duration::from_secs(600));
+        cache.insert(
+            key.clone(),
+            ReplayEntry {
+                expiry: now + std::time::Duration::from_secs(600),
+                fingerprint: 1,
+            },
+        );
         // Replay attempt: the slot is live → reject path is taken.
         let live = cache
             .get(&key)
-            .map(|v| *v > std::time::Instant::now())
+            .map(|v| v.expiry > std::time::Instant::now())
             .unwrap_or(false);
         assert!(live, "cache must report the signature as still live");
+    }
+
+    /// The fix's core invariant: a live signature re-sent for the SAME
+    /// (key, body) is ALLOWED (idempotent CI retry), while the same
+    /// signature reused for a DIFFERENT object is BLOCKED.
+    #[test]
+    fn form_post_replay_idempotent_resend_allowed_but_swap_blocked() {
+        use std::time::{Duration, Instant};
+        let cache: dashmap::DashMap<String, ReplayEntry> = dashmap::DashMap::new();
+        let sig = "deadbeefcafef00d";
+        let now = Instant::now();
+        let exp = now + Duration::from_secs(3600);
+        let fp_a = form_post_fingerprint("ror/builds/1.70.2/universal/x.sha1", b"hash-a\n");
+
+        // First use of the signature: allowed.
+        assert!(
+            form_post_replay_check(&cache, sig, fp_a, exp, now),
+            "first use of a fresh signature must be allowed"
+        );
+        // Same signature, SAME object (identical key+body) — the CI
+        // retry / workflow re-run case. MUST be allowed now (regression
+        // fix; previously 403'd).
+        assert!(
+            form_post_replay_check(&cache, sig, fp_a, exp, now),
+            "idempotent re-send of the same object must be allowed"
+        );
+        // Same live signature, DIFFERENT object — a captured-signature
+        // replay to write somewhere/something else. MUST be blocked.
+        let fp_b = form_post_fingerprint("attacker/evil.sh", b"#!/bin/sh\n");
+        assert!(
+            !form_post_replay_check(&cache, sig, fp_b, exp, now),
+            "reusing a signature for a different key/body must be blocked"
+        );
+        // And the legit object can still be re-sent after the blocked
+        // swap attempt (the block didn't overwrite the stored fingerprint).
+        assert!(
+            form_post_replay_check(&cache, sig, fp_a, exp, now),
+            "the original object must remain idempotently re-sendable"
+        );
+    }
+
+    /// Fingerprint distinguishes (key, body) tuples and is stable for
+    /// identical input — and changing EITHER the key or the body changes
+    /// it, so a signature can't be repointed at a different key with the
+    /// same body (or the same key with different body).
+    #[test]
+    fn form_post_fingerprint_is_stable_and_discriminating() {
+        let base = form_post_fingerprint("k/one", b"body");
+        assert_eq!(base, form_post_fingerprint("k/one", b"body"), "stable");
+        assert_ne!(base, form_post_fingerprint("k/two", b"body"), "key matters");
+        assert_ne!(
+            base,
+            form_post_fingerprint("k/one", b"other"),
+            "body matters"
+        );
+        // Domain separation: ("ab","c") must not collide with ("a","bc").
+        assert_ne!(
+            form_post_fingerprint("ab", b"c"),
+            form_post_fingerprint("a", b"bc"),
+            "key/body boundary must be unambiguous"
+        );
     }
 
     /// Adversarial: a signature whose TTL has elapsed must be
@@ -1023,18 +1153,22 @@ mod tests {
     /// retry doesn't "leak" indefinitely.
     #[test]
     fn form_post_replay_cache_expired_entries_are_drained() {
-        let cache: std::sync::Arc<dashmap::DashMap<String, std::time::Instant>> =
+        let cache: std::sync::Arc<dashmap::DashMap<String, ReplayEntry>> =
             std::sync::Arc::new(dashmap::DashMap::new());
         let key = "deadbeef".to_string();
         let now = std::time::Instant::now();
         // Insert with a NEGATIVE TTL (already expired).
         cache.insert(
             key.clone(),
-            now.checked_sub(std::time::Duration::from_secs(60))
-                .unwrap_or(now),
+            ReplayEntry {
+                expiry: now
+                    .checked_sub(std::time::Duration::from_secs(60))
+                    .unwrap_or(now),
+                fingerprint: 0,
+            },
         );
         // Prune: same `retain` shape the enforcer uses.
-        cache.retain(|_, exp| *exp > std::time::Instant::now());
+        cache.retain(|_, entry| entry.expiry > std::time::Instant::now());
         assert!(
             !cache.contains_key(&key),
             "expired entry must be evicted by the retain sweep"
