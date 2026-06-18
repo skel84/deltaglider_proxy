@@ -4,6 +4,23 @@
 
 ## v1.4.3 — 2026-06-18
 
+### Fixed
+
+- **Browser form-POST upload returned 403 on an idempotent retry.** The
+  presigned form-POST replay cache was keyed only on the SigV4 signature
+  and rejected *any* second request bearing an already-seen signature for
+  up to 24h (the policy-expiry-capped TTL). A presigned POST's signature
+  is deterministic for a given policy + second-resolution `x-amz-date`, so
+  a CI retry or pipeline re-run of the same artifact re-sent the identical
+  signed request and got a spurious `403 SignatureDoesNotMatch` (observed
+  uploading the deterministic `.sha1` / `.sha512` siblings right after a
+  `.zip`). The replay entry now also fingerprints the `(key, body)` the
+  signature first wrote: re-sending the **same object** is an idempotent
+  retry and is allowed, while reusing a captured signature to write a
+  **different key or body** is still blocked (form-POST `key` is
+  `starts-with ""`, so one signature could otherwise authorise writing
+  anywhere). Replay protection is preserved; legitimate retries succeed.
+
 ## v1.4.2 — 2026-06-13
 
 ### Added
