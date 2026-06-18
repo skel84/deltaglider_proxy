@@ -6,7 +6,7 @@ Right now, anyone who can reach port 9000 can read, overwrite, or delete everyth
 
 ## Step 1: set your own admin password
 
-The proxy generated a random bootstrap password on first run. Generated secrets are fine until you lose the terminal they were printed in — let's set one we control. The mechanism is the `--set-bootstrap-password` flag, which reads a password from stdin and writes its bcrypt hash onto our data volume.
+In tutorial 1 we ran with `DGP_AUTHENTICATION=none`, so there's no admin password yet — the proxy is wide open. Before we turn authentication on, let's set a bootstrap password we control. The mechanism is the `--set-bootstrap-password` flag, which reads a password from stdin and writes its bcrypt hash onto our data volume. (Had we started *with* auth enabled instead, the proxy would have generated a random one and printed it once — but only to an interactive terminal; we're setting our own either way.)
 
 Stop the running proxy first: press `Ctrl+C` in the terminal where the container is running.
 

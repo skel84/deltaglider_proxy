@@ -80,6 +80,25 @@ function rehypeDocRewrites(fromPath: string) {
           while (usedHeadingIds.has(unique)) unique = `${id}-${n++}`;
           usedHeadingIds.add(unique);
           node.properties = { ...node.properties, id: unique };
+          // Append a REAL clickable anchor so the hover "#" actually navigates
+          // (sets the URL hash) and is copyable / keyboard-focusable — the
+          // previous "#" was a CSS ::after decoration with nothing to click.
+          // h2/h3/h4 only (h1 is the page title; h5/h6 are rare and unlinked).
+          if (/^h[234]$/.test(node.tagName)) {
+            node.children = [
+              ...(node.children ?? []),
+              {
+                type: 'element',
+                tagName: 'a',
+                properties: {
+                  className: ['docs-heading-anchor'],
+                  href: `#${unique}`,
+                  'aria-label': `Link to this section: ${textOf(node)}`,
+                },
+                children: [{ type: 'text', value: '#' }],
+              },
+            ];
+          }
         }
       }
       // Code fences (<pre><code class="language-…">).
@@ -136,7 +155,10 @@ export function extractToc(html: string): TocEntry[] {
     const depth = Number(m[1]) as 2 | 3;
     const idMatch = /\bid=["']([^"']+)["']/.exec(m[2]);
     if (!idMatch) continue;
-    const text = stripTags(m[3]).trim();
+    // Drop the appended heading-anchor (<a class="docs-heading-anchor">#</a>)
+    // before reading the label, or every TOC entry would end in a stray "#".
+    const inner = m[3].replace(/<a\b[^>]*class=["'][^"']*docs-heading-anchor[^"']*["'][^>]*>[\s\S]*?<\/a>/i, '');
+    const text = stripTags(inner).trim();
     if (text) out.push({ depth, id: idMatch[1], text });
   }
   return out;

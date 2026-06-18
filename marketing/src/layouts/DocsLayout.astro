@@ -168,7 +168,14 @@ const groups = docsByGroup();
         .catch(function () { /* dev server: leave hidden */ });
 
       btn.addEventListener('click', open);
-      overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+      overlay.addEventListener('click', function (e) {
+        if (e.target === overlay) { close(); return; }
+        // Close when a result link is clicked. For a same-page result the URL
+        // only gets a #hash (no navigation), so without this the overlay would
+        // stay open covering the very section the user just jumped to.
+        var link = e.target.closest && e.target.closest('a[href]');
+        if (link && overlay.contains(link)) close();
+      });
       document.addEventListener('keydown', function (e) {
         if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
           e.preventDefault();

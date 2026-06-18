@@ -262,11 +262,29 @@
 .docs-prose h4 {
   font-size: 1.02rem; font-weight: 600; margin: 26px 0 8px; color: var(--ink-800);
 }
-.docs-prose h2:hover::after, .docs-prose h3:hover::after {
-  content: "#";
+/* Clickable section anchor — a real <a href="#id"> appended to h2/h3/h4 by the
+   renderer. Hidden until the heading is hovered or the anchor itself is
+   keyboard-focused; clicking it sets the URL hash (the old "#" was a CSS
+   ::after decoration with nothing to click). */
+.docs-prose h2 a.docs-heading-anchor,
+.docs-prose h3 a.docs-heading-anchor,
+.docs-prose h4 a.docs-heading-anchor {
   font-family: var(--doc-label);
   font-weight: 600; color: var(--brand);
-  margin-left: 0.4em; opacity: 0.7;
+  margin-left: 0.4em;
+  text-decoration: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.docs-prose h2:hover a.docs-heading-anchor,
+.docs-prose h3:hover a.docs-heading-anchor,
+.docs-prose h4:hover a.docs-heading-anchor,
+.docs-prose a.docs-heading-anchor:focus-visible {
+  opacity: 0.7;
+}
+.docs-prose a.docs-heading-anchor:hover { opacity: 1; }
+.docs-prose a.docs-heading-anchor:focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 3px;
 }
 
 /* Links — cornflower blue + underline. The colour accent (not just the

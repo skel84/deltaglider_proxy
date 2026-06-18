@@ -16,28 +16,20 @@ docker run --rm -it -p 9000:9000 -v dgp-data:/data \
   beshultd/deltaglider_proxy
 ```
 
-You should see the proxy come up, complain loudly about open access, and print a generated admin password:
+You should see the proxy come up and complain loudly about open access:
 
 ```
-INFO Starting DeltaGlider Proxy v1.3.0 (built ...)
+INFO Starting DeltaGlider Proxy v1.4.2 (built ...)
 WARN   Authentication: DISABLED (authentication = "none")
 WARN   ╔══════════════════════════════════════════════════════════════════╗
 WARN   ║  WARNING: All S3 data is accessible without credentials.        ║
 WARN   ║  Set access_key_id + secret_access_key for production use.      ║
 WARN   ╚══════════════════════════════════════════════════════════════════╝
-
-╔══════════════════════════════════════════════════════════════╗
-║  BOOTSTRAP PASSWORD (first run — save this!)                ║
-║                                                              ║
-║  Password: 8p2Xq9nKzV4mTbR7                                  ║
-║                                                              ║
-║  This password appears ONCE. Store it securely.              ║
-╚══════════════════════════════════════════════════════════════╝
-
+INFO Dashboard: http://0.0.0.0:9000/_/
 INFO DeltaGlider Proxy listening on http://0.0.0.0:9000
 ```
 
-Notice the password box — that's the bootstrap password for the admin settings. Jot it down anyway; in the next tutorial we'll replace it with one of our own.
+Because we passed `DGP_AUTHENTICATION=none`, there are **no credentials and no bootstrap password** — the proxy is wide open, which is the point for this first localhost run. The [next tutorial](secure-your-proxy.md) turns authentication on; *that's* when the proxy generates and prints a one-time bootstrap password (and only when its output is an interactive terminal — in containers and CI the plaintext is withheld and only a hash is logged).
 
 Leave this terminal running. Everything else happens in a second terminal and in the browser.
 
