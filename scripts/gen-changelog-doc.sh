@@ -35,8 +35,32 @@ OUT="$ROOT/docs/product/changelog.md"
 #   2. The body of CHANGELOG.md from the first `## v` version heading
 #      onward — i.e. skip the `# Changelog` title and the `## Unreleased`
 #      placeholder, start at the newest real release.
+# Newest release date = the date on the first `## vX.Y.Z — DATE` heading
+# that actually has content under it. Drives the "Last updated" line.
+newest_release_date() {
+  awk '
+    found { exit }
+    /^## v/ {
+      # flush the previous block: if it had content, its date wins (we
+      # scan newest-first, so the FIRST non-empty block is the answer).
+      if (have && content) { print date; found = 1; next }
+      have = 1; content = 0
+      date = $0
+      sub(/^## v[^ ]*[[:space:]]*—[[:space:]]*/, "", date)  # strip "## vX — "
+      sub(/^## v[^ ]*[[:space:]]*$/, "", date)              # no-date heading → empty
+      gsub(/[[:space:]]+$/, "", date)
+      next
+    }
+    have && /[^[:space:]]/ && !/^<!--/ { content = 1 }
+    END { if (!found && have && content) print date }
+  ' "$SRC"
+}
+
 generate() {
-  cat <<'HEADER'
+  local updated
+  updated="$(newest_release_date)"
+
+  cat <<HEADER
 <!-- GENERATED FILE — do not edit.
      Source of truth: CHANGELOG.md at the repo root.
      Regenerate with: scripts/gen-changelog-doc.sh -->
@@ -45,12 +69,33 @@ generate() {
 
 Every released version of DeltaGlider Proxy, newest first. Versions
 follow [semantic versioning](https://semver.org/); the Docker image
-`beshultd/deltaglider_proxy:<version>` is published for each tag.
+\`beshultd/deltaglider_proxy:<version>\` is published for each tag.
+
+_Last updated: ${updated}_
 
 HEADER
-  # Emit from the first "## v" heading to EOF (drops "# Changelog" and
-  # any "## Unreleased" block above the first release).
-  awk '/^## v/{p=1} p' "$SRC"
+
+  # Emit version sections from the first "## v" heading to EOF, but DROP
+  # any version that has no changeset (an empty `## vX.Y.Z` header with
+  # nothing but blank lines before the next `##`). This skips placeholder
+  # headers (e.g. a freshly-cut tag whose notes weren't filled in) on the
+  # rendered page while leaving CHANGELOG.md itself untouched. Buffer each
+  # `## v` block, print it only once we've seen real content.
+  awk '
+    function flush() {
+      if (n > 0 && nonblank) { for (i = 0; i < n; i++) print buf[i] }
+      n = 0; nonblank = 0
+    }
+    /^## v/ { flush(); started = 1 }
+    !started { next }
+    {
+      buf[n++] = $0
+      # A line counts as "content" if it is non-blank and is not the
+      # version heading itself.
+      if ($0 !~ /^## v/ && $0 ~ /[^[:space:]]/) nonblank = 1
+    }
+    END { flush() }
+  ' "$SRC"
 }
 
 if [ "${1:-}" = "--check" ]; then

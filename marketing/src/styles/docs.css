@@ -804,3 +804,44 @@
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--brand); flex: none;
 }
+
+/* ── Changelog page ───────────────────────────────────────────────── */
+/* Version headings: show the version; reveal the release date on hover.
+   The heading-anchor "#" still appends after the date span and keeps its
+   own hover behaviour. */
+.docs-prose h2.cl-version {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6em;
+}
+.docs-prose h2.cl-version .cl-date {
+  font-family: var(--doc-label);
+  font-size: 0.5em;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: rgba(148, 163, 184, 0.85);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  cursor: default;
+  user-select: none;
+}
+.docs-prose h2.cl-version:hover .cl-date,
+.docs-prose h2.cl-version:focus-within .cl-date {
+  opacity: 1;
+}
+/* "Last updated: …" badge pinned to the top-right of the prose column. */
+.docs-prose p.cl-updated {
+  float: right;
+  margin: 0 0 0 1em;
+  padding: 0.25em 0.7em;
+  font-family: var(--doc-label);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: rgba(148, 163, 184, 0.9);
+  background: var(--doc-code-bg);
+  border: 1px solid var(--doc-code-border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.docs-prose p.cl-updated em { font-style: normal; }

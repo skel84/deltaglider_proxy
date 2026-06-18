@@ -8,6 +8,8 @@ Every released version of DeltaGlider Proxy, newest first. Versions
 follow [semantic versioning](https://semver.org/); the Docker image
 `beshultd/deltaglider_proxy:<version>` is published for each tag.
 
+_Last updated: 2026-06-18_
+
 ## v1.4.3 — 2026-06-18
 
 ### Added
@@ -179,8 +181,6 @@ follow [semantic versioning](https://semver.org/); the Docker image
   gate instead of bypassing it.
 - Jobs table no longer renders job names one character per line in narrow
   columns.
-
-## v1.3.1 — 2026-06-05
 
 ## v1.3.0 — 2026-06-05
 
@@ -732,8 +732,6 @@ small UX gaps the v1.0.0 plan flagged.
   `is_compatible_canned_acl` pure function with truth-table unit
   tests; integration tests cover both the accept and the reject path.
 
-## v0.9.17 — 2026-05-07
-
 ## v0.9.16 — 2026-05-07
 
 ### Correctness x-ray fix programme
@@ -864,8 +862,6 @@ changes; backwards compatible.
 - Create-bucket backend selector in the sidebar now uses `SimpleSelect` (no Ant popup
   dependency), matching the rest of the embedded UI dropdown policy.
 
-## v0.9.10 — 2026-05-06
-
 ## v0.9.11 — 2026-05-06
 
 ### Browser UI and admin
@@ -882,8 +878,6 @@ changes; backwards compatible.
 
 - Added Playwright **full-flow** E2E (bucket create, upload, admin login, sign-out, reconnect,
   object still visible); `e2e-smoke.sh` runs the full `e2e/` suite.
-
-## v0.9.9 — 2026-05-05
 
 ## v0.9.8 — 2026-05-05
 
@@ -936,16 +930,6 @@ changes; backwards compatible.
   names in the left bucket sidebar after login.
 - Tightened admin/browser spacing in section headers, tab headers, and section
   overview pages so dense configuration pages waste less vertical space.
-
-## v0.9.6 — 2026-05-01
-
-## v0.9.5 — 2026-05-01
-
-## v0.9.4 — 2026-04-30
-
-## v0.9.3 — 2026-04-30
-
-## v0.9.2 — 2026-04-30
 
 ## v0.9.1 — 2026-04-30
 

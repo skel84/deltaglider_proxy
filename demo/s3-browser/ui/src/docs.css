@@ -271,3 +271,39 @@
   color: var(--docs-toc-text);
   opacity: 0.85;
 }
+
+/* ── Changelog page ───────────────────────────────────────────────── */
+/* Version headings: show the version; reveal the release date on hover. */
+.docs-content h2.cl-version {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.docs-content h2.cl-version .cl-date {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--docs-muted, #8a93a6);
+  opacity: 0;
+  transform: translateY(1px);
+  transition: opacity 0.15s ease;
+  cursor: default;
+  user-select: none;
+}
+.docs-content h2.cl-version:hover .cl-date,
+.docs-content h2.cl-version:focus-within .cl-date {
+  opacity: 1;
+}
+/* "Last updated: …" badge, pinned to the top-right of the content column. */
+.docs-content .cl-updated {
+  float: right;
+  margin: 0 0 0 16px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--docs-muted, #8a93a6);
+  background: var(--docs-code-bg, rgba(127, 140, 170, 0.10));
+  border: 1px solid var(--docs-border, rgba(127, 140, 170, 0.22));
+  border-radius: 999px;
+  white-space: nowrap;
+}

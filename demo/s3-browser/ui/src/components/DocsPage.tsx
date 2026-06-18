@@ -144,14 +144,39 @@ interface TocItem {
   level: number;
 }
 
+/**
+ * Split a changelog version heading ("v1.4.3 — 2026-06-18") into its
+ * version and date parts. Returns null for any non-version heading so the
+ * caller renders it untouched. Accepts an em-dash or a hyphen separator
+ * and tolerates ReactMarkdown passing children as a string or an array.
+ */
+function splitVersionHeading(children: React.ReactNode): { version: string; date: string } | null {
+  const text = nodeToText(children).trim();
+  const m = text.match(/^(v\d+\.\d+\.\d+\S*)\s*[—-]\s*(.+)$/);
+  if (!m) return null;
+  return { version: m[1], date: m[2].trim() };
+}
+
+/** Flatten ReactMarkdown heading children to plain text. */
+function nodeToText(node: React.ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(nodeToText).join('');
+  return '';
+}
+
 /** Extract headings from markdown for ToC */
 function extractHeadings(markdown: string): TocItem[] {
   const items: TocItem[] = [];
   for (const line of markdown.split('\n')) {
     const m = line.match(/^(#{2,3})\s+(.+)/);
     if (m) {
-      const text = m[2].replace(/[`*_[\]]/g, '');
-      const id = text.toLowerCase().replace(/[^\w]+/g, '-').replace(/(^-|-$)/g, '');
+      const raw = m[2].replace(/[`*_[\]]/g, '');
+      // ID derives from the FULL heading text (matches the rendered slug);
+      // only the DISPLAYED label drops the date for changelog versions, so
+      // the ToC reads "v1.4.3" instead of "v1.4.3 — 2026-06-18".
+      const id = raw.toLowerCase().replace(/[^\w]+/g, '-').replace(/(^-|-$)/g, '');
+      const ver = raw.match(/^(v\d+\.\d+\.\d+\S*)\s*[—-]\s*.+$/);
+      const text = ver ? ver[1] : raw;
       items.push({ id, text, level: m[1].length });
     }
   }
@@ -353,6 +378,28 @@ export default function DocsPage({ docId, onBack, accountMenu, onShowShortcuts }
                           <img {...props} alt={alt} src={src} style={{ width: '100%', display: 'block' }} />
                         </Lightbox>
                       ),
+                      // Changelog version headings ("vX.Y.Z — DATE"): show the
+                      // version, tuck the release date behind a hover reveal.
+                      // Non-version h2s pass through unchanged. The rehypeSlug
+                      // `id` is preserved so anchors + the ToC still work.
+                      h2: ({ children, ...props }) => {
+                        const split = splitVersionHeading(children);
+                        if (!split) return <h2 {...props}>{children}</h2>;
+                        return (
+                          <h2 {...props} className="cl-version">
+                            <span className="cl-ver">{split.version}</span>
+                            <span className="cl-date">{split.date}</span>
+                          </h2>
+                        );
+                      },
+                      // "Last updated: …" line → a small top-right badge.
+                      p: ({ children, ...props }) => {
+                        const text = nodeToText(children).trim();
+                        if (/^last updated:/i.test(text)) {
+                          return <p {...props} className="cl-updated">{children}</p>;
+                        }
+                        return <p {...props}>{children}</p>;
+                      },
                     }}
                   >
                     {segment.content}

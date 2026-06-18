@@ -61,6 +61,25 @@ function rehypeDocRewrites(fromPath: string) {
     const fences: { node: any; code: string; lang: string }[] = [];
 
     visit(tree, 'element', (node: any) => {
+      // Changelog version headings ("v1.4.3 — 2026-06-18"): tuck the
+      // release date into a span we can reveal on hover via CSS, and tag
+      // the h2 so it lays out version + date on one baseline. Runs BEFORE
+      // the heading-id logic below, which still slugifies the full text
+      // (textOf) so anchors stay stable. Non-version headings untouched.
+      if (node.tagName === 'h2') {
+        const m = textOf(node).trim().match(/^(v\d+\.\d+\.\d+\S*)\s*[—-]\s*(.+)$/);
+        if (m) {
+          node.properties = { ...node.properties, className: ['cl-version'] };
+          node.children = [
+            { type: 'element', tagName: 'span', properties: { className: ['cl-ver'] }, children: [{ type: 'text', value: m[1] }] },
+            { type: 'element', tagName: 'span', properties: { className: ['cl-date'] }, children: [{ type: 'text', value: m[2].trim() }] },
+          ];
+        }
+      }
+      // "Last updated: …" paragraph → a top-right badge.
+      if (node.tagName === 'p' && /^last updated:/i.test(textOf(node).trim())) {
+        node.properties = { ...node.properties, className: ['cl-updated'] };
+      }
       // Inter-doc links → friendly URLs.
       if (node.tagName === 'a' && typeof node.properties?.href === 'string') {
         const rewritten = rewriteDocLink(node.properties.href, fromPath);
@@ -158,7 +177,14 @@ export function extractToc(html: string): TocEntry[] {
     // Drop the appended heading-anchor (<a class="docs-heading-anchor">#</a>)
     // before reading the label, or every TOC entry would end in a stray "#".
     const inner = m[3].replace(/<a\b[^>]*class=["'][^"']*docs-heading-anchor[^"']*["'][^>]*>[\s\S]*?<\/a>/i, '');
-    const text = stripTags(inner).trim();
+    // Changelog version heading: the date lives in a `.cl-date` span that's
+    // hover-only on the page; in the TOC, show just the version (the
+    // `.cl-ver` span) instead of "v1.4.32026-06-18".
+    const verMatch = /class=["'][^"']*\bcl-ver\b[^"']*["'][^>]*>([\s\S]*?)<\/span>/i.exec(inner);
+    const isVersionHeading = /\bcl-version\b/.test(m[2]);
+    const text = isVersionHeading && verMatch
+      ? stripTags(verMatch[1]).trim()
+      : stripTags(inner).trim();
     if (text) out.push({ depth, id: idMatch[1], text });
   }
   return out;
