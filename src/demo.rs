@@ -6,7 +6,7 @@ use axum::{
     extract::Path,
     http::{header, StatusCode},
     middleware,
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{delete, get, post, put},
     Router,
 };
@@ -398,6 +398,10 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
 
     // Static UI assets
     let static_routes = Router::new()
+        // Safari strips the trailing slash off "/_/", landing on "/_".
+        // Redirect it back so the SPA loads. "_" is not a valid S3 bucket
+        // name, so this can never shadow a real object route.
+        .route("/_", get(|| async { Redirect::permanent("/_/") }))
         .route("/_/", get(index))
         .route("/_/*path", get(static_or_fallback));
 
