@@ -575,7 +575,7 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else if trust_proxy_explicit.is_none() {
         info!("  Proxy headers: untrusted (default) — set DGP_TRUST_PROXY_HEADERS=true if behind a reverse proxy (nginx, Caddy, ALB) to enable IP-based rate limiting and aws:SourceIp IAM conditions");
     } else {
-        info!("  Proxy headers: untrusted (DGP_TRUST_PROXY_HEADERS=false) — rate limiting requires ConnectInfo (not yet implemented); aws:SourceIp conditions will not match");
+        info!("  Proxy headers: untrusted (DGP_TRUST_PROXY_HEADERS=false) — per-IP rate limiting still works via the connection peer IP, but aws:SourceIp conditions derived from proxy headers will not match");
     }
 
     // --- IAM ---

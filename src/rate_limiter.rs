@@ -333,10 +333,9 @@ fn should_keep_entry(
 /// Deployments behind a trusted reverse proxy (nginx, Caddy, ALB) should set
 /// `DGP_TRUST_PROXY_HEADERS=true` so the proxy can extract the real client IP
 /// from `X-Forwarded-For` / `X-Real-IP` headers for rate limiting and
-/// `aws:SourceIp` IAM conditions.
-///
-/// TODO: add axum `ConnectInfo<SocketAddr>` support so the real peer IP is
-/// always available and proxy-header trust is unnecessary for rate limiting.
+/// `aws:SourceIp` IAM conditions. The connection peer IP is always available
+/// via `ConnectInfo<SocketAddr>` (see `extract_client_ip_with_peer`), so per-IP
+/// rate limiting works regardless of this setting.
 pub(crate) fn trust_proxy_headers() -> bool {
     crate::config::env_bool("DGP_TRUST_PROXY_HEADERS", false)
 }
@@ -348,10 +347,8 @@ pub(crate) fn trust_proxy_headers() -> bool {
 /// headers to prevent IP spoofing.
 ///
 /// Returns `None` if no IP can be determined. In this case, rate limiting is
-/// skipped for this request (the SigV4 signature check still applies).
-/// To enable per-IP rate limiting without a reverse proxy, set
-/// `DGP_TRUST_PROXY_HEADERS=true` and have your proxy set these headers,
-/// or consider adding axum `ConnectInfo` support in the future.
+/// skipped for this request (the SigV4 signature check still applies). Callers
+/// with the connection peer IP should use `extract_client_ip_with_peer`.
 pub fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<IpAddr> {
     extract_client_ip_with_peer(headers, None)
 }

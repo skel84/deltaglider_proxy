@@ -15,6 +15,7 @@ import '../docs.css';
 
 mermaid.initialize({
   startOnLoad: false,
+  securityLevel: 'strict',
   flowchart: { useMaxWidth: false },
   sequence: { useMaxWidth: false },
 });
@@ -35,6 +36,7 @@ function Mermaid({ chart, caption }: { chart: string; caption?: string }) {
     // the active light/dark theme instead of a frozen palette.
     mermaid.initialize({
       startOnLoad: false,
+      securityLevel: 'strict',
       theme: isDark ? 'dark' : 'default',
       themeVariables: { primaryColor: ACCENT_BLUE, lineColor: TEXT_FAINT },
       flowchart: { useMaxWidth: false },
