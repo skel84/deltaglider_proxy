@@ -1434,10 +1434,12 @@ fn copy_source_bucket_key(source: &s3s::dto::CopySource) -> s3s::S3Result<(Strin
             }
             Ok((bucket.to_string(), key.to_string()))
         }
-        s3s::dto::CopySource::AccessPoint { .. } => Err(s3s::s3_error!(
-            NotImplemented,
-            "copy source access points are not supported"
-        )),
+        s3s::dto::CopySource::AccessPoint { .. } | s3s::dto::CopySource::Outpost { .. } => {
+            Err(s3s::s3_error!(
+                NotImplemented,
+                "copy source access points / outposts are not supported"
+            ))
+        }
     }
 }
 
