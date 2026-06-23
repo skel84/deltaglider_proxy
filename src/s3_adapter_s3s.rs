@@ -1757,9 +1757,16 @@ fn head_object_output_from_metadata(
     let e_tag = parse_s3s_etag(&meta.etag())?;
     let last_modified: s3s::dto::Timestamp = SystemTime::from(meta.created_at).into();
     let content_length = i64::try_from(meta.file_size).unwrap_or(i64::MAX);
+    // Treat a blank content-type the same as absent: some backends return
+    // the `content-type` header present-but-empty for objects stored without
+    // one, which arrives here as `Some("")`. An empty content-type on the wire
+    // + `nosniff` makes browsers render raw bytes instead of downloading.
     let content_type = meta
         .content_type
-        .clone()
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
     Ok(s3s::dto::HeadObjectOutput {
@@ -1964,6 +1971,24 @@ mod tests {
             metadata.get("dg-multipart-etag").map(String::as_str),
             Some("\"abc-2\"")
         );
+    }
+
+    #[test]
+    fn head_output_blank_content_type_falls_back_to_octet_stream() {
+        // A backend returning `content-type:` present-but-empty arrives as
+        // Some(""); it must not be emitted verbatim (empty type + nosniff makes
+        // browsers render raw bytes). Blank and whitespace-only both fall back.
+        for blank in ["", "   "] {
+            let meta = FileMetadata::new_passthrough(
+                "file.zip".to_string(),
+                "sha".to_string(),
+                "0123456789abcdef0123456789abcdef".to_string(),
+                7,
+                Some(blank.to_string()),
+            );
+            let out = head_object_output_from_metadata(&meta).expect("head output");
+            assert_eq!(out.content_type.as_deref(), Some("application/octet-stream"));
+        }
     }
 
     #[test]

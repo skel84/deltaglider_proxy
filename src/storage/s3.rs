@@ -517,7 +517,12 @@ impl S3Backend {
             md5,
             multipart_etag,
             created_at,
-            content_type: headers.get("content-type").cloned(),
+            // Use the empty-skipping `get_value` (not raw `headers.get`): an
+            // object stored with no/blank content-type leaves an empty
+            // `content-type` user-metadata value, which must read back as None
+            // so the output layer can apply the octet-stream default. A raw
+            // `.cloned()` would yield Some("") and emit a blank content-type.
+            content_type: get_value(&["content-type"]),
             user_metadata,
             storage_info,
         })
