@@ -1989,7 +1989,10 @@ mod tests {
                 Some(blank.to_string()),
             );
             let out = head_object_output_from_metadata(&meta).expect("head output");
-            assert_eq!(out.content_type.as_deref(), Some("application/octet-stream"));
+            assert_eq!(
+                out.content_type.as_deref(),
+                Some("application/octet-stream")
+            );
         }
     }
 
