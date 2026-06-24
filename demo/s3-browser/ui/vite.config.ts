@@ -42,10 +42,11 @@ export default defineConfig({
     __BUILD_VERSION__: JSON.stringify(resolveBuildVersion()),
   },
   build: {
-    sourcemap: true,
-    // Source maps stay on disk for local debugging / Sentry upload but
-    // are excluded from the Rust-embedded binary via the `#[exclude]`
-    // attribute on `DemoAssets` (see src/demo.rs).
+    // No source maps in the prod build: `DemoAssets` embeds the WHOLE dist/
+    // into the binary and serves every asset, so maps would ship the original
+    // TS to any client AND add ~22MB of binary bloat. Build locally with
+    // `vite build --sourcemap` when you need them for debugging.
+    sourcemap: false,
     //
     // manualChunks: split heavy vendor libs out of the main shell so
     // the file-browser entry only downloads what it needs on first
