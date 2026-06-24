@@ -105,9 +105,24 @@ export default function ConnectPage({ onConnect, showError }: Props) {
   const runOpenModeConnect = useCallback(async (): Promise<{ ok: true } | { ok: false; error: string }> => {
     const endpoint = detectDefaultEndpoint().replace(/\/+$/, '');
     setEndpoint(endpoint);
-    const result = await testConnection(endpoint, 'anonymous', 'anonymous').catch(() => ({ ok: false } as const));
+    const result = await testConnection(endpoint, 'anonymous', 'anonymous').catch(
+      () => ({ ok: false, error: '' } as const),
+    );
     if (!result.ok) {
-      return { ok: false, error: 'Open access mode but S3 backend is unreachable. Check server configuration.' };
+      // Surface the server's actual reason rather than always blaming the
+      // backend. A locked config DB (bootstrap-hash mismatch) reports itself
+      // clearly here — telling the operator to "check server configuration"
+      // sends them debugging a backend that may be perfectly fine.
+      const reason = 'error' in result ? result.error : '';
+      const looksLocked = /bootstrap|mismatch|recover/i.test(reason || '');
+      return {
+        ok: false,
+        error: looksLocked
+          ? `${reason} — open Settings (/_/) to recover.`
+          : reason
+            ? `Could not reach the S3 API: ${reason}`
+            : 'Could not reach the S3 API. The server may still be starting, or its storage backend is misconfigured.',
+      };
     }
     if (result.buckets && result.buckets.length > 0) {
       setBucket(result.buckets[0]);
