@@ -856,6 +856,23 @@ pub fn init_config_db(
                         groups.len(),
                         db_file.display()
                     );
+                    // The config DB overrides `authentication: none` — the YAML
+                    // asked for open access but the DB's IAM users force IAM mode,
+                    // so signed requests need real per-user keys (anonymous/open
+                    // browser sessions get AccessDenied). Warn loudly so this
+                    // silent override isn't mistaken for a data-loss bug.
+                    use deltaglider_proxy::config::AuthConfigOutcome;
+                    if matches!(config.classify_auth_config(), AuthConfigOutcome::OpenAccess) {
+                        warn!(
+                            "  Authentication: IAM mode is ACTIVE ({} user(s) in {}) — this \
+                             OVERRIDES `authentication = \"none\"`. Open/anonymous browser \
+                             access will get AccessDenied; log in as an IAM user, or delete \
+                             {} to use open access.",
+                            users.len(),
+                            db_file.display(),
+                            db_file.display()
+                        );
+                    }
                     let state = deltaglider_proxy::iam::IamIndex::build_iam_state(users, groups);
                     iam_state.store(Arc::new(state));
                 }
