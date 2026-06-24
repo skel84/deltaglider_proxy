@@ -39,6 +39,38 @@ pub type ReplayCache = Arc<DashMap<String, Instant>>;
 
 const MAX_REPLAY_ENTRIES: usize = 500_000;
 
+/// The single auth-gate decision folded from the config-DB lock flag and the
+/// runtime [`IamState`]. Folding both inputs into one exhaustively-matched
+/// enum means the middleware can never silently un-lock by reordering a
+/// router layer, and there is no `unreachable!()` arm hiding a real state.
+///
+/// Pure decision at a decision point — mirrors `classify_auth_config`
+/// (`config.rs`) / `classify_s3_error` (`storage/s3.rs`).
+enum AuthGateDecision<'a> {
+    /// Config DB is locked (bootstrap password mismatch) — reject all S3 traffic.
+    Locked,
+    /// No auth configured — open access, pass through.
+    Open,
+    /// Legacy single-credential (bootstrap) mode.
+    Bootstrap(&'a crate::iam::AuthConfig),
+    /// Multi-user IAM mode.
+    Iam(&'a crate::iam::IamIndex),
+}
+
+/// Fold the config-DB lock flag + [`IamState`] into a single exhaustive auth
+/// decision. The lock overrides everything; otherwise the IamState variant
+/// selects the auth path.
+fn classify_auth_gate(locked: bool, iam_state: &IamState) -> AuthGateDecision<'_> {
+    if locked {
+        return AuthGateDecision::Locked;
+    }
+    match iam_state {
+        IamState::Disabled => AuthGateDecision::Open,
+        IamState::Legacy(auth) => AuthGateDecision::Bootstrap(auth),
+        IamState::Iam(index) => AuthGateDecision::Iam(index),
+    }
+}
+
 fn prune_replay_cache(cache: &ReplayCache, replay_window: Duration, max_entries: usize) {
     // Pass 1: cheap TTL cleanup.
     cache.retain(|_, instant| instant.elapsed() < replay_window);
@@ -696,30 +728,34 @@ pub async fn sigv4_auth_middleware(
         }
     };
 
-    // If config DB mismatch is active, reject ALL S3 requests.
-    // The proxy must not serve data without authentication.
-    if request
+    // Fold the config-DB lock flag + IamState into ONE exhaustive auth
+    // decision. The lock is a first-class match arm (not a pre-match `if`),
+    // so a router-layer reorder can never silently un-lock the server. The
+    // `ConfigDbMismatchGuard` marker is injected by `build_s3_router` when the
+    // bootstrap password fails to decrypt the config DB. Absence of the IAM
+    // extension is treated as `Disabled` (open access).
+    let config_db_locked = request
         .extensions()
         .get::<crate::api::ConfigDbMismatchGuard>()
-        .is_some()
-    {
-        return Err(crate::api::S3Error::InternalError(
-            "Service unavailable — bootstrap password mismatch. Use admin GUI (/_/) to recover."
-                .into(),
-        )
-        .into_response());
-    }
+        .is_some();
+    // No IAM extension == open access; model it as `Disabled` for the fold.
+    let disabled_fallback = IamState::Disabled;
+    let iam_state = iam_snapshot.as_deref().unwrap_or(&disabled_fallback);
 
-    // Determine auth mode from IamState
-    let iam_state = match iam_snapshot.as_deref() {
-        Some(state) => state,
-        None => return Ok(next.run(request).await), // no extension = open access
+    let auth_config = match classify_auth_gate(config_db_locked, iam_state) {
+        AuthGateDecision::Locked => {
+            // Clear 503 with a recovery hint — NOT a misleading 500.
+            // The proxy must not serve data without working authentication.
+            return Err(crate::api::S3Error::ServiceUnavailable(
+                "Config database locked — recover via admin GUI (/_/).".into(),
+            )
+            .into_response());
+        }
+        // Open access (no auth configured / no IAM extension): pass through.
+        AuthGateDecision::Open => return Ok(next.run(request).await),
+        // Auth required — fall through to signature verification below.
+        decision => decision,
     };
-
-    // If auth is disabled, pass through
-    if matches!(iam_state, IamState::Disabled) {
-        return Ok(next.run(request).await);
-    }
 
     // Check rate limit before processing auth
     if let (Some(rl), Some(ip)) = (&rate_limiter, &client_ip) {
@@ -818,10 +854,15 @@ pub async fn sigv4_auth_middleware(
         })?
     };
 
-    // Look up the user's secret key and build the authenticated identity
-    let (secret_key, authenticated_user) = match iam_state {
-        IamState::Disabled => unreachable!(), // handled above
-        IamState::Legacy(auth) => {
+    // Look up the user's secret key and build the authenticated identity.
+    // `auth_config` is already narrowed to Bootstrap | Iam by the gate match
+    // above (Locked/Open returned early). The Locked/Open arm here is dead by
+    // construction; it fails SAFE (deny) rather than panicking on `unreachable!()`.
+    let (secret_key, authenticated_user) = match auth_config {
+        AuthGateDecision::Locked | AuthGateDecision::Open => {
+            return Err(S3Error::AccessDenied.into_response());
+        }
+        AuthGateDecision::Bootstrap(auth) => {
             // Constant-time compare via fixed-length hashes. ct_eq
             // requires equal-length inputs; hashing first lets us
             // feed two `[u8; 32]` arrays into ct_eq regardless of
@@ -860,7 +901,7 @@ pub async fn sigv4_auth_middleware(
             };
             (auth.secret_access_key.clone(), Some(auth_user))
         }
-        IamState::Iam(index) => {
+        AuthGateDecision::Iam(index) => {
             let user = match index.get(&params.access_key) {
                 Some(u) => u,
                 None => {
@@ -1227,6 +1268,38 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Discriminant for asserting `classify_auth_gate` outcomes without
+    /// constructing/comparing the borrowed payloads.
+    fn gate_kind(d: &AuthGateDecision) -> &'static str {
+        match d {
+            AuthGateDecision::Locked => "locked",
+            AuthGateDecision::Open => "open",
+            AuthGateDecision::Bootstrap(_) => "bootstrap",
+            AuthGateDecision::Iam(_) => "iam",
+        }
+    }
+
+    #[test]
+    fn classify_auth_gate_truth_table() {
+        let auth = crate::iam::AuthConfig {
+            access_key_id: "AKIA".into(),
+            secret_access_key: "secret".into(),
+        };
+        let legacy = IamState::Legacy(auth.clone());
+        let iam = IamState::Iam(crate::iam::IamIndex::from_users(vec![]));
+        let disabled = IamState::Disabled;
+
+        // locked=true overrides EVERY IamState variant.
+        for state in [&disabled, &legacy, &iam] {
+            assert_eq!(gate_kind(&classify_auth_gate(true, state)), "locked");
+        }
+
+        // locked=false: the IamState variant decides the path.
+        assert_eq!(gate_kind(&classify_auth_gate(false, &disabled)), "open");
+        assert_eq!(gate_kind(&classify_auth_gate(false, &legacy)), "bootstrap");
+        assert_eq!(gate_kind(&classify_auth_gate(false, &iam)), "iam");
+    }
 
     #[test]
     fn test_parse_auth_header() {

@@ -306,8 +306,6 @@ pub async fn oauth_callback(
             .into_response();
         }
     };
-    let client_ip_for_session =
-        rate_limiter::extract_client_ip_with_peer(&req_headers, connect_info.map(|ci| ci.0.ip()));
 
     // Check for provider error response
     if let Some(err) = &params.error {
@@ -556,13 +554,13 @@ pub async fn oauth_callback(
     // Successful OAuth login — reset rate limiter for this IP
     guard.record_success();
 
-    // Rotate the session: drop any pre-login cookie so an XSS-leaked
-    // earlier token can't outlive the OAuth flow.
-    super::auth::drop_prior_session(&state, &req_headers);
-
-    // Create session — use raw Option<IpAddr> so session validation sees the same value
-    let token = state.sessions.create_session(
-        client_ip_for_session,
+    // Rotate the session via the single mint constructor (drop→create order).
+    // The IP is recomputed from the same (headers, peer) inputs used for
+    // rate-limiting above, so session validation sees the same value.
+    let token = super::auth::mint_session(
+        &state,
+        &req_headers,
+        connect_info.as_ref(),
         AuthMethod::External {
             provider_name: pending.provider_name.clone(),
             user_id: user.id,

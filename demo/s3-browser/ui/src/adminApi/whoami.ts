@@ -13,6 +13,9 @@ export interface WhoamiResponse {
   version?: string;
   user: { name: string; access_key_id: string; is_admin: boolean; permissions?: IamPermission[] } | null;
   config_db_mismatch?: boolean;
+  /** Typed lock signal from the server: 'locked' when the config DB is
+   *  bootstrap-hash-mismatched. Prefer this over inferring from error text. */
+  lock_state?: 'locked';
   external_providers?: ExternalProviderInfo[];
 }
 

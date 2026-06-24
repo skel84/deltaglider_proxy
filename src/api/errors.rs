@@ -96,6 +96,11 @@ pub enum S3Error {
 
     #[error("PreconditionFailed: At least one of the pre-conditions you specified did not hold.")]
     PreconditionFailed,
+
+    /// 503 Service Unavailable with an operator-facing recovery message.
+    /// Used when the proxy cannot serve S3 traffic (e.g. config DB locked).
+    #[error("ServiceUnavailable: {0}")]
+    ServiceUnavailable(String),
 }
 
 impl S3Error {
@@ -126,6 +131,7 @@ impl S3Error {
             S3Error::InvalidRange => "InvalidRange",
             S3Error::NotModified { .. } => "NotModified",
             S3Error::PreconditionFailed => "PreconditionFailed",
+            S3Error::ServiceUnavailable(_) => "ServiceUnavailable",
         }
     }
 
@@ -156,6 +162,7 @@ impl S3Error {
             S3Error::InvalidRange => StatusCode::RANGE_NOT_SATISFIABLE,
             S3Error::NotModified { .. } => StatusCode::NOT_MODIFIED,
             S3Error::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
+            S3Error::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 

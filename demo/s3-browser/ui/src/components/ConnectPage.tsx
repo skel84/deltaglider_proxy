@@ -21,9 +21,16 @@ function clearSignedOutFlag() {
   }
 }
 
-function finishConnect(onConnect: () => void) {
+/** What kind of session the connect flow established, decided at the point it's
+ *  KNOWN (the loginAs-vs-lift branch) rather than re-derived by the caller. */
+export type ConnectOutcome =
+  | { kind: 'admin' } // bootstrap login / IAM admin login-as → full admin GUI
+  | { kind: 'filesOnly' } // IAM non-admin browser-lift → browse only
+  | { kind: 'open' }; // open-access anonymous session
+
+function finishConnect(onConnect: (outcome: ConnectOutcome) => void, outcome: ConnectOutcome) {
   clearSignedOutFlag();
-  onConnect();
+  onConnect(outcome);
 }
 
 /** Tiny diagram for the locked-DB wizard: one password + random salt → two
@@ -67,7 +74,7 @@ function LockedDbExplainer({ accent, muted, text }: { accent: string; muted: str
 }
 
 interface Props {
-  onConnect: () => void;
+  onConnect: (outcome: ConnectOutcome) => void;
   showError?: boolean;
 }
 
@@ -148,7 +155,8 @@ export default function ConnectPage({ onConnect, showError }: Props) {
         if (cancelled) return;
         setAuthMode(info.mode as 'bootstrap' | 'iam' | 'open');
         setExternalProviders(info.external_providers || []);
-        if (info.config_db_mismatch) {
+        // Typed lock signal preferred; config_db_mismatch kept as fallback.
+        if (info.lock_state === 'locked' || info.config_db_mismatch) {
           setShowRecovery(true);
           setDetecting(false);
           return;
@@ -173,7 +181,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
             setError(r.error);
             return;
           }
-          finishConnect(onConnect);
+          finishConnect(onConnect, { kind: 'open' });
           return;
         }
         setDetecting(false);
@@ -214,7 +222,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
 
         const restored = await initFromSession();
         if (restored) {
-          finishConnect(onConnect);
+          finishConnect(onConnect, { kind: 'admin' });
           return;
         }
         // Session didn't provide creds — shouldn't happen in bootstrap, but fall through
@@ -246,10 +254,15 @@ export default function ConnectPage({ onConnect, showError }: Props) {
       const trimmedSk = secretKey.trim();
 
       // Admin session must exist before PUT /session/s3-credentials (cookie-gated).
+      // login-as succeeds only for IAM admins → admin GUI; otherwise we fall back
+      // to a browse-only lift session. The outcome is KNOWN here, so pass it on
+      // rather than have the caller re-derive it.
+      let iamOutcome: ConnectOutcome = { kind: 'admin' };
       const loginAsRes = await loginAs(trimmedAk, trimmedSk);
       if (loginAsRes.ok) {
         setCredentials(trimmedAk, trimmedSk);
       } else {
+        iamOutcome = { kind: 'filesOnly' };
         const bc = await browserSessionConnect({
           access_key_id: trimmedAk,
           secret_access_key: trimmedSk,
@@ -269,7 +282,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
         }
       }
 
-      finishConnect(onConnect);
+      finishConnect(onConnect, iamOutcome);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Connection failed');
     } finally {
@@ -289,7 +302,7 @@ export default function ConnectPage({ onConnect, showError }: Props) {
         setOpenSignedOut(true);
         return;
       }
-      finishConnect(onConnect);
+      finishConnect(onConnect, { kind: 'open' });
     } finally {
       setLoading(false);
     }

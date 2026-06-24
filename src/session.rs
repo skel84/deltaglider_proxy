@@ -32,6 +32,26 @@ pub struct S3SessionCredentials {
     pub secret_access_key: String,
 }
 
+impl S3SessionCredentials {
+    /// Sentinel key pair used by open-mode (`authentication: none`) browser
+    /// sessions, where the proxy has no real SigV4 keys. THE single home for
+    /// the `"anonymous"` literal — call sites must not duplicate it.
+    pub const ANONYMOUS_KEY: &'static str = "anonymous";
+
+    /// Build open-mode anonymous S3 credentials. The access/secret pair is the
+    /// [`ANONYMOUS_KEY`](Self::ANONYMOUS_KEY) sentinel; endpoint/region/bucket
+    /// come from the caller.
+    pub fn anonymous(endpoint: String, region: String, bucket: String) -> Self {
+        S3SessionCredentials {
+            endpoint,
+            region,
+            bucket,
+            access_key_id: Self::ANONYMOUS_KEY.to_string(),
+            secret_access_key: Self::ANONYMOUS_KEY.to_string(),
+        }
+    }
+}
+
 impl Drop for S3SessionCredentials {
     fn drop(&mut self) {
         // Zero out the secret on drop to prevent it from lingering in memory

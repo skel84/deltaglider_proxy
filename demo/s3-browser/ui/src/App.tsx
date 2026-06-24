@@ -11,7 +11,7 @@ import InspectorPanel from './components/InspectorPanel';
 import FilePreview from './components/FilePreview';
 import DropZone from './components/DropZone';
 import UploadPage from './components/UploadPage';
-import ConnectPage from './components/ConnectPage';
+import ConnectPage, { type ConnectOutcome } from './components/ConnectPage';
 // Heavy admin/docs/metrics pages are lazy-loaded so the file-browser
 // shell doesn't pay for Monaco / mermaid / recharts on first paint.
 const AdminPage = lazy(() => import('./components/AdminPage'));
@@ -169,7 +169,14 @@ export default function App() {
     }
   }, []);
 
-  const onConnectComplete = useCallback(() => {
+  // ConnectPage tells us what kind of session it just established, so we can
+  // light up (or gate) admin-only UI optimistically instead of waiting for the
+  // checkSession round-trip. refreshSessionGate() still runs as the authoritative
+  // reconcile — the optimistic set just avoids a flash of wrong capabilities.
+  const onConnectComplete = useCallback((outcome: ConnectOutcome) => {
+    setSessionCaps(
+      deriveSessionCapabilities({ valid: true, admin_gui: outcome.kind === 'admin' }),
+    );
     void refreshSessionGate();
   }, [refreshSessionGate]);
 

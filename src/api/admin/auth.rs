@@ -73,8 +73,22 @@ pub struct WhoamiResponse {
     user: Option<WhoamiUserInfo>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     config_db_mismatch: bool,
+    /// Typed lock signal for the frontend: `"locked"` when the config DB
+    /// failed to decrypt (mirrors `config_db_mismatch`), omitted otherwise.
+    /// Lets the UI branch on a typed field instead of regex-matching error text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lock_state: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     external_providers: Vec<ExternalProviderInfo>,
+}
+
+/// Map the config-DB lock flag to the typed `lock_state` whoami field.
+fn lock_state_for(config_db_mismatch: bool) -> Option<&'static str> {
+    if config_db_mismatch {
+        Some("locked")
+    } else {
+        None
+    }
 }
 
 #[derive(Serialize)]
@@ -171,6 +185,23 @@ pub(super) fn drop_prior_session(state: &AdminState, headers: &HeaderMap) {
     if let Some(prior) = extract_session_token(headers) {
         state.sessions.remove(&prior);
     }
+}
+
+/// THE single session-mint constructor. Owns the load-bearing order — drop the
+/// prior cookie BEFORE creating the new one (XSS-rotation defense) — so a new
+/// mint path physically cannot forget it. All session-minting routes go through
+/// here; setting S3 creds stays at the call site (it varies per path).
+pub(super) fn mint_session(
+    state: &AdminState,
+    headers: &HeaderMap,
+    connect_info: Option<&ConnectInfo<SocketAddr>>,
+    auth_method: AuthMethod,
+    kind: SessionKind,
+) -> String {
+    drop_prior_session(state, headers);
+    state
+        .sessions
+        .create_session(request_client_ip(headers, connect_info), auth_method, kind)
 }
 
 /// Test-only shim: equivalent to [`session_cookie_with_headers`] with
@@ -339,9 +370,10 @@ pub async fn login(
     guard.record_success();
     // Rotate the session: drop any pre-login cookie so an XSS-leaked
     // earlier token can't outlive the password re-entry.
-    drop_prior_session(&state, &req_headers);
-    let token = state.sessions.create_session(
-        request_client_ip(&req_headers, connect_info.as_ref()),
+    let token = mint_session(
+        &state,
+        &req_headers,
+        connect_info.as_ref(),
         AuthMethod::Bootstrap,
         SessionKind::AdminGui,
     );
@@ -368,13 +400,7 @@ pub async fn login(
             // (PUT/GET would fail). Mirror `open_browser_connect` anonymous pair.
             state.sessions.set_s3_creds(
                 &token,
-                S3SessionCredentials {
-                    endpoint: String::new(),
-                    region,
-                    bucket: String::new(),
-                    access_key_id: "anonymous".to_string(),
-                    secret_access_key: "anonymous".to_string(),
-                },
+                S3SessionCredentials::anonymous(String::new(), region, String::new()),
             );
         }
     }
@@ -477,6 +503,7 @@ pub async fn whoami(
         version: env!("CARGO_PKG_VERSION").to_string(),
         user,
         config_db_mismatch: state.config_db_mismatch,
+        lock_state: lock_state_for(state.config_db_mismatch),
         external_providers,
     })
 }
@@ -528,6 +555,7 @@ pub async fn resolve_iam_identity(
             permissions: user.permissions,
         }),
         config_db_mismatch: state.config_db_mismatch,
+        lock_state: lock_state_for(state.config_db_mismatch),
         external_providers: vec![],
     }))
 }
@@ -675,9 +703,10 @@ pub async fn login_as(
 
     // Rotate the session: drop any pre-login cookie so an XSS-leaked
     // earlier token can't outlive the credential re-entry.
-    drop_prior_session(&state, &req_headers);
-    let token = state.sessions.create_session(
-        request_client_ip(&req_headers, connect_info.as_ref()),
+    let token = mint_session(
+        &state,
+        &req_headers,
+        connect_info.as_ref(),
         AuthMethod::IamLoginAs {
             access_key_id: body.access_key_id.clone(),
         },
@@ -786,9 +815,10 @@ pub async fn browser_session_connect(
 
     // Rotate the session: drop any pre-login cookie so an XSS-leaked
     // earlier token can't outlive the credential re-entry.
-    drop_prior_session(&state, &req_headers);
-    let token = state.sessions.create_session(
-        request_client_ip(&req_headers, connect_info.as_ref()),
+    let token = mint_session(
+        &state,
+        &req_headers,
+        connect_info.as_ref(),
         AuthMethod::IamBrowserLift {
             access_key_id: ak.clone(),
         },
@@ -875,22 +905,17 @@ pub async fn open_browser_connect(
 
     // Rotate the session: drop any pre-login cookie so an XSS-leaked
     // earlier token can't outlive the new bind.
-    drop_prior_session(&state, &req_headers);
-    let token = state.sessions.create_session(
-        request_client_ip(&req_headers, connect_info.as_ref()),
+    let token = mint_session(
+        &state,
+        &req_headers,
+        connect_info.as_ref(),
         AuthMethod::OpenLift,
         SessionKind::S3BrowserLift,
     );
 
     state.sessions.set_s3_creds(
         &token,
-        S3SessionCredentials {
-            endpoint: body.endpoint,
-            region,
-            bucket: body.bucket,
-            access_key_id: "anonymous".to_string(),
-            secret_access_key: "anonymous".to_string(),
-        },
+        S3SessionCredentials::anonymous(body.endpoint, region, body.bucket),
     );
 
     audit_log("open_browser_connect", "open", "anonymous", &req_headers);
