@@ -44,7 +44,7 @@ export async function getPrefixUsage(bucket: string, prefix: string): Promise<Us
  * chip never displays "100% saved" while a reference still lives on
  * disk. Server-side cached for 30 s.
  */
-export interface PrefixSavingsTotals {
+interface PrefixSavingsTotals {
   original_bytes: number;
   stored_bytes: number;
   reference_bytes: number;

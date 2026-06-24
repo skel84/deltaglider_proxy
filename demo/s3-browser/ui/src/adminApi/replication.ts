@@ -1,8 +1,8 @@
 // === Object Replication ===
 
-export type ReplicationConflictPolicy = 'newer-wins' | 'source-wins' | 'skip-if-dest-exists';
+type ReplicationConflictPolicy = 'newer-wins' | 'source-wins' | 'skip-if-dest-exists';
 
-export interface ReplicationEndpoint {
+interface ReplicationEndpoint {
   bucket: string;
   prefix: string;
 }

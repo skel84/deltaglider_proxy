@@ -2,7 +2,7 @@
 import type { AdminConfig } from './core';
 import type { ReplicationConfig } from './replication';
 
-export interface LifecycleQualifySpec {
+interface LifecycleQualifySpec {
   min_size_bytes?: number;
   min_age?: string;
 }

@@ -126,7 +126,7 @@ export interface AdmissionBlock {
   action: AdmissionAction;
 }
 
-export interface AdmissionMatch {
+interface AdmissionMatch {
   method?: string[];
   source_ip?: string;
   source_ip_list?: string[];
@@ -136,7 +136,7 @@ export interface AdmissionMatch {
   config_flag?: string;
 }
 
-export type AdmissionAction =
+type AdmissionAction =
   | 'allow-anonymous'
   | 'deny'
   | 'continue'

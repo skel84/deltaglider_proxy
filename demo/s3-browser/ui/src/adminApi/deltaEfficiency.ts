@@ -138,7 +138,7 @@ export async function triggerDeltaEfficiencyScan(
  * Sorted ascending by `ratio` on the server so the UI gets
  * percentile picks for free.
  */
-export interface VerifiedDelta {
+interface VerifiedDelta {
   key: string;
   original_size: number;
   delta_size: number;

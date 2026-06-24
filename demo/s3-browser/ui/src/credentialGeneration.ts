@@ -13,7 +13,7 @@ const ID_BODY_LENGTH = 18;
 const SECRET_LENGTH = 40;
 
 /** Fill `buf` with random bytes. Defaults to the Web Crypto CSPRNG. */
-type RandomFill = (buf: Uint8Array) => void;
+type RandomFill = (buf: Uint8Array<ArrayBuffer>) => void;
 
 const defaultFill: RandomFill = (buf) => crypto.getRandomValues(buf);
 
