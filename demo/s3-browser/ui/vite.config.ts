@@ -42,11 +42,10 @@ export default defineConfig({
     __BUILD_VERSION__: JSON.stringify(resolveBuildVersion()),
   },
   build: {
-    // No source maps in the prod build: `DemoAssets` embeds the WHOLE dist/
-    // into the binary and serves every asset, so maps would ship the original
-    // TS to any client AND add ~22MB of binary bloat. Build locally with
-    // `vite build --sourcemap` when you need them for debugging.
-    sourcemap: false,
+    // Source maps kept ON deliberately for ease of debugging the embedded
+    // admin UI in production. (They do ship in the binary — DemoAssets embeds
+    // the whole dist/ — which is an accepted tradeoff here.)
+    sourcemap: true,
     //
     // manualChunks: split heavy vendor libs out of the main shell so
     // the file-browser entry only downloads what it needs on first

@@ -3,7 +3,7 @@
 # Multi-stage build: Node (demo UI) → Rust (binary) → minimal runtime
 
 # Stage 1: Build the demo UI
-FROM node:20-alpine AS ui-builder
+FROM node:26-alpine AS ui-builder
 WORKDIR /ui
 COPY demo/s3-browser/ui/package.json demo/s3-browser/ui/package-lock.json ./
 RUN npm ci

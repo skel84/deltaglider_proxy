@@ -1,5 +1,5 @@
 # ── Build stage: UI ──
-FROM node:22-alpine AS ui-build
+FROM node:26-alpine AS ui-build
 WORKDIR /app/demo/s3-browser/ui
 COPY demo/s3-browser/ui/package.json demo/s3-browser/ui/package-lock.json ./
 RUN npm ci
