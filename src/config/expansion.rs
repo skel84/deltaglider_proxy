@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! `${env:NAME}` / `${env:NAME:-default}` config expansion (pre-parse).
 //!
 //! In-process replacement for an external `envsubst` step: operators ship a

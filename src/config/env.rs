@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! Typed environment-variable parsing helpers.
 //!
 //! These are the DRY convention for reading `DGP_*` env vars — parse through
