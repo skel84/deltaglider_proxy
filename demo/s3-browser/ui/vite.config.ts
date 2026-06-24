@@ -51,23 +51,35 @@ export default defineConfig({
     // the file-browser entry only downloads what it needs on first
     // paint. AntD, AWS SDK, markdown stack, and dnd-kit are all
     // independently cacheable across page navigations.
+    //
+    // Function form (not the object form) because Vite 8 ships Rolldown
+    // as its bundler, and Rolldown's manualChunks only accepts a
+    // function. The function form is portable — it also works under
+    // the classic Rollup backend, so no Vite-version coupling here.
     rollupOptions: {
       output: {
-        manualChunks: {
-          'antd': ['antd', '@ant-design/icons'],
-          'aws-sdk': [
-            '@aws-sdk/client-s3',
-            '@aws-sdk/lib-storage',
-            '@aws-sdk/s3-request-presigner',
-          ],
-          'markdown': [
-            'react-markdown',
-            'remark-gfm',
-            'rehype-highlight',
-            'rehype-slug',
-          ],
-          'dnd': ['@dnd-kit/core', '@dnd-kit/sortable', '@dnd-kit/utilities'],
-          'forms': ['react-hook-form', '@hookform/resolvers', 'zod'],
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return
+          // Chunk name -> packages whose node_modules path matches.
+          const groups: [string, string[]][] = [
+            ['antd', ['antd', '@ant-design/icons']],
+            ['aws-sdk', [
+              '@aws-sdk/client-s3',
+              '@aws-sdk/lib-storage',
+              '@aws-sdk/s3-request-presigner',
+            ]],
+            ['markdown', [
+              'react-markdown',
+              'remark-gfm',
+              'rehype-highlight',
+              'rehype-slug',
+            ]],
+            ['dnd', ['@dnd-kit/core', '@dnd-kit/sortable', '@dnd-kit/utilities']],
+            ['forms', ['react-hook-form', '@hookform/resolvers', 'zod']],
+          ]
+          for (const [chunk, pkgs] of groups) {
+            if (pkgs.some((p) => id.includes(`/node_modules/${p}/`))) return chunk
+          }
         },
       },
     },
