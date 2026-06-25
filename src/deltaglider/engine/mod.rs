@@ -753,6 +753,13 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         self.codec_semaphore.available_permits()
     }
 
+    /// Borrow the metrics handle (None in tests). Lets transfer/replication
+    /// code clone the `Arc<Metrics>` into part/object closures for counters.
+    #[inline]
+    pub fn metrics(&self) -> Option<&Arc<Metrics>> {
+        self.metrics.as_ref()
+    }
+
     /// Run a closure with the metrics if enabled (no-op in tests).
     #[inline]
     fn with_metrics(&self, f: impl FnOnce(&Metrics)) {

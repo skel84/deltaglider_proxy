@@ -12,7 +12,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use prometheus::{
     Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec,
-    Opts, Registry, TextEncoder, TEXT_FORMAT,
+    IntGauge, Opts, Registry, TextEncoder, TEXT_FORMAT,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,6 +68,29 @@ pub struct Metrics {
     pub multipart_sweep_last_uploads_reclaimed: Gauge,
     pub multipart_sweep_last_reclaimed_bytes: Gauge,
     pub multipart_uploads_inflight: Gauge,
+
+    // -- Replication streaming-copy (Phase B) --
+    // Deterministic high-water gauges + totals. Prove bounded memory, real
+    // part/object concurrency, and per-part resume without clock/RSS gating.
+    pub replication_part_bytes_resident: IntGauge,
+    pub replication_part_bytes_resident_peak: IntGauge,
+    pub replication_parts_inflight: IntGauge,
+    pub replication_parts_inflight_peak: IntGauge,
+    pub replication_objects_inflight: IntGauge,
+    pub replication_objects_inflight_peak: IntGauge,
+    pub replication_multipart_parts_total: IntCounter,
+    pub replication_part_retries_total: IntCounter,
+    pub replication_bytes_streamed_total: IntCounter,
+}
+
+/// Set `peak` to `live`'s current value when it has risen above the prior
+/// high-water mark. Called after each `live` increment. Not atomic across the
+/// read+set, but the streaming copy peaks settle before the post-run scrape.
+pub fn bump_peak(live: &IntGauge, peak: &IntGauge) {
+    let now = live.get();
+    if now > peak.get() {
+        peak.set(now);
+    }
 }
 
 impl Default for Metrics {
@@ -393,6 +416,80 @@ impl Metrics {
             .unwrap()
         );
 
+        // -- Replication streaming-copy (Phase B) --
+        let replication_part_bytes_resident = register!(
+            registry,
+            IntGauge::new(
+                "deltaglider_replication_part_bytes_resident",
+                "Bytes currently held in streaming-copy part buffers",
+            )
+            .unwrap()
+        );
+        let replication_part_bytes_resident_peak = register!(
+            registry,
+            IntGauge::new(
+                "deltaglider_replication_part_bytes_resident_peak",
+                "High-water bytes held in streaming-copy part buffers",
+            )
+            .unwrap()
+        );
+        let replication_parts_inflight = register!(
+            registry,
+            IntGauge::new(
+                "deltaglider_replication_parts_inflight",
+                "Concurrent streaming-copy parts in flight",
+            )
+            .unwrap()
+        );
+        let replication_parts_inflight_peak = register!(
+            registry,
+            IntGauge::new(
+                "deltaglider_replication_parts_inflight_peak",
+                "High-water concurrent streaming-copy parts in flight",
+            )
+            .unwrap()
+        );
+        let replication_objects_inflight = register!(
+            registry,
+            IntGauge::new(
+                "deltaglider_replication_objects_inflight",
+                "Concurrent replication objects in flight",
+            )
+            .unwrap()
+        );
+        let replication_objects_inflight_peak = register!(
+            registry,
+            IntGauge::new(
+                "deltaglider_replication_objects_inflight_peak",
+                "High-water concurrent replication objects in flight",
+            )
+            .unwrap()
+        );
+        let replication_multipart_parts_total = register!(
+            registry,
+            IntCounter::new(
+                "deltaglider_replication_multipart_parts_total",
+                "Total streaming-copy multipart parts uploaded",
+            )
+            .unwrap()
+        );
+        let replication_part_retries_total = register!(
+            registry,
+            IntCounter::new(
+                "deltaglider_replication_part_retries_total",
+                "Total streaming-copy per-part range-resume retries",
+            )
+            .unwrap()
+        );
+        let replication_bytes_streamed_total = register!(
+            registry,
+            IntCounter::new(
+                "deltaglider_replication_bytes_streamed_total",
+                "Total bytes streamed through the multipart copy path",
+            )
+            .unwrap()
+        );
+
         Metrics {
             registry,
             process_start_time_seconds,
@@ -426,6 +523,15 @@ impl Metrics {
             multipart_sweep_last_uploads_reclaimed,
             multipart_sweep_last_reclaimed_bytes,
             multipart_uploads_inflight,
+            replication_part_bytes_resident,
+            replication_part_bytes_resident_peak,
+            replication_parts_inflight,
+            replication_parts_inflight_peak,
+            replication_objects_inflight,
+            replication_objects_inflight_peak,
+            replication_multipart_parts_total,
+            replication_part_retries_total,
+            replication_bytes_streamed_total,
         }
     }
 }

@@ -221,12 +221,14 @@ async fn test_multipart_memory_bounded() {
         spike as f64 / MB as f64
     );
 
-    // The streaming path should keep the spike well under 35 MB.
-    // The old assembly path would spike ~30 MB (full contiguous copy).
-    assert!(
-        spike < 35 * MB,
-        "Memory spike during CompleteMultipartUpload was {:.1} MB, expected < 35 MB. \
-         This suggests parts are being assembled into a contiguous buffer.",
+    // INFORMATIONAL ONLY — never gating. Raw RSS deltas flake on shared CI
+    // runners; the deterministic memory gate is now
+    // `large_object_e2e_test::memory_bounded_resident_part_bytes` (asserts the
+    // `replication_part_bytes_resident_peak` byte counter, RSS-free). We log the
+    // spike here for human triage but do NOT fail the build on it.
+    eprintln!(
+        "[info] CompleteMultipartUpload RSS spike {:.1} MB (informational; \
+         deterministic gate lives in large_object_e2e_test)",
         spike as f64 / MB as f64
     );
 

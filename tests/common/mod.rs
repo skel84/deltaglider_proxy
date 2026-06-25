@@ -973,6 +973,92 @@ pub fn generate_binary(size: usize, seed: u64) -> Vec<u8> {
     data
 }
 
+/// Deterministic pseudo-random, incompressible body (xorshift). Stored
+/// passthrough (not delta-eligible) and large enough to span multiple
+/// multipart parts. Shared by `streaming_copy_test` and
+/// `large_object_e2e_test`.
+pub fn big_passthrough_body(len: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(len);
+    let mut x: u64 = 0x1234_5678_9abc_def0;
+    while v.len() < len {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    v.truncate(len);
+    v
+}
+
+/// Parsed snapshot of the un-labelled streaming-copy metrics scraped from
+/// `GET /_/metrics`. Fields map 1:1 to the `deltaglider_*` series; absent
+/// lines default to 0.
+#[derive(Debug, Clone, Default)]
+pub struct MetricsSnapshot {
+    pub part_bytes_resident: u64,
+    pub part_bytes_resident_peak: u64,
+    pub parts_inflight: u64,
+    pub parts_inflight_peak: u64,
+    pub objects_inflight: u64,
+    pub objects_inflight_peak: u64,
+    pub multipart_parts_total: u64,
+    pub part_retries_total: u64,
+    pub bytes_streamed_total: u64,
+    pub delta_bytes_saved_total: u64,
+    pub process_peak_rss_bytes: u64,
+}
+
+/// Scrape `GET /_/metrics` and parse the un-labelled Prometheus lines
+/// (`name value`) into a [`MetricsSnapshot`]. Snapshot ONCE after a
+/// synchronous run-now returns 200 (peaks have settled).
+pub async fn metrics_snapshot(endpoint: &str) -> MetricsSnapshot {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("metrics client");
+    let url = format!("{}/_/metrics", endpoint);
+    let body = client
+        .get(&url)
+        .send()
+        .await
+        .expect("GET /_/metrics failed")
+        .text()
+        .await
+        .expect("read /_/metrics body");
+
+    let mut snap = MetricsSnapshot::default();
+    for line in body.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        // Un-labelled series: `name value`. Skip labelled lines (name{..}).
+        let Some((name, value)) = line.rsplit_once(' ') else {
+            continue;
+        };
+        if name.contains('{') {
+            continue;
+        }
+        let parsed = value.trim().parse::<f64>().unwrap_or(0.0) as u64;
+        match name {
+            "deltaglider_replication_part_bytes_resident" => snap.part_bytes_resident = parsed,
+            "deltaglider_replication_part_bytes_resident_peak" => {
+                snap.part_bytes_resident_peak = parsed
+            }
+            "deltaglider_replication_parts_inflight" => snap.parts_inflight = parsed,
+            "deltaglider_replication_parts_inflight_peak" => snap.parts_inflight_peak = parsed,
+            "deltaglider_replication_objects_inflight" => snap.objects_inflight = parsed,
+            "deltaglider_replication_objects_inflight_peak" => snap.objects_inflight_peak = parsed,
+            "deltaglider_replication_multipart_parts_total" => snap.multipart_parts_total = parsed,
+            "deltaglider_replication_part_retries_total" => snap.part_retries_total = parsed,
+            "deltaglider_replication_bytes_streamed_total" => snap.bytes_streamed_total = parsed,
+            "deltaglider_delta_bytes_saved_total" => snap.delta_bytes_saved_total = parsed,
+            "process_peak_rss_bytes" => snap.process_peak_rss_bytes = parsed,
+            _ => {}
+        }
+    }
+    snap
+}
+
 /// Mutate binary data by changing a percentage of bytes
 pub fn mutate_binary(data: &[u8], change_ratio: f64) -> Vec<u8> {
     let mut result = data.to_vec();

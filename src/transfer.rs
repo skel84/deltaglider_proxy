@@ -8,12 +8,59 @@
 //! transport failures.
 
 use crate::deltaglider::DynEngine;
+use crate::metrics::{bump_peak, Metrics};
 use crate::storage::UploadedPart;
 use crate::transfer_plan::{self, PartSpan};
 use bytes::{Bytes, BytesMut};
 use futures::stream::{StreamExt, TryStreamExt};
 use std::sync::Arc;
 use tracing::{info, warn};
+
+/// RAII guard for one in-flight streaming-copy part. Increments
+/// `parts_inflight` (+peak) on construction; records resident part bytes via
+/// [`PartGuard::resident`]; subtracts resident bytes and decrements
+/// `parts_inflight` on drop so an early abort still settles the gauges.
+struct PartGuard {
+    metrics: Arc<Metrics>,
+    resident: i64,
+}
+
+impl PartGuard {
+    fn new(metrics: Arc<Metrics>) -> Self {
+        metrics.replication_parts_inflight.inc();
+        bump_peak(
+            &metrics.replication_parts_inflight,
+            &metrics.replication_parts_inflight_peak,
+        );
+        Self {
+            metrics,
+            resident: 0,
+        }
+    }
+
+    /// Record `len` bytes now resident in this part's buffer.
+    fn resident(&mut self, len: u64) {
+        self.resident = len as i64;
+        self.metrics
+            .replication_part_bytes_resident
+            .add(self.resident);
+        bump_peak(
+            &self.metrics.replication_part_bytes_resident,
+            &self.metrics.replication_part_bytes_resident_peak,
+        );
+    }
+}
+
+impl Drop for PartGuard {
+    fn drop(&mut self) {
+        if self.resident != 0 {
+            self.metrics
+                .replication_part_bytes_resident
+                .sub(self.resident);
+        }
+        self.metrics.replication_parts_inflight.dec();
+    }
+}
 
 pub(crate) const DEFAULT_COPY_MAX_ATTEMPTS: u32 = 3;
 pub(crate) const REPLICATION_RULE_METADATA_KEY: &str = "dg-replication-rule";
@@ -247,6 +294,7 @@ async fn stream_copy_passthrough(
     // `finish` can assemble them; that path isn't memory-critical (local).
     let src_bucket = request.source_bucket.to_string();
     let src_key = request.source_key.to_string();
+    let metrics = engine.metrics().cloned();
     let results: Result<Vec<PartUploadResult>, String> =
         futures::stream::iter(spans.iter().copied())
             .map(|span| {
@@ -254,10 +302,25 @@ async fn stream_copy_passthrough(
                 let handle = handle.clone();
                 let src_bucket = src_bucket.clone();
                 let src_key = src_key.clone();
+                let metrics = metrics.clone();
                 async move {
-                    let bytes = fetch_part_with_resume(&engine, &src_bucket, &src_key, &span)
-                        .await
-                        .map_err(|e| format!("part {} fetch failed: {}", span.number, e))?;
+                    // Guard increments parts_inflight on entry, holds resident
+                    // bytes, and decrements both on drop (covers early abort).
+                    let mut guard = metrics.clone().map(PartGuard::new);
+                    maybe_part_barrier().await;
+                    let bytes = fetch_part_with_resume(
+                        &engine,
+                        &src_bucket,
+                        &src_key,
+                        &span,
+                        metrics.as_ref(),
+                    )
+                    .await
+                    .map_err(|e| format!("part {} fetch failed: {}", span.number, e))?;
+                    let len = bytes.len() as u64;
+                    if let Some(g) = guard.as_mut() {
+                        g.resident(len);
+                    }
                     let retained = if native {
                         None
                     } else {
@@ -267,6 +330,10 @@ async fn stream_copy_passthrough(
                         .upload_passthrough_part(&handle, span.number, bytes)
                         .await
                         .map_err(|e| format!("upload_part {} failed: {}", span.number, e))?;
+                    if let Some(m) = metrics.as_ref() {
+                        m.replication_multipart_parts_total.inc();
+                        m.replication_bytes_streamed_total.inc_by(len);
+                    }
                     Ok::<PartUploadResult, String>((part, retained))
                 }
             })
@@ -342,6 +409,7 @@ async fn fetch_part_with_resume(
     bucket: &str,
     key: &str,
     span: &PartSpan,
+    metrics: Option<&Arc<Metrics>>,
 ) -> Result<Bytes, Box<dyn std::error::Error + Send + Sync>> {
     const MAX_PART_ATTEMPTS: u32 = 4;
     let mut last_err: Option<String> = None;
@@ -351,6 +419,9 @@ async fn fetch_part_with_resume(
             Err(msg) => {
                 if !is_transient_copy_error(&msg) || attempt == MAX_PART_ATTEMPTS {
                     return Err(msg.into());
+                }
+                if let Some(m) = metrics {
+                    m.replication_part_retries_total.inc();
                 }
                 warn!(
                     "transient part {} fetch failure attempt {}/{} ({}-{}): {}",
@@ -374,6 +445,12 @@ async fn fetch_part_once(
     key: &str,
     span: &PartSpan,
 ) -> Result<Bytes, String> {
+    // Test-only fault injection (inert without the env var): fire a
+    // transient-classified error exactly once for the named part so the
+    // resume loop retries + range-resumes it.
+    if let Some(e) = maybe_inject_part_failure(span.number) {
+        return Err(e);
+    }
     let ranged = engine
         .retrieve_stream_range(bucket, key, span.start, span.end_inclusive)
         .await
@@ -433,6 +510,37 @@ async fn verify_destination(
         }
     }
     Ok(())
+}
+
+/// Test seam: when `DGP_TEST_FAIL_PART_ONCE=<part#>` is set, return a
+/// transient-classified error the FIRST time that part is fetched (once per
+/// process via `compare_exchange`). Inert in prod (env unset → None).
+fn maybe_inject_part_failure(part_number: i32) -> Option<String> {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    static FIRED: AtomicI32 = AtomicI32::new(-1);
+    let target: i32 = crate::config::env_parse_with_default("DGP_TEST_FAIL_PART_ONCE", -1);
+    if target < 0 || target != part_number {
+        return None;
+    }
+    // compare_exchange(-1 → part#) succeeds for exactly one caller.
+    if FIRED
+        .compare_exchange(-1, part_number, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        return Some("connection reset (injected)".to_string());
+    }
+    None
+}
+
+/// Test seam: when `DGP_TEST_PART_BARRIER=1`, async-sleep a small fixed delay
+/// (`DGP_TEST_PART_DELAY_MS`, default 150ms) AFTER a part's inflight gauge is
+/// bumped so >=concurrency parts are co-resident — making the inflight peak
+/// DETERMINISTICALLY reach the configured concurrency. Inert in prod.
+async fn maybe_part_barrier() {
+    if crate::config::env_bool("DGP_TEST_PART_BARRIER", false) {
+        let ms: u64 = crate::config::env_parse_with_default("DGP_TEST_PART_DELAY_MS", 150);
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
 }
 
 pub(crate) fn is_transient_copy_error(message: &str) -> bool {

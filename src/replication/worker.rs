@@ -34,6 +34,7 @@ use crate::config_sections::ReplicationRule;
 use crate::deltaglider::DynEngine;
 use crate::event_outbox::{EventKind, EventSource, NewEvent};
 use crate::job_loop::Pager;
+use crate::metrics::{bump_peak, Metrics};
 use crate::transfer::{
     copy_object_with_retries, ObjectTransferRequest, TransferProvenance,
     REPLICATION_RULE_METADATA_KEY,
@@ -42,6 +43,41 @@ use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+
+/// RAII guard for one in-flight replication object. Increments
+/// `objects_inflight` (+peak) on construction and decrements on drop so the
+/// gauge always settles, even on an early return/abort.
+struct ObjectGuard {
+    metrics: Arc<Metrics>,
+}
+
+impl ObjectGuard {
+    fn new(metrics: Arc<Metrics>) -> Self {
+        metrics.replication_objects_inflight.inc();
+        bump_peak(
+            &metrics.replication_objects_inflight,
+            &metrics.replication_objects_inflight_peak,
+        );
+        Self { metrics }
+    }
+}
+
+impl Drop for ObjectGuard {
+    fn drop(&mut self) {
+        self.metrics.replication_objects_inflight.dec();
+    }
+}
+
+/// Test seam: when `DGP_TEST_OBJECT_BARRIER=1`, async-sleep a fixed delay
+/// (`DGP_TEST_OBJECT_DELAY_MS`, default 150ms) so >=`transfers` objects are
+/// co-resident → the objects-inflight peak deterministically reaches the
+/// configured object concurrency. Inert in prod.
+async fn maybe_object_barrier() {
+    if crate::config::env_bool("DGP_TEST_OBJECT_BARRIER", false) {
+        let ms: u64 = crate::config::env_parse_with_default("DGP_TEST_OBJECT_DELAY_MS", 150);
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
+}
 
 /// User-metadata key stamped on objects created by replication so the
 /// delete pass (H2 fix) can tell its own copies apart from objects
@@ -273,6 +309,9 @@ pub async fn run_rule(
                     let src_bucket = rule.source.bucket.clone();
                     let dst_bucket = rule.destination.bucket.clone();
                     async move {
+                        // Guard increments objects_inflight (+peak) on entry and
+                        // decrements on drop → proves the `transfers` concurrency.
+                        let _obj_guard = engine.metrics().cloned().map(ObjectGuard::new);
                         copy_one_object(
                             &db,
                             &engine,
@@ -448,6 +487,9 @@ async fn copy_one_object(
     max_failures_retained: u32,
 ) -> Result<PerObjectResult, crate::config_db::ConfigDbError> {
     let mut out = PerObjectResult::default();
+
+    // Test-only barrier: force >=transfers objects co-resident (inert in prod).
+    maybe_object_barrier().await;
 
     // Poison-object guard: skip an object that has failed every run for
     // `object_skip_after_failures` consecutive runs. Reset on success below.

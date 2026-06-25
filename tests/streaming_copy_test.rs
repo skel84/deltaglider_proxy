@@ -13,7 +13,7 @@
 mod common;
 
 use aws_sdk_s3::primitives::ByteStream;
-use common::{admin_http_client, TestServer};
+use common::{admin_http_client, big_passthrough_body, TestServer};
 use serde_json::Value;
 
 const STREAM_RULE_YAML: &str = "
@@ -34,22 +34,6 @@ replication:
       interval: \"1h\"
       batch_size: 100
 ";
-
-/// Deterministic pseudo-random, incompressible body so the object is stored
-/// passthrough (not delta-eligible) and the size is large enough to span
-/// multiple multipart parts at a 5 MiB part size.
-fn big_passthrough_body(len: usize) -> Vec<u8> {
-    let mut v = Vec::with_capacity(len);
-    let mut x: u64 = 0x1234_5678_9abc_def0;
-    while v.len() < len {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        v.extend_from_slice(&x.to_le_bytes());
-    }
-    v.truncate(len);
-    v
-}
 
 #[tokio::test]
 async fn test_streaming_multipart_copy_large_passthrough() {
