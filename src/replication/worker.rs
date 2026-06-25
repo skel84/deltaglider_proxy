@@ -66,11 +66,14 @@ pub struct RunLease {
     pub heartbeat_secs: i64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_rule(
     db: Arc<Mutex<ConfigDb>>,
     engine: &Arc<DynEngine>,
     rule: &ReplicationRule,
     max_failures_retained: u32,
+    object_timeout: Option<std::time::Duration>,
+    object_skip_after_failures: u32,
     triggered_by: &str,
     lease: Option<RunLease>,
 ) -> Result<(i64, RunOutcome), crate::config_db::ConfigDbError> {
@@ -235,6 +238,23 @@ pub async fn run_rule(
                 hit_fatal_error = true;
                 break 'pages;
             }
+            // Poison-object guard: a source object that has failed every run
+            // for `object_skip_after_failures` consecutive runs is skipped so
+            // it stops re-blocking the queue head. Reset on any success below.
+            if object_skip_after_failures > 0 {
+                let skipped = {
+                    let db = db.lock().await;
+                    db.replication_object_skipped(&rule.name, src_key, object_skip_after_failures)?
+                };
+                if skipped {
+                    totals.objects_skipped += 1;
+                    debug!(
+                        "replication rule '{}' skipping poison object src={:?} (>= {} consecutive failures)",
+                        rule.name, src_key, object_skip_after_failures
+                    );
+                    continue;
+                }
+            }
             let transfer = ObjectTransferRequest {
                 source_bucket: &rule.source.bucket,
                 source_key: src_key,
@@ -247,11 +267,32 @@ pub async fn run_rule(
                 strip_user_metadata_keys: &[],
                 operation: "replication",
             };
-            match copy_object_with_retries(engine, transfer).await {
+            // Bound the copy: a stalled object fails fast instead of hanging
+            // until lease lapse. `Elapsed` routes into the same Err arm below.
+            let copy_result = match object_timeout {
+                Some(timeout) => {
+                    match tokio::time::timeout(timeout, copy_object_with_retries(engine, transfer))
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(_elapsed) => Err(format!(
+                            "object copy timed out after {}s",
+                            timeout.as_secs()
+                        )
+                        .into()),
+                    }
+                }
+                None => copy_object_with_retries(engine, transfer).await,
+            };
+            match copy_result {
                 Ok(outcome) => {
                     let bytes_copied = outcome.bytes_copied;
                     totals.objects_copied += 1;
                     totals.bytes_copied += bytes_copied as i64;
+                    {
+                        let db = db.lock().await;
+                        db.replication_clear_object_failure(&rule.name, src_key)?;
+                    }
                     page_events.push(NewEvent::new(
                         EventKind::ReplicationObjectCopied,
                         rule.destination.bucket.as_str(),
@@ -271,13 +312,23 @@ pub async fn run_rule(
                 Err(e) => {
                     totals.errors += 1;
                     had_any_error = true;
+                    let err_msg = format!("{}", e);
+                    {
+                        let db = db.lock().await;
+                        db.replication_record_object_failure(
+                            &rule.name,
+                            src_key,
+                            &err_msg,
+                            current_unix_seconds(),
+                        )?;
+                    }
                     log_failure(
                         &db,
                         &rule.name,
                         run_id,
                         src_key,
                         dest_key,
-                        &format!("{}", e),
+                        &err_msg,
                         max_failures_retained,
                     )
                     .await?;
@@ -398,26 +449,43 @@ fn spawn_lease_heartbeat(
     let heartbeat_secs = lease.heartbeat_secs.max(1) as u64;
     Some(tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(heartbeat_secs);
+        let lock_wait = std::time::Duration::from_secs(2);
         loop {
             tokio::time::sleep(interval).await;
-            let renewed = {
-                let db = db.lock().await;
-                db.replication_renew_lease(
-                    &rule_name,
-                    &lease.owner,
-                    current_unix_seconds(),
-                    lease.ttl_secs,
-                )
-                .unwrap_or(false)
-            };
-            if !renewed {
-                lease_alive.store(false, std::sync::atomic::Ordering::Release);
-                warn!(
-                    "Replication lease heartbeat lost for rule '{}'; worker will stop before more work",
-                    rule_name
-                );
-                return;
+            // Lock-light retry: a slow worker-side DB hold shouldn't drop the
+            // lease. A lock-acquire timeout is retried (up to 3×); only a renew
+            // that returns false (the SQL guard says the lease genuinely
+            // lapsed) is terminal. `>= now` anti-resurrection lives in the SQL.
+            let mut renewed = false;
+            for _ in 0..3 {
+                match tokio::time::timeout(lock_wait, db.lock()).await {
+                    // Renew result is terminal either way: true = renewed,
+                    // false/err = genuinely lapsed → stop retrying.
+                    Ok(db) => {
+                        renewed = db
+                            .replication_renew_lease(
+                                &rule_name,
+                                &lease.owner,
+                                current_unix_seconds(),
+                                lease.ttl_secs,
+                            )
+                            .unwrap_or(false);
+                        break;
+                    }
+                    // Couldn't even acquire the lock in time — retry the window.
+                    Err(_elapsed) => continue,
+                }
             }
+            if renewed {
+                continue;
+            }
+            // Lost if renew said false, OR all retries failed to acquire lock.
+            lease_alive.store(false, std::sync::atomic::Ordering::Release);
+            warn!(
+                "Replication lease heartbeat lost for rule '{}'; worker will stop before more work",
+                rule_name
+            );
+            return;
         }
     }))
 }

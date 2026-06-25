@@ -25,7 +25,7 @@ pub struct ConfigDb {
 }
 
 /// Schema version — bump when adding migrations.
-const SCHEMA_VERSION: i32 = 15;
+const SCHEMA_VERSION: i32 = 16;
 
 pub(crate) mod auth_providers;
 mod declarative;
@@ -629,6 +629,27 @@ impl ConfigDb {
             add_column_if_missing(conn, "lifecycle_state", "cursor_scope", "TEXT")?;
             info!(
                 "Migrated config DB schema from v{} to v15 (lifecycle cursor scope)",
+                version
+            );
+        }
+
+        if version < 16 {
+            // v16: per-object replication failure ledger. Tracks CONSECUTIVE
+            // failures per (rule, source_key) so a poison object that fails
+            // every run can be skipped after a threshold instead of re-blocking
+            // the queue head. Cleared on any successful copy.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS replication_object_failures (
+                    rule_name            TEXT NOT NULL,
+                    source_key           TEXT NOT NULL,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    last_error           TEXT,
+                    last_failed_at       INTEGER,
+                    PRIMARY KEY (rule_name, source_key)
+                );",
+            )?;
+            info!(
+                "Migrated config DB schema from v{} to v16 (replication object-failure ledger)",
                 version
             );
         }

@@ -425,6 +425,75 @@ impl ConfigDb {
         Ok(())
     }
 
+    /// Record one consecutive failure for a single (rule, source_key).
+    /// Upserts, incrementing the consecutive counter, and returns the new
+    /// count. Cleared by `replication_clear_object_failure` on any success.
+    pub fn replication_record_object_failure(
+        &self,
+        rule: &str,
+        key: &str,
+        err: &str,
+        now: i64,
+    ) -> Result<u32, ConfigDbError> {
+        self.conn.execute(
+            "INSERT INTO replication_object_failures
+                (rule_name, source_key, consecutive_failures, last_error, last_failed_at)
+             VALUES (?, ?, 1, ?, ?)
+             ON CONFLICT(rule_name, source_key) DO UPDATE SET
+                consecutive_failures = consecutive_failures + 1,
+                last_error           = excluded.last_error,
+                last_failed_at       = excluded.last_failed_at",
+            params![rule, key, err, now],
+        )?;
+        let count: i64 = self.conn.query_row(
+            "SELECT consecutive_failures FROM replication_object_failures
+             WHERE rule_name = ? AND source_key = ?",
+            params![rule, key],
+            |r| r.get(0),
+        )?;
+        Ok(count.max(0) as u32)
+    }
+
+    /// Clear the consecutive-failure ledger row for a (rule, source_key).
+    /// Called on a successful copy so a transient blip can't permanently
+    /// skip the object.
+    pub fn replication_clear_object_failure(
+        &self,
+        rule: &str,
+        key: &str,
+    ) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "DELETE FROM replication_object_failures
+             WHERE rule_name = ? AND source_key = ?",
+            params![rule, key],
+        )?;
+        Ok(())
+    }
+
+    /// True when this (rule, source_key) has reached the skip threshold:
+    /// `consecutive_failures >= threshold AND threshold > 0` (0 = never skip).
+    pub fn replication_object_skipped(
+        &self,
+        rule: &str,
+        key: &str,
+        threshold: u32,
+    ) -> Result<bool, ConfigDbError> {
+        if threshold == 0 {
+            return Ok(false);
+        }
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT consecutive_failures FROM replication_object_failures
+                 WHERE rule_name = ? AND source_key = ?",
+                params![rule, key],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(count >= threshold as i64)
+    }
+
     /// Recent failures for a rule, newest-first, capped at `limit`.
     pub fn replication_recent_failures(
         &self,
@@ -652,6 +721,65 @@ mod tests {
         assert!(recent.iter().all(|f| f.run_id == Some(42)));
         let msgs: Vec<_> = recent.iter().map(|f| f.error_message.clone()).collect();
         assert_eq!(msgs, vec!["err-4", "err-3", "err-2"]);
+    }
+
+    #[test]
+    fn object_failure_record_increments_and_returns_count() {
+        let db = db();
+        assert_eq!(
+            db.replication_record_object_failure("r", "k", "boom", 100)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.replication_record_object_failure("r", "k", "boom-again", 101)
+                .unwrap(),
+            2
+        );
+        // A different key has its own independent counter.
+        assert_eq!(
+            db.replication_record_object_failure("r", "other", "x", 102)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn object_failure_clear_resets_count() {
+        let db = db();
+        db.replication_record_object_failure("r", "k", "boom", 100)
+            .unwrap();
+        db.replication_record_object_failure("r", "k", "boom", 101)
+            .unwrap();
+        db.replication_clear_object_failure("r", "k").unwrap();
+        // After clear, the next failure starts fresh at 1.
+        assert_eq!(
+            db.replication_record_object_failure("r", "k", "boom", 102)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn object_skipped_honours_threshold_and_zero_never() {
+        let db = db();
+        // No row yet → never skipped.
+        assert!(!db.replication_object_skipped("r", "k", 3).unwrap());
+
+        for i in 0..3 {
+            db.replication_record_object_failure("r", "k", "boom", 100 + i)
+                .unwrap();
+        }
+        // 3 >= 3 → skipped; 3 < 4 → not yet.
+        assert!(db.replication_object_skipped("r", "k", 3).unwrap());
+        assert!(!db.replication_object_skipped("r", "k", 4).unwrap());
+
+        // threshold 0 = never skip, even with failures recorded.
+        assert!(!db.replication_object_skipped("r", "k", 0).unwrap());
+
+        // Clearing resets the predicate.
+        db.replication_clear_object_failure("r", "k").unwrap();
+        assert!(!db.replication_object_skipped("r", "k", 3).unwrap());
     }
 
     #[test]

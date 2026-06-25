@@ -119,6 +119,8 @@ async fn run_due_rules(
             &engine,
             rule,
             replication.max_failures_retained,
+            object_timeout(replication),
+            replication.object_skip_after_failures,
             "scheduler",
             Some(RunLease {
                 owner: instance_id.to_string(),
@@ -177,6 +179,16 @@ pub(crate) fn heartbeat_secs(replication: &ReplicationConfig) -> i64 {
         clamped
     } else {
         heartbeat
+    }
+}
+
+/// Per-object copy timeout. `None` when disabled ("0s"/0 or unparseable —
+/// unparseable should never reach here; config load validates humantime).
+pub(crate) fn object_timeout(replication: &ReplicationConfig) -> Option<Duration> {
+    match humantime::parse_duration(&replication.object_timeout) {
+        Ok(d) if d.is_zero() => None,
+        Ok(d) => Some(d),
+        Err(_) => None,
     }
 }
 

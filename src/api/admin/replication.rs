@@ -144,6 +144,8 @@ pub async fn run_now(
         &engine,
         &rule,
         repl.max_failures_retained,
+        replication::scheduler::object_timeout(&repl),
+        repl.object_skip_after_failures,
         "run-now",
         Some(replication::RunLease {
             owner: lease_owner.clone(),

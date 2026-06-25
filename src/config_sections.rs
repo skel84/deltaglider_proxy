@@ -2564,6 +2564,8 @@ mod tests {
             lease_ttl: "60s".to_string(),
             heartbeat_interval: "20s".to_string(),
             max_failures_retained: 100,
+            object_timeout: "30m".to_string(),
+            object_skip_after_failures: 5,
             rules: vec![rule("r", ("a", ""), ("b", ""), "1h")],
         };
         let yaml = serde_yaml::to_string(&cfg).unwrap();
