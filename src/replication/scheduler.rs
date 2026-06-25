@@ -19,8 +19,8 @@ use tracing::{debug, info, warn};
 
 const DEFAULT_TICK: Duration = Duration::from_secs(30);
 const MIN_TICK: Duration = Duration::from_secs(5);
-const DEFAULT_LEASE_TTL_SECS: i64 = 60;
-const DEFAULT_HEARTBEAT_SECS: i64 = 20;
+const DEFAULT_LEASE_TTL_SECS: i64 = 300;
+const DEFAULT_HEARTBEAT_SECS: i64 = 60;
 
 pub fn spawn_scheduler(
     config: SharedConfig,

@@ -354,6 +354,16 @@ pub struct ReplicationConfig {
     #[serde(default = "default_max_failures")]
     pub max_failures_retained: u32,
 
+    /// Per-object copy timeout (humantime). Bounds a stalled copy so it fails
+    /// fast instead of hanging until lease lapse. `0s` disables. Default `30m`.
+    #[serde(default = "default_object_timeout")]
+    pub object_timeout: String,
+
+    /// After this many CONSECUTIVE failed runs, a single object is skipped so a
+    /// poison object can't re-block the queue head. `0` = never. Default `5`.
+    #[serde(default = "default_object_skip_after_failures")]
+    pub object_skip_after_failures: u32,
+
     /// Replication rules. Each rule describes a source → destination
     /// copy with its own interval and filters. Empty by default.
     #[serde(default)]
@@ -368,6 +378,8 @@ impl Default for ReplicationConfig {
             lease_ttl: default_lease_ttl(),
             heartbeat_interval: default_heartbeat_interval(),
             max_failures_retained: default_max_failures(),
+            object_timeout: default_object_timeout(),
+            object_skip_after_failures: default_object_skip_after_failures(),
             rules: Vec::new(),
         }
     }
@@ -382,11 +394,26 @@ fn default_tick_interval() -> String {
 }
 
 fn default_lease_ttl() -> String {
-    "60s".to_string()
+    // 5 min — long enough that a single multi-GB object copy can't lapse the
+    // lease (~4 renewal windows, survives 3 missed heartbeats); short enough a
+    // dead instance's lease frees for a peer within 5 min.
+    "300s".to_string()
 }
 
 fn default_heartbeat_interval() -> String {
-    "20s".to_string()
+    "60s".to_string()
+}
+
+fn default_object_timeout() -> String {
+    // Per-object copy ceiling — bounds a stalled copy instead of hanging until
+    // lease lapse. "0s" disables (rely on the data-plane per-part timeout).
+    "30m".to_string()
+}
+
+fn default_object_skip_after_failures() -> u32 {
+    // After this many CONSECUTIVE failed runs a poison object is skipped so it
+    // stops re-blocking the queue head. 0 = never. Resets on any success.
+    5
 }
 
 fn default_max_failures() -> u32 {
