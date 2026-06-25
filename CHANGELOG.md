@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.5.0 — 2026-06-25
+
 ### Added
 
 - **Gigantic-file replication: streaming multipart copy with rclone-class
