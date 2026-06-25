@@ -18,7 +18,8 @@ use futures::stream::BoxStream;
 use crate::types::FileMetadata;
 
 use super::traits::{
-    BucketListing, DelegatedListResult, LiteScanResult, StorageBackend, StorageError,
+    BucketListing, DelegatedListResult, LiteScanResult, MultipartUpload, StorageBackend,
+    StorageError, UploadedPart,
 };
 
 /// Route entry: maps a virtual bucket to a backend and optional real bucket name.
@@ -183,6 +184,62 @@ macro_rules! route_existing {
         let (backend, real_bucket) = $self.resolve_existing($bucket).await;
         backend.$method(&real_bucket $(, $arg)*).await
     }};
+}
+
+impl RoutingBackend {
+    /// Resolve the backend an in-progress multipart upload belongs to.
+    /// `MultipartUpload.backend` is the configured name stamped by
+    /// `create_multipart_upload`; fall back to the default backend when it
+    /// is absent (single-backend) or no longer configured.
+    fn resolve_multipart_backend(&self, upload: &MultipartUpload) -> &dyn StorageBackend {
+        if let Some(name) = upload.backend.as_deref() {
+            if let Some(b) = self.backends.get(name) {
+                return b.as_ref().as_ref();
+            }
+        }
+        self.default_backend()
+    }
+
+    /// Resolve a virtual bucket to `(backend_name, backend, real_bucket)`.
+    /// Name-aware variant of `resolve_existing` used by the multipart path
+    /// (the name is stamped into `MultipartUpload` for re-targeting).
+    async fn resolve_existing_named<'a>(
+        &'a self,
+        virtual_bucket: &'a str,
+    ) -> (String, &'a dyn StorageBackend, Cow<'a, str>) {
+        if let Some(route) = self.routes.get(virtual_bucket) {
+            let backend = self.backends[&route.backend_name].as_ref().as_ref();
+            let real = match &route.real_bucket {
+                Some(alias) => Cow::Borrowed(alias.as_str()),
+                None => Cow::Borrowed(virtual_bucket),
+            };
+            return (route.backend_name.clone(), backend, real);
+        }
+        let default = self.default_backend();
+        if default.head_bucket(virtual_bucket).await.unwrap_or(false) {
+            return (
+                self.default_backend.clone(),
+                default,
+                Cow::Borrowed(virtual_bucket),
+            );
+        }
+        let mut names: Vec<&String> = self.backends.keys().collect();
+        names.sort();
+        for name in names {
+            if name == &self.default_backend {
+                continue;
+            }
+            let backend = self.backends[name].as_ref().as_ref();
+            if backend.head_bucket(virtual_bucket).await.unwrap_or(false) {
+                return (name.clone(), backend, Cow::Borrowed(virtual_bucket));
+            }
+        }
+        (
+            self.default_backend.clone(),
+            default,
+            Cow::Borrowed(virtual_bucket),
+        )
+    }
 }
 
 #[async_trait]
@@ -510,6 +567,76 @@ impl StorageBackend for RoutingBackend {
             chunks,
             metadata
         )
+    }
+
+    // === Multipart upload (Phase B) ===
+
+    async fn create_multipart_upload(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        metadata: &FileMetadata,
+    ) -> Result<MultipartUpload, StorageError> {
+        let (name, backend, real_bucket) = self.resolve_existing_named(bucket).await;
+        let mut upload = backend
+            .create_multipart_upload(&real_bucket, prefix, filename, metadata)
+            .await?;
+        // Stamp the resolved backend name so upload_part/complete/abort
+        // re-target the SAME backend without re-probing.
+        upload.backend = Some(name);
+        Ok(upload)
+    }
+
+    async fn upload_part(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+        part_number: i32,
+        data: Bytes,
+    ) -> Result<UploadedPart, StorageError> {
+        self.resolve_multipart_backend(upload)
+            .upload_part(upload, prefix, filename, part_number, data)
+            .await
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+        parts: &[UploadedPart],
+        assembled: &[Bytes],
+        metadata: &FileMetadata,
+    ) -> Result<String, StorageError> {
+        self.resolve_multipart_backend(upload)
+            .complete_multipart_upload(upload, prefix, filename, parts, assembled, metadata)
+            .await
+    }
+
+    async fn abort_multipart_upload(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+    ) -> Result<(), StorageError> {
+        self.resolve_multipart_backend(upload)
+            .abort_multipart_upload(upload, prefix, filename)
+            .await
+    }
+
+    fn multipart_storage_label(&self, bucket: &str) -> &'static str {
+        // Route by explicit policy only (sync, no head probing). For
+        // unrouted buckets fall back to the default backend's label. This
+        // is a conservative capability hint, not a correctness boundary.
+        if let Some(route) = self.routes.get(bucket) {
+            return self.backends[&route.backend_name]
+                .as_ref()
+                .as_ref()
+                .multipart_storage_label(bucket);
+        }
+        self.default_backend().multipart_storage_label(bucket)
     }
 
     // === Scanning operations ===

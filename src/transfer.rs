@@ -8,8 +8,12 @@
 //! transport failures.
 
 use crate::deltaglider::DynEngine;
+use crate::storage::UploadedPart;
+use crate::transfer_plan::{self, PartSpan};
+use bytes::{Bytes, BytesMut};
+use futures::stream::{StreamExt, TryStreamExt};
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{info, warn};
 
 pub(crate) const DEFAULT_COPY_MAX_ATTEMPTS: u32 = 3;
 pub(crate) const REPLICATION_RULE_METADATA_KEY: &str = "dg-replication-rule";
@@ -37,6 +41,10 @@ pub(crate) struct ObjectTransferRequest<'a> {
     /// backend encrypts, so stripping is always safe.
     pub strip_user_metadata_keys: &'a [&'a str],
     pub operation: &'a str,
+    /// In-flight parts for the streaming multipart path (Phase B). `None`
+    /// falls back to the env-resolved `transfer_plan::upload_concurrency()`.
+    /// Only the replication worker overrides it (from config).
+    pub upload_concurrency: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +101,18 @@ async fn copy_object_once(
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("source head failed: {}", e).into()
         })?;
+
+    // Large passthrough on a native-multipart destination → stream via
+    // multipart with per-part range-resume (bounded memory). Delta /
+    // reference / small / proxy-AES-destination objects keep the buffered
+    // path below (preserves all current ETag/delta semantics + tests).
+    let label = source_head.storage_info.label();
+    let threshold = transfer_plan::stream_copy_threshold();
+    if transfer_plan::should_stream_copy(source_head.file_size, label, threshold)
+        && engine.destination_supports_native_multipart(request.destination_bucket)
+    {
+        return stream_copy_passthrough(engine, request, &source_head).await;
+    }
 
     let (data, meta) = engine
         .retrieve(request.source_bucket, request.source_key)
@@ -154,6 +174,234 @@ async fn copy_object_once(
     Ok(ObjectTransferOutcome {
         bytes_copied: bytes,
     })
+}
+
+/// One pipelined part result: the upload receipt + (for buffering backends
+/// only) the part bytes retained for `complete`'s assembly.
+type PartUploadResult = (UploadedPart, Option<(i32, Bytes)>);
+
+/// Stream a large passthrough object source→dest via multipart, with
+/// per-part range-resume and bounded memory.
+///
+/// Each part is an independent ranged GET (`engine.retrieve_stream_range`)
+/// collected into one `Bytes` then `upload_part`-ed. Up to
+/// `upload_concurrency` parts run concurrently via `buffer_unordered`, so
+/// peak memory is O(upload_concurrency × part_size), NOT O(object_size).
+/// A transient per-part failure retries JUST that part by re-issuing the
+/// ranged GET. Any unrecoverable error aborts the multipart upload.
+async fn stream_copy_passthrough(
+    engine: &Arc<DynEngine>,
+    request: ObjectTransferRequest<'_>,
+    source_head: &crate::types::FileMetadata,
+) -> Result<ObjectTransferOutcome, Box<dyn std::error::Error + Send + Sync>> {
+    let total = source_head.file_size;
+    let part_size = transfer_plan::multipart_part_size();
+    let concurrency = request
+        .upload_concurrency
+        .unwrap_or_else(transfer_plan::upload_concurrency)
+        .clamp(1, 16);
+    let spans = transfer_plan::plan_parts(total, part_size);
+
+    let mut user_metadata = source_head.user_metadata.clone();
+    if let Some(provenance) = request.provenance {
+        user_metadata.insert(
+            provenance.metadata_key.to_string(),
+            provenance.metadata_value.to_string(),
+        );
+    }
+    for key in request.strip_user_metadata_keys {
+        user_metadata.remove(*key);
+    }
+
+    let handle = engine
+        .begin_passthrough_multipart(
+            request.destination_bucket,
+            request.destination_key,
+            total,
+            source_head.content_type.clone(),
+            user_metadata,
+        )
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("multipart create failed: {}", e).into()
+        })?;
+    let native = handle.native();
+    let handle = Arc::new(handle);
+
+    info!(
+        "{} streaming multipart copy src={}/{} dst={}/{} ({} bytes, {} parts, concurrency={})",
+        request.operation,
+        request.source_bucket,
+        request.source_key,
+        request.destination_bucket,
+        request.destination_key,
+        total,
+        spans.len(),
+        concurrency,
+    );
+
+    // Pipeline each part: ranged GET (range-resume on transient failure) →
+    // upload_part → drop the bytes (native backends). buffer_unordered bounds
+    // BOTH the in-flight GETs AND the held bytes to O(concurrency × part),
+    // NOT O(object). Non-native (filesystem) backends retain the bytes so
+    // `finish` can assemble them; that path isn't memory-critical (local).
+    let src_bucket = request.source_bucket.to_string();
+    let src_key = request.source_key.to_string();
+    let results: Result<Vec<PartUploadResult>, String> =
+        futures::stream::iter(spans.iter().copied())
+            .map(|span| {
+                let engine = engine.clone();
+                let handle = handle.clone();
+                let src_bucket = src_bucket.clone();
+                let src_key = src_key.clone();
+                async move {
+                    let bytes = fetch_part_with_resume(&engine, &src_bucket, &src_key, &span)
+                        .await
+                        .map_err(|e| format!("part {} fetch failed: {}", span.number, e))?;
+                    let retained = if native {
+                        None
+                    } else {
+                        Some((span.number, bytes.clone()))
+                    };
+                    let part = engine
+                        .upload_passthrough_part(&handle, span.number, bytes)
+                        .await
+                        .map_err(|e| format!("upload_part {} failed: {}", span.number, e))?;
+                    Ok::<PartUploadResult, String>((part, retained))
+                }
+            })
+            .buffer_unordered(concurrency)
+            .try_collect()
+            .await;
+
+    let collected = match results {
+        Ok(v) => v,
+        Err(e) => {
+            abort_shared_handle(engine, handle).await;
+            return Err(e.into());
+        }
+    };
+
+    let mut parts: Vec<UploadedPart> = Vec::with_capacity(collected.len());
+    let mut retained: Vec<(i32, Bytes)> = Vec::new();
+    for (part, keep) in collected {
+        parts.push(part);
+        if let Some(r) = keep {
+            retained.push(r);
+        }
+    }
+    retained.sort_by_key(|(n, _)| *n);
+    let assembled: Vec<Bytes> = retained.into_iter().map(|(_, b)| b).collect();
+
+    // Hashes come from the COPY source (a copy doesn't recompute them) so the
+    // streaming path never holds the whole object to hash it.
+    let sha256 = source_head.file_sha256.clone();
+    let md5 = source_head.md5.clone();
+    let multipart_etag = source_head.multipart_etag.clone();
+
+    let handle =
+        Arc::try_unwrap(handle).map_err(|_| -> Box<dyn std::error::Error + Send + Sync> {
+            "internal: multipart handle still shared at finish".into()
+        })?;
+    let result = engine
+        .finish_passthrough_multipart(handle, parts, assembled, sha256, md5, multipart_etag)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("multipart complete failed: {}", e).into()
+        })?;
+
+    let bytes = result.metadata.file_size as usize;
+    verify_destination(
+        engine,
+        request,
+        bytes,
+        source_head.multipart_etag.as_deref(),
+    )
+    .await?;
+    Ok(ObjectTransferOutcome {
+        bytes_copied: bytes,
+    })
+}
+
+/// Abort a shared multipart handle (best-effort). Unwraps the Arc when
+/// it's the sole owner; otherwise the in-flight tasks have already failed
+/// and the upload is abandoned (the backend GCs incomplete uploads).
+async fn abort_shared_handle(
+    engine: &Arc<DynEngine>,
+    handle: Arc<crate::deltaglider::PassthroughMultipartHandle>,
+) {
+    if let Ok(h) = Arc::try_unwrap(handle) {
+        engine.abort_passthrough_multipart(h).await;
+    }
+}
+
+/// Fetch one part via a native ranged GET, retrying transient failures by
+/// re-issuing the GET (the range-resume). Returns the collected bytes.
+async fn fetch_part_with_resume(
+    engine: &Arc<DynEngine>,
+    bucket: &str,
+    key: &str,
+    span: &PartSpan,
+) -> Result<Bytes, Box<dyn std::error::Error + Send + Sync>> {
+    const MAX_PART_ATTEMPTS: u32 = 4;
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=MAX_PART_ATTEMPTS {
+        match fetch_part_once(engine, bucket, key, span).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(msg) => {
+                if !is_transient_copy_error(&msg) || attempt == MAX_PART_ATTEMPTS {
+                    return Err(msg.into());
+                }
+                warn!(
+                    "transient part {} fetch failure attempt {}/{} ({}-{}): {}",
+                    span.number, attempt, MAX_PART_ATTEMPTS, span.start, span.end_inclusive, msg
+                );
+                last_err = Some(msg);
+                tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64)).await;
+            }
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| "part fetch failed".to_string())
+        .into())
+}
+
+/// One ranged GET → collect into a single `Bytes` (≤ part_size). Errors are
+/// stringified so `is_transient_copy_error` can classify them.
+async fn fetch_part_once(
+    engine: &Arc<DynEngine>,
+    bucket: &str,
+    key: &str,
+    span: &PartSpan,
+) -> Result<Bytes, String> {
+    let ranged = engine
+        .retrieve_stream_range(bucket, key, span.start, span.end_inclusive)
+        .await
+        .map_err(|e| format!("ranged retrieve failed: {}", e))?;
+    let (stream, content_length, _meta) = ranged.ok_or_else(|| {
+        // None means the object isn't natively range-able (delta/unmanaged).
+        // The caller only enters the streaming path for passthrough objects,
+        // so this is a genuine error (concurrent strategy flip).
+        "ranged retrieve unavailable for object".to_string()
+    })?;
+
+    let expected = span.len();
+    let mut buf = BytesMut::with_capacity(expected.min(64 * 1024 * 1024) as usize);
+    let mut stream = stream;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("part body stream error: {}", e))?;
+        buf.extend_from_slice(&chunk);
+    }
+    let got = buf.len() as u64;
+    // content_length==0 signals "full stream, not range" — a backend that
+    // didn't honour the Range. Validate we got exactly the span length.
+    if got != expected {
+        return Err(format!(
+            "part {} short read: expected {} bytes, got {} (content_length={})",
+            span.number, expected, got, content_length
+        ));
+    }
+    Ok(buf.freeze())
 }
 
 async fn verify_destination(

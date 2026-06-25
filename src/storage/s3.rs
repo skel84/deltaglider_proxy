@@ -26,7 +26,10 @@
 //!   - storage/s3/listing.rs        — S3ListedObject + pagination
 //!   - storage/s3/metadata_io.rs    — header/metadata serialisation
 
-use super::traits::{DelegatedListResult, LiteScanResult, StorageBackend, StorageError};
+use super::traits::{
+    DelegatedListResult, LiteScanResult, MultipartUpload, StorageBackend, StorageError,
+    UploadedPart,
+};
 use crate::config::BackendConfig;
 use crate::types::{FileMetadata, StorageInfo};
 use async_trait::async_trait;
@@ -52,6 +55,10 @@ enum S3Op {
     GetObject,
     DeleteObject,
     HeadObject,
+    CreateMpu,
+    UploadPart,
+    CompleteMpu,
+    AbortMpu,
     Other(&'static str),
 }
 
@@ -64,6 +71,10 @@ impl std::fmt::Display for S3Op {
             S3Op::GetObject => write!(f, "get_object"),
             S3Op::DeleteObject => write!(f, "delete_object"),
             S3Op::HeadObject => write!(f, "head_object"),
+            S3Op::CreateMpu => write!(f, "create_multipart_upload"),
+            S3Op::UploadPart => write!(f, "upload_part"),
+            S3Op::CompleteMpu => write!(f, "complete_multipart_upload"),
+            S3Op::AbortMpu => write!(f, "abort_multipart_upload"),
             S3Op::Other(s) => write!(f, "{}", s),
         }
     }
@@ -218,11 +229,33 @@ impl S3Backend {
         // S3-compatible stores (Hetzner, MinIO, Backblaze B2) reject these headers with
         // BadRequest. Setting WhenRequired preserves compatibility with both AWS S3 and
         // S3-compatible endpoints. See: Python deltaglider [6.1.1] for the equivalent fix.
+        // Per-attempt + read/connect timeouts so a stalled socket fails
+        // fast (per multipart part) instead of hanging the whole copy
+        // until lease lapse. Phase B streaming relies on these to bound a
+        // mid-part GET/PUT. All env-overridable in seconds.
+        let read_timeout = crate::config::env_parse_with_default("DGP_S3_READ_TIMEOUT_SECS", 60u64);
+        let connect_timeout =
+            crate::config::env_parse_with_default("DGP_S3_CONNECT_TIMEOUT_SECS", 10u64);
+        let attempt_timeout =
+            crate::config::env_parse_with_default("DGP_S3_OPERATION_ATTEMPT_TIMEOUT_SECS", 300u64);
+        let stall_grace = crate::config::env_parse_with_default("DGP_S3_STALL_GRACE_SECS", 20u64);
+        let timeout_config = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+            .read_timeout(std::time::Duration::from_secs(read_timeout))
+            .connect_timeout(std::time::Duration::from_secs(connect_timeout))
+            .operation_attempt_timeout(std::time::Duration::from_secs(attempt_timeout))
+            .build();
+        let stalled_stream_protection =
+            aws_sdk_s3::config::StalledStreamProtectionConfig::enabled()
+                .grace_period(std::time::Duration::from_secs(stall_grace))
+                .build();
+
         let mut s3_config_builder = aws_sdk_s3::config::Builder::new()
             .behavior_version(BehaviorVersion::latest())
             .region(aws_sdk_s3::config::Region::new(region))
             .credentials_provider(credentials)
             .force_path_style(force_path_style)
+            .timeout_config(timeout_config)
+            .stalled_stream_protection(stalled_stream_protection)
             .request_checksum_calculation(
                 aws_sdk_s3::config::RequestChecksumCalculation::WhenRequired,
             )
@@ -1491,6 +1524,174 @@ impl StorageBackend for S3Backend {
         ))
     }
 
+    // === Multipart upload (Phase B native streaming copy) ===
+
+    #[instrument(skip(self, metadata))]
+    async fn create_multipart_upload(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        metadata: &FileMetadata,
+    ) -> Result<MultipartUpload, StorageError> {
+        let key = self.passthrough_key(prefix, filename);
+        let mut headers = self.metadata_to_headers(metadata);
+        if let Some(marker) = self.native_encryption.marker() {
+            headers.insert("dg-encrypted-native".to_string(), marker.to_string());
+        }
+        let total_meta_size: usize = headers.iter().map(|(k, v)| k.len() + v.len()).sum();
+        if total_meta_size > 2048 {
+            return Err(StorageError::Other(format!(
+                "DG metadata exceeds S3's 2KB limit ({} bytes) for {}/{}",
+                total_meta_size, bucket, key
+            )));
+        }
+
+        let mut request = self
+            .client
+            .create_multipart_upload()
+            .bucket(bucket)
+            .key(&key)
+            .content_type("application/octet-stream");
+        for (k, v) in &headers {
+            request = request.metadata(k.clone(), v.clone());
+        }
+        request = apply_native_encryption_mpu(request, &self.native_encryption);
+
+        let resp = request
+            .send()
+            .await
+            .map_err(|e| Self::classify_s3_error(bucket, &e, S3Op::CreateMpu))?;
+        let upload_id = resp.upload_id().ok_or_else(|| {
+            StorageError::S3(format!(
+                "create_multipart_upload returned no upload id for {}/{}",
+                bucket, key
+            ))
+        })?;
+        Ok(MultipartUpload {
+            bucket: bucket.to_string(),
+            upload_id: upload_id.to_string(),
+            native: true,
+            backend: None,
+        })
+    }
+
+    #[instrument(skip(self, upload, data))]
+    async fn upload_part(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+        part_number: i32,
+        data: Bytes,
+    ) -> Result<UploadedPart, StorageError> {
+        let key = self.passthrough_key(prefix, filename);
+        let backoff_ms = [100u64, 200, 400];
+        for attempt in 0..=backoff_ms.len() {
+            let body = ByteStream::from(data.clone());
+            let result = self
+                .client
+                .upload_part()
+                .bucket(&upload.bucket)
+                .key(&key)
+                .upload_id(&upload.upload_id)
+                .part_number(part_number)
+                .body(body)
+                .send()
+                .await;
+            match result {
+                Ok(resp) => {
+                    let etag = resp.e_tag().unwrap_or_default().to_string();
+                    return Ok(UploadedPart { part_number, etag });
+                }
+                Err(e) => {
+                    let is_retryable = if let SdkError::ServiceError(ref svc) = e {
+                        let status = svc.raw().status().as_u16();
+                        status == 400 || status == 500 || status == 503
+                    } else {
+                        matches!(e, SdkError::DispatchFailure(_) | SdkError::TimeoutError(_))
+                    };
+                    if is_retryable && attempt < backoff_ms.len() {
+                        warn!(
+                            "S3 upload_part {}/{} part {} failed (attempt {}), retrying in {}ms: {:?}",
+                            upload.bucket, key, part_number, attempt + 1, backoff_ms[attempt], e
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms[attempt]))
+                            .await;
+                        continue;
+                    }
+                    return Err(Self::classify_s3_error(
+                        &upload.bucket,
+                        &e,
+                        S3Op::UploadPart,
+                    ));
+                }
+            }
+        }
+        unreachable!("retry loop must return on every path")
+    }
+
+    #[instrument(skip(self, upload, parts, _assembled, _metadata))]
+    async fn complete_multipart_upload(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+        parts: &[UploadedPart],
+        _assembled: &[Bytes],
+        _metadata: &FileMetadata,
+    ) -> Result<String, StorageError> {
+        use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+        let key = self.passthrough_key(prefix, filename);
+        let completed_parts: Vec<CompletedPart> = parts
+            .iter()
+            .map(|p| {
+                CompletedPart::builder()
+                    .part_number(p.part_number)
+                    .e_tag(p.etag.clone())
+                    .build()
+            })
+            .collect();
+        let completed = CompletedMultipartUpload::builder()
+            .set_parts(Some(completed_parts))
+            .build();
+        let resp = self
+            .client
+            .complete_multipart_upload()
+            .bucket(&upload.bucket)
+            .key(&key)
+            .upload_id(&upload.upload_id)
+            .multipart_upload(completed)
+            .send()
+            .await
+            .map_err(|e| Self::classify_s3_error(&upload.bucket, &e, S3Op::CompleteMpu))?;
+        // The S3 multipart ETag is `<md5-of-concatenated-part-md5s>-<n>`.
+        let etag = resp
+            .e_tag()
+            .map(|e| e.trim_matches('"').to_string())
+            .unwrap_or_default();
+        Ok(etag)
+    }
+
+    #[instrument(skip(self, upload))]
+    async fn abort_multipart_upload(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+    ) -> Result<(), StorageError> {
+        let key = self.passthrough_key(prefix, filename);
+        self.client
+            .abort_multipart_upload()
+            .bucket(&upload.bucket)
+            .key(&key)
+            .upload_id(&upload.upload_id)
+            .send()
+            .await
+            .map_err(|e| Self::classify_s3_error(&upload.bucket, &e, S3Op::AbortMpu))?;
+        Ok(())
+    }
+
     // === Scanning operations ===
 
     #[instrument(skip(self))]
@@ -1841,6 +2042,31 @@ fn apply_native_encryption(
     mut request: aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder,
     cfg: &NativeEncryptionConfig,
 ) -> aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder {
+    use aws_sdk_s3::types::ServerSideEncryption;
+    match cfg {
+        NativeEncryptionConfig::None => {}
+        NativeEncryptionConfig::SseS3 => {
+            request = request.server_side_encryption(ServerSideEncryption::Aes256);
+        }
+        NativeEncryptionConfig::SseKms {
+            kms_key_id,
+            bucket_key_enabled,
+        } => {
+            request = request
+                .server_side_encryption(ServerSideEncryption::AwsKms)
+                .ssekms_key_id(kms_key_id.clone())
+                .bucket_key_enabled(*bucket_key_enabled);
+        }
+    }
+    request
+}
+
+/// Apply native SSE to a `create_multipart_upload` request (Phase B).
+/// Mirrors `apply_native_encryption` for the multipart builder shape.
+fn apply_native_encryption_mpu(
+    mut request: aws_sdk_s3::operation::create_multipart_upload::builders::CreateMultipartUploadFluentBuilder,
+    cfg: &NativeEncryptionConfig,
+) -> aws_sdk_s3::operation::create_multipart_upload::builders::CreateMultipartUploadFluentBuilder {
     use aws_sdk_s3::types::ServerSideEncryption;
     match cfg {
         NativeEncryptionConfig::None => {}

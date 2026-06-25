@@ -75,6 +75,60 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Delta Engine",
     },
     EnvVarEntry {
+        name: "DGP_MAX_PASSTHROUGH_OBJECT_SIZE",
+        description: "Max passthrough object size in bytes for the streaming multipart copy path",
+        example: "68719476736",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_STREAM_COPY_THRESHOLD",
+        description: "Object size (bytes) at/above which passthrough copies stream via multipart",
+        example: "67108864",
+        category: "Replication",
+    },
+    EnvVarEntry {
+        name: "DGP_MULTIPART_PART_SIZE",
+        description: "Multipart part size (bytes) for the streaming copy path",
+        example: "67108864",
+        category: "Replication",
+    },
+    EnvVarEntry {
+        name: "DGP_UPLOAD_CONCURRENCY",
+        description: "In-flight parts per streaming multipart object copy",
+        example: "4",
+        category: "Replication",
+    },
+    EnvVarEntry {
+        name: "DGP_REPLICATION_TRANSFERS",
+        description: "Concurrent objects per replication run (rclone --transfers)",
+        example: "4",
+        category: "Replication",
+    },
+    EnvVarEntry {
+        name: "DGP_S3_READ_TIMEOUT_SECS",
+        description: "S3 client per-attempt read timeout (seconds)",
+        example: "60",
+        category: "Storage",
+    },
+    EnvVarEntry {
+        name: "DGP_S3_CONNECT_TIMEOUT_SECS",
+        description: "S3 client connect timeout (seconds)",
+        example: "10",
+        category: "Storage",
+    },
+    EnvVarEntry {
+        name: "DGP_S3_OPERATION_ATTEMPT_TIMEOUT_SECS",
+        description: "S3 client per-attempt operation timeout (seconds)",
+        example: "300",
+        category: "Storage",
+    },
+    EnvVarEntry {
+        name: "DGP_S3_STALL_GRACE_SECS",
+        description: "S3 stalled-stream protection grace period (seconds)",
+        example: "20",
+        category: "Storage",
+    },
+    EnvVarEntry {
         name: "DGP_CACHE_MB",
         description: "Reference cache size in MB",
         example: "100",
@@ -412,6 +466,14 @@ pub struct Config {
     /// Maximum object size in bytes (xdelta3 memory constraint)
     #[serde(default = "default_max_object_size")]
     pub max_object_size: u64,
+
+    /// Maximum passthrough object size for the streaming multipart paths
+    /// (Phase B). Decoupled from `max_object_size` (which gates the
+    /// buffered delta/reference RAM ceiling) because streaming copies are
+    /// O(part_size) in memory and can handle far larger objects. Default
+    /// 64 GiB.
+    #[serde(default = "default_max_passthrough_object_size")]
+    pub max_passthrough_object_size: u64,
 
     /// Reference cache size in MB
     #[serde(default = "default_cache_size_mb")]
@@ -975,6 +1037,10 @@ pub(crate) fn default_max_object_size() -> u64 {
     100 * 1024 * 1024 // 100MB
 }
 
+pub(crate) fn default_max_passthrough_object_size() -> u64 {
+    64 * 1024 * 1024 * 1024 // 64 GiB
+}
+
 pub(crate) fn default_cache_size_mb() -> usize {
     100
 }
@@ -1011,6 +1077,7 @@ impl Default for Config {
             backend: BackendConfig::default(),
             max_delta_ratio: default_max_delta_ratio(),
             max_object_size: default_max_object_size(),
+            max_passthrough_object_size: default_max_passthrough_object_size(),
             cache_size_mb: default_cache_size_mb(),
             metadata_cache_mb: default_metadata_cache_mb(),
             authentication: None,
@@ -1314,6 +1381,9 @@ impl Config {
         }
         if let Some(v) = env_parse::<u64>("DGP_MAX_OBJECT_SIZE") {
             self.max_object_size = v;
+        }
+        if let Some(v) = env_parse::<u64>("DGP_MAX_PASSTHROUGH_OBJECT_SIZE") {
+            self.max_passthrough_object_size = v;
         }
         if let Some(v) = env_parse::<usize>("DGP_CACHE_MB") {
             self.cache_size_mb = v;
@@ -2505,6 +2575,7 @@ mod tests {
             "DGP_DATA_DIR",
             "DGP_MAX_DELTA_RATIO",
             "DGP_MAX_OBJECT_SIZE",
+            "DGP_MAX_PASSTHROUGH_OBJECT_SIZE",
             "DGP_CACHE_MB",
             "DGP_METADATA_CACHE_MB",
             "DGP_CODEC_CONCURRENCY",
@@ -2555,6 +2626,14 @@ mod tests {
             "DGP_RATE_LIMIT_LOCKOUT_SECS",           // rate_limiter::default_auth()
             "DGP_REPLAY_WINDOW_SECS",                // api::auth replay detection
             "DGP_SECURE_COOKIES",                    // api::admin::auth::secure_cookies()
+            "DGP_STREAM_COPY_THRESHOLD",             // transfer_plan::stream_copy_threshold()
+            "DGP_MULTIPART_PART_SIZE",               // transfer_plan::multipart_part_size()
+            "DGP_UPLOAD_CONCURRENCY",                // transfer_plan::upload_concurrency()
+            "DGP_REPLICATION_TRANSFERS",             // transfer_plan::transfers()
+            "DGP_S3_READ_TIMEOUT_SECS",              // storage::s3::build_client()
+            "DGP_S3_CONNECT_TIMEOUT_SECS",           // storage::s3::build_client()
+            "DGP_S3_OPERATION_ATTEMPT_TIMEOUT_SECS", // storage::s3::build_client()
+            "DGP_S3_STALL_GRACE_SECS",               // storage::s3::build_client()
         ];
         for name in &registry_names {
             if used_outside_from_env.contains(name) {

@@ -29,4 +29,4 @@ pub use planner::{
 pub use state_store::{
     current_unix_seconds, FailureRecord, ReplicationState, RunRecord, RunTotals,
 };
-pub use worker::{run_rule, RunLease, RunOutcome};
+pub use worker::{run_rule, RunConcurrency, RunLease, RunOutcome};

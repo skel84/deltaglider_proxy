@@ -152,6 +152,10 @@ pub async fn run_now(
             ttl_secs: replication::scheduler::lease_ttl_secs(&repl),
             heartbeat_secs: replication::scheduler::heartbeat_secs(&repl),
         }),
+        replication::RunConcurrency {
+            transfers: repl.transfers,
+            upload_concurrency: repl.upload_concurrency,
+        },
     )
     .await;
 

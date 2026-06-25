@@ -49,7 +49,10 @@
 //! Objects with `dg-encrypted: aes-256-gcm-chunked-v1` → chunked decrypt.
 //! Objects without the marker → returned as-is (backward compatible).
 
-use super::traits::{DelegatedListResult, LiteScanResult, StorageBackend, StorageError};
+use super::traits::{
+    DelegatedListResult, LiteScanResult, MultipartUpload, StorageBackend, StorageError,
+    UploadedPart,
+};
 use crate::types::FileMetadata;
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -835,6 +838,14 @@ impl<B: StorageBackend> EncryptingBackend<B> {
         self.config.load().write_mode
     }
 
+    /// True when this wrapper encrypts object bodies in-process (proxy-AES
+    /// with `WriteMode::Encrypt` + a key). Gates the streaming multipart
+    /// path OFF — whole-object GCM framing doesn't map onto independent S3
+    /// parts — so those copies fall back to the buffered/chunked path.
+    fn actively_encrypts(&self) -> bool {
+        self.current_write_mode() == WriteMode::Encrypt && self.current_key().is_some()
+    }
+
     fn encrypt_if_enabled(
         &self,
         data: &[u8],
@@ -1294,6 +1305,75 @@ impl<B: StorageBackend + Send + Sync> StorageBackend for EncryptingBackend<B> {
             .get_passthrough_stream(bucket, prefix, filename)
             .await?;
         Ok(Box::pin(sniff_dge1_magic(stream)))
+    }
+
+    // === Multipart upload (Phase B) ===
+    //
+    // Forward to the inner backend ONLY when this wrapper isn't actively
+    // encrypting. When it IS (proxy-AES), the transfer layer never calls
+    // these (gated off by `multipart_storage_label`); the explicit error
+    // is defence-in-depth in case a future caller skips the gate.
+
+    async fn create_multipart_upload(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        metadata: &FileMetadata,
+    ) -> Result<MultipartUpload, StorageError> {
+        if self.actively_encrypts() {
+            return Err(StorageError::Other(
+                "multipart upload unsupported on a proxy-AES-encrypting backend".to_string(),
+            ));
+        }
+        self.inner
+            .create_multipart_upload(bucket, prefix, filename, metadata)
+            .await
+    }
+
+    async fn upload_part(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+        part_number: i32,
+        data: Bytes,
+    ) -> Result<UploadedPart, StorageError> {
+        self.inner
+            .upload_part(upload, prefix, filename, part_number, data)
+            .await
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+        parts: &[UploadedPart],
+        assembled: &[Bytes],
+        metadata: &FileMetadata,
+    ) -> Result<String, StorageError> {
+        self.inner
+            .complete_multipart_upload(upload, prefix, filename, parts, assembled, metadata)
+            .await
+    }
+
+    async fn abort_multipart_upload(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .abort_multipart_upload(upload, prefix, filename)
+            .await
+    }
+
+    fn multipart_storage_label(&self, bucket: &str) -> &'static str {
+        if self.actively_encrypts() {
+            return "aes256-gcm-proxy";
+        }
+        self.inner.multipart_storage_label(bucket)
     }
 
     async fn get_passthrough_stream_range(

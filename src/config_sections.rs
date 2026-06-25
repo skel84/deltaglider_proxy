@@ -55,8 +55,8 @@
 use crate::bucket_policy::BucketPolicyConfig;
 use crate::config::{
     default_cache_size_mb, default_listen_addr, default_log_level, default_max_delta_ratio,
-    default_max_object_size, default_metadata_cache_mb, BackendConfig, DefaultsVersion,
-    NamedBackendConfig, TlsConfig,
+    default_max_object_size, default_max_passthrough_object_size, default_metadata_cache_mb,
+    BackendConfig, DefaultsVersion, NamedBackendConfig, TlsConfig,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -364,6 +364,17 @@ pub struct ReplicationConfig {
     #[serde(default = "default_object_skip_after_failures")]
     pub object_skip_after_failures: u32,
 
+    /// Concurrent objects copied per run (rclone `--transfers`). Objects
+    /// within a page run concurrently; the page boundary is the barrier.
+    /// `1` disables object concurrency. Default `4`.
+    #[serde(default = "default_transfers")]
+    pub transfers: u32,
+
+    /// In-flight parts per streaming multipart object copy (Phase B). Memory
+    /// bound is O(upload_concurrency × part_size). Default `4`.
+    #[serde(default = "default_upload_concurrency")]
+    pub upload_concurrency: u32,
+
     /// Replication rules. Each rule describes a source → destination
     /// copy with its own interval and filters. Empty by default.
     #[serde(default)]
@@ -380,9 +391,19 @@ impl Default for ReplicationConfig {
             max_failures_retained: default_max_failures(),
             object_timeout: default_object_timeout(),
             object_skip_after_failures: default_object_skip_after_failures(),
+            transfers: default_transfers(),
+            upload_concurrency: default_upload_concurrency(),
             rules: Vec::new(),
         }
     }
+}
+
+fn default_transfers() -> u32 {
+    crate::transfer_plan::TRANSFERS as u32
+}
+
+fn default_upload_concurrency() -> u32 {
+    crate::transfer_plan::UPLOAD_CONCURRENCY as u32
 }
 
 fn default_replication_enabled() -> bool {
@@ -1238,6 +1259,9 @@ pub struct AdvancedSection {
     pub max_object_size: Option<u64>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_passthrough_object_size: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_size_mb: Option<usize>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1380,6 +1404,10 @@ impl SectionedConfig {
                     flat.max_object_size,
                     default_max_object_size(),
                 ),
+                max_passthrough_object_size: some_if_nondefault(
+                    flat.max_passthrough_object_size,
+                    default_max_passthrough_object_size(),
+                ),
                 cache_size_mb: some_if_nondefault(flat.cache_size_mb, default_cache_size_mb()),
                 metadata_cache_mb: some_if_nondefault(
                     flat.metadata_cache_mb,
@@ -1440,6 +1468,10 @@ impl SectionedConfig {
                 .advanced
                 .max_object_size
                 .unwrap_or(defaults.max_object_size),
+            max_passthrough_object_size: self
+                .advanced
+                .max_passthrough_object_size
+                .unwrap_or(defaults.max_passthrough_object_size),
             cache_size_mb: self
                 .advanced
                 .cache_size_mb
@@ -1597,6 +1629,20 @@ pub fn validate_replication(cfg: &ReplicationConfig) -> Vec<String> {
                 cfg.heartbeat_interval, cfg.lease_ttl
             ));
         }
+    }
+
+    // Concurrency knobs: warn on out-of-range, the worker clamps at use.
+    if cfg.transfers == 0 || cfg.transfers > 64 {
+        warnings.push(format!(
+            "replication.transfers={} out of range [1,64]; clamped at runtime",
+            cfg.transfers
+        ));
+    }
+    if cfg.upload_concurrency == 0 || cfg.upload_concurrency > 16 {
+        warnings.push(format!(
+            "replication.upload_concurrency={} out of range [1,16]; clamped at runtime",
+            cfg.upload_concurrency
+        ));
     }
 
     // Per-rule checks.
@@ -2566,6 +2612,8 @@ mod tests {
             max_failures_retained: 100,
             object_timeout: "30m".to_string(),
             object_skip_after_failures: 5,
+            transfers: 4,
+            upload_concurrency: 4,
             rules: vec![rule("r", ("a", ""), ("b", ""), "1h")],
         };
         let yaml = serde_yaml::to_string(&cfg).unwrap();

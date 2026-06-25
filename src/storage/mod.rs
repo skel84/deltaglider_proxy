@@ -14,7 +14,9 @@ pub use encrypting::{EncryptingBackend, EncryptionConfig, EncryptionKey, WriteMo
 pub use filesystem::FilesystemBackend;
 pub use routing::RoutingBackend;
 pub use s3::{NativeEncryptionConfig, S3Backend};
-pub use traits::{BucketListing, DelegatedListResult, StorageBackend, StorageError};
+pub use traits::{
+    BucketListing, DelegatedListResult, MultipartUpload, StorageBackend, StorageError, UploadedPart,
+};
 
 /// ENOSPC raw error code on Linux and macOS.
 const ENOSPC: i32 = 28;

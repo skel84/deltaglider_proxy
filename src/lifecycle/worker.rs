@@ -684,6 +684,7 @@ async fn execute_action(
                     }),
                     strip_user_metadata_keys: &[],
                     operation: "lifecycle transition",
+                    upload_concurrency: None,
                 },
             )
             .await?;

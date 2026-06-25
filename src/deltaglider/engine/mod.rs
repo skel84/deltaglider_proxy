@@ -25,7 +25,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, instrument, warn};
 
 mod retrieve;
-mod store;
+pub(crate) mod store;
 
 /// Common fields passed through the store pipeline (store → encode_and_store / store_passthrough).
 /// Eliminates the 8-parameter signatures that triggered `clippy::too_many_arguments`.
@@ -256,6 +256,9 @@ pub struct DeltaGliderEngine<S: StorageBackend> {
     file_router: FileRouter,
     cache: ReferenceCache,
     max_object_size: u64,
+    /// Streaming-passthrough size ceiling (Phase B). Separate from
+    /// `max_object_size` because multipart copies are O(part_size) memory.
+    max_passthrough_object_size: u64,
     /// Limits concurrent xdelta3 subprocesses (configurable via `codec_concurrency`).
     codec_semaphore: Arc<Semaphore>,
     /// Per-deltaspace locks preventing concurrent reference overwrites.
@@ -684,6 +687,7 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
             file_router: FileRouter::new(),
             cache: ReferenceCache::new(config.cache_size_mb),
             max_object_size: config.max_object_size,
+            max_passthrough_object_size: config.max_passthrough_object_size,
             codec_semaphore: Arc::new(Semaphore::new(codec_concurrency)),
             prefix_locks: DashMap::new(),
             metrics,
@@ -708,6 +712,25 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
     /// Returns the maximum object size in bytes.
     pub fn max_object_size(&self) -> u64 {
         self.max_object_size
+    }
+
+    /// Streaming-passthrough size ceiling (Phase B).
+    pub fn max_passthrough_object_size(&self) -> u64 {
+        self.max_passthrough_object_size
+    }
+
+    /// Encryption-mode label of the backend serving `bucket`
+    /// (`transfer_plan::backend_supports_native_multipart` consumes this).
+    pub fn multipart_storage_label(&self, bucket: &str) -> &'static str {
+        self.storage.multipart_storage_label(bucket)
+    }
+
+    /// True when the backend serving `bucket` supports native multipart
+    /// (i.e. is NOT a whole-object proxy-AES-encrypting backend).
+    pub fn destination_supports_native_multipart(&self, bucket: &str) -> bool {
+        crate::transfer_plan::backend_supports_native_multipart(
+            self.storage.multipart_storage_label(bucket),
+        )
     }
 
     /// Return the number of entries in the reference cache (O(1) atomic read).

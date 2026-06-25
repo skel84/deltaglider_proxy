@@ -38,6 +38,7 @@ use crate::transfer::{
     copy_object_with_retries, ObjectTransferRequest, TransferProvenance,
     REPLICATION_RULE_METADATA_KEY,
 };
+use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -66,6 +67,23 @@ pub struct RunLease {
     pub heartbeat_secs: i64,
 }
 
+/// Per-run concurrency knobs (Phase B+). `transfers` = concurrent objects
+/// per page; `upload_concurrency` = in-flight parts per streaming object.
+#[derive(Debug, Clone, Copy)]
+pub struct RunConcurrency {
+    pub transfers: u32,
+    pub upload_concurrency: u32,
+}
+
+impl Default for RunConcurrency {
+    fn default() -> Self {
+        Self {
+            transfers: crate::transfer_plan::TRANSFERS as u32,
+            upload_concurrency: crate::transfer_plan::UPLOAD_CONCURRENCY as u32,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_rule(
     db: Arc<Mutex<ConfigDb>>,
@@ -76,7 +94,10 @@ pub async fn run_rule(
     object_skip_after_failures: u32,
     triggered_by: &str,
     lease: Option<RunLease>,
+    concurrency: RunConcurrency,
 ) -> Result<(i64, RunOutcome), crate::config_db::ConfigDbError> {
+    let transfers = concurrency.transfers.clamp(1, 64) as usize;
+    let upload_concurrency = concurrency.upload_concurrency.clamp(1, 16) as usize;
     let started_at = current_unix_seconds();
 
     // Look up the saved continuation token to resume from a prior tick.
@@ -217,131 +238,89 @@ pub async fn run_rule(
         // pure throughput win on large runs.
         let mut page_events: Vec<NewEvent> = Vec::with_capacity(plan.to_copy.len());
 
-        // Execute the copies for this page.
-        for (src_key, dest_key) in &plan.to_copy {
-            if !renew_run_lease(
-                &db,
-                rule,
-                lease.as_ref(),
-                &lease_alive,
-                run_id,
-                max_failures_retained,
-            )
-            .await?
-            {
-                // Lost the lease mid-page. Flush whatever copy events we
-                // already buffered (the copies are durable) before
-                // abandoning the run, so the page-completion flush below
-                // — which we're about to skip — doesn't drop them.
-                flush_page_events(&db, &rule.name, &mut page_events).await;
-                totals.errors += 1;
-                hit_fatal_error = true;
-                break 'pages;
-            }
-            // Poison-object guard: a source object that has failed every run
-            // for `object_skip_after_failures` consecutive runs is skipped so
-            // it stops re-blocking the queue head. Reset on any success below.
-            if object_skip_after_failures > 0 {
-                let skipped = {
-                    let db = db.lock().await;
-                    db.replication_object_skipped(&rule.name, src_key, object_skip_after_failures)?
-                };
-                if skipped {
-                    totals.objects_skipped += 1;
-                    debug!(
-                        "replication rule '{}' skipping poison object src={:?} (>= {} consecutive failures)",
-                        rule.name, src_key, object_skip_after_failures
-                    );
-                    continue;
-                }
-            }
-            let transfer = ObjectTransferRequest {
-                source_bucket: &rule.source.bucket,
-                source_key: src_key,
-                destination_bucket: &rule.destination.bucket,
-                destination_key: dest_key,
-                provenance: Some(TransferProvenance {
-                    metadata_key: REPLICATION_RULE_METADATA_KEY,
-                    metadata_value: &rule.name,
-                }),
-                strip_user_metadata_keys: &[],
-                operation: "replication",
-            };
-            // Bound the copy: a stalled object fails fast instead of hanging
-            // until lease lapse. `Elapsed` routes into the same Err arm below.
-            let copy_result = match object_timeout {
-                Some(timeout) => {
-                    match tokio::time::timeout(timeout, copy_object_with_retries(engine, transfer))
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(_elapsed) => Err(format!(
-                            "object copy timed out after {}s",
-                            timeout.as_secs()
+        // Renew the lease ONCE before the page's concurrent copy batch.
+        // The independent heartbeat task keeps it alive during the batch;
+        // we re-check `lease_alive` after the batch (and per page). This
+        // preserves the single-flight-lease invariant — concurrency is
+        // WITHIN one run; the lease still guarantees one worker per rule.
+        if !renew_run_lease(
+            &db,
+            rule,
+            lease.as_ref(),
+            &lease_alive,
+            run_id,
+            max_failures_retained,
+        )
+        .await?
+        {
+            flush_page_events(&db, &rule.name, &mut page_events).await;
+            totals.errors += 1;
+            hit_fatal_error = true;
+            break 'pages;
+        }
+
+        // Copy up to `transfers` objects concurrently. Each unit does its
+        // own DB writes (failure/clear — they serialize through the shared
+        // Arc<Mutex<ConfigDb>>) and returns its totals delta + optional
+        // event. The page boundary is the barrier: the cursor does not
+        // advance until every in-flight object of this page finishes.
+        let object_results: Vec<Result<PerObjectResult, crate::config_db::ConfigDbError>> =
+            futures::stream::iter(plan.to_copy.clone().into_iter())
+                .map(|(src_key, dest_key)| {
+                    let db = db.clone();
+                    let engine = engine.clone();
+                    let rule_name = rule.name.clone();
+                    let src_bucket = rule.source.bucket.clone();
+                    let dst_bucket = rule.destination.bucket.clone();
+                    async move {
+                        copy_one_object(
+                            &db,
+                            &engine,
+                            &rule_name,
+                            &src_bucket,
+                            &dst_bucket,
+                            &src_key,
+                            &dest_key,
+                            run_id,
+                            object_timeout,
+                            object_skip_after_failures,
+                            upload_concurrency,
+                            max_failures_retained,
                         )
-                        .into()),
+                        .await
                     }
-                }
-                None => copy_object_with_retries(engine, transfer).await,
-            };
-            match copy_result {
-                Ok(outcome) => {
-                    let bytes_copied = outcome.bytes_copied;
-                    totals.objects_copied += 1;
-                    totals.bytes_copied += bytes_copied as i64;
-                    {
-                        let db = db.lock().await;
-                        db.replication_clear_object_failure(&rule.name, src_key)?;
-                    }
-                    page_events.push(NewEvent::new(
-                        EventKind::ReplicationObjectCopied,
-                        rule.destination.bucket.as_str(),
-                        dest_key.as_str(),
-                        EventSource::Replication,
-                        current_unix_seconds(),
-                        serde_json::json!({
-                            "rule_name": &rule.name,
-                            "source_bucket": &rule.source.bucket,
-                            "source_key": src_key.as_str(),
-                            "destination_bucket": &rule.destination.bucket,
-                            "destination_key": dest_key.as_str(),
-                            "content_length": bytes_copied,
-                        }),
-                    ));
-                }
-                Err(e) => {
-                    totals.errors += 1;
-                    had_any_error = true;
-                    let err_msg = format!("{}", e);
-                    {
-                        let db = db.lock().await;
-                        db.replication_record_object_failure(
-                            &rule.name,
-                            src_key,
-                            &err_msg,
-                            current_unix_seconds(),
-                        )?;
-                    }
-                    log_failure(
-                        &db,
-                        &rule.name,
-                        run_id,
-                        src_key,
-                        dest_key,
-                        &err_msg,
-                        max_failures_retained,
-                    )
-                    .await?;
-                    debug!(
-                        "replication rule '{}' object failure src={:?} dst={:?}: {}",
-                        rule.name, src_key, dest_key, e
-                    );
-                }
+                })
+                .buffer_unordered(transfers)
+                .collect()
+                .await;
+
+        // Fold the concurrent results into totals + flags + events. DB
+        // failure/clear writes already happened inside each unit; any
+        // ConfigDb error is surfaced here (the first one wins).
+        for res in object_results {
+            let res = res?;
+            totals.objects_copied += res.objects_copied;
+            totals.objects_skipped += res.objects_skipped;
+            totals.bytes_copied += res.bytes_copied;
+            totals.errors += res.errors;
+            if res.had_error {
+                had_any_error = true;
             }
-            {
-                let db = db.lock().await;
-                db.replication_update_run_progress(run_id, totals)?;
+            if let Some(ev) = res.event {
+                page_events.push(ev);
             }
+        }
+        {
+            let db = db.lock().await;
+            db.replication_update_run_progress(run_id, totals)?;
+        }
+
+        // If the lease lapsed during the batch, stop before advancing.
+        if !lease_alive.load(std::sync::atomic::Ordering::Acquire) && lease.is_some() {
+            flush_page_events(&db, &rule.name, &mut page_events).await;
+            totals.errors += 1;
+            hit_fatal_error = true;
+            break 'pages;
         }
 
         // Persist the cursor so the next tick can resume here if we
@@ -436,6 +415,139 @@ pub async fn run_rule(
         handle.abort();
     }
     Ok((run_id, RunOutcome { status, totals }))
+}
+
+/// Outcome of one concurrent per-object copy unit. Totals deltas are
+/// folded by the caller; DB failure/clear writes already happened inside.
+#[derive(Default)]
+struct PerObjectResult {
+    objects_copied: i64,
+    objects_skipped: i64,
+    bytes_copied: i64,
+    errors: i64,
+    had_error: bool,
+    event: Option<NewEvent>,
+}
+
+/// Copy one object: poison-skip check → bounded copy → record/clear the
+/// per-object failure. Runs concurrently with up to `transfers` siblings;
+/// all DB writes serialize through the shared `Arc<Mutex<ConfigDb>>`.
+#[allow(clippy::too_many_arguments)]
+async fn copy_one_object(
+    db: &Arc<Mutex<ConfigDb>>,
+    engine: &Arc<DynEngine>,
+    rule_name: &str,
+    src_bucket: &str,
+    dst_bucket: &str,
+    src_key: &str,
+    dest_key: &str,
+    run_id: i64,
+    object_timeout: Option<std::time::Duration>,
+    object_skip_after_failures: u32,
+    upload_concurrency: usize,
+    max_failures_retained: u32,
+) -> Result<PerObjectResult, crate::config_db::ConfigDbError> {
+    let mut out = PerObjectResult::default();
+
+    // Poison-object guard: skip an object that has failed every run for
+    // `object_skip_after_failures` consecutive runs. Reset on success below.
+    if object_skip_after_failures > 0 {
+        let skipped = {
+            let db = db.lock().await;
+            db.replication_object_skipped(rule_name, src_key, object_skip_after_failures)?
+        };
+        if skipped {
+            out.objects_skipped = 1;
+            debug!(
+                "replication rule '{}' skipping poison object src={:?} (>= {} consecutive failures)",
+                rule_name, src_key, object_skip_after_failures
+            );
+            return Ok(out);
+        }
+    }
+
+    let transfer = ObjectTransferRequest {
+        source_bucket: src_bucket,
+        source_key: src_key,
+        destination_bucket: dst_bucket,
+        destination_key: dest_key,
+        provenance: Some(TransferProvenance {
+            metadata_key: REPLICATION_RULE_METADATA_KEY,
+            metadata_value: rule_name,
+        }),
+        strip_user_metadata_keys: &[],
+        operation: "replication",
+        upload_concurrency: Some(upload_concurrency),
+    };
+    // Bound the copy: a stalled object fails fast instead of hanging until
+    // lease lapse. `Elapsed` routes into the Err arm below.
+    let copy_result = match object_timeout {
+        Some(timeout) => {
+            match tokio::time::timeout(timeout, copy_object_with_retries(engine, transfer)).await {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    Err(format!("object copy timed out after {}s", timeout.as_secs()).into())
+                }
+            }
+        }
+        None => copy_object_with_retries(engine, transfer).await,
+    };
+
+    match copy_result {
+        Ok(outcome) => {
+            let bytes_copied = outcome.bytes_copied;
+            out.objects_copied = 1;
+            out.bytes_copied = bytes_copied as i64;
+            {
+                let db = db.lock().await;
+                db.replication_clear_object_failure(rule_name, src_key)?;
+            }
+            out.event = Some(NewEvent::new(
+                EventKind::ReplicationObjectCopied,
+                dst_bucket,
+                dest_key,
+                EventSource::Replication,
+                current_unix_seconds(),
+                serde_json::json!({
+                    "rule_name": rule_name,
+                    "source_bucket": src_bucket,
+                    "source_key": src_key,
+                    "destination_bucket": dst_bucket,
+                    "destination_key": dest_key,
+                    "content_length": bytes_copied,
+                }),
+            ));
+        }
+        Err(e) => {
+            out.errors = 1;
+            out.had_error = true;
+            let err_msg = format!("{}", e);
+            {
+                let db = db.lock().await;
+                db.replication_record_object_failure(
+                    rule_name,
+                    src_key,
+                    &err_msg,
+                    current_unix_seconds(),
+                )?;
+            }
+            log_failure(
+                db,
+                rule_name,
+                run_id,
+                src_key,
+                dest_key,
+                &err_msg,
+                max_failures_retained,
+            )
+            .await?;
+            debug!(
+                "replication rule '{}' object failure src={:?} dst={:?}: {}",
+                rule_name, src_key, dest_key, e
+            );
+        }
+    }
+    Ok(out)
 }
 
 fn spawn_lease_heartbeat(

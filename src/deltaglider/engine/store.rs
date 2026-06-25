@@ -3,12 +3,38 @@
 //! Store pipeline — delta encoding, passthrough, and baseline management.
 
 use super::*;
-use crate::storage::StorageBackend;
+use crate::storage::{MultipartUpload, StorageBackend, UploadedPart};
 use md5::{Digest, Md5};
 use sha2::Sha256;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
+
+/// In-progress streaming passthrough multipart upload (Phase B). Holds the
+/// per-deltaspace lock for the upload's lifetime. The handle is IMMUTABLE
+/// during part uploads so the caller can drive parts concurrently; it
+/// collects the small [`UploadedPart`] receipts itself. Whole-object hashes
+/// are taken from the copy source (a copy doesn't recompute them), so no
+/// in-order hashing is needed and memory stays O(in-flight parts).
+pub struct PassthroughMultipartHandle {
+    bucket: String,
+    key: String,
+    deltaspace_id: String,
+    filename: String,
+    total_size: u64,
+    content_type: Option<String>,
+    user_metadata: HashMap<String, String>,
+    upload: MultipartUpload,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl PassthroughMultipartHandle {
+    /// Whether the backend writes parts durably & incrementally (S3) — the
+    /// caller may drop part bytes after each `upload_passthrough_part`.
+    pub fn native(&self) -> bool {
+        self.upload.native
+    }
+}
 
 /// Store an object with automatic delta compression
 impl<S: StorageBackend> DeltaGliderEngine<S> {
@@ -711,6 +737,159 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         self.metadata_cache
             .insert(bucket, key, result.metadata.clone());
         Ok(result)
+    }
+
+    /// Begin a streaming passthrough multipart upload (Phase B). Gated on
+    /// `max_passthrough_object_size`. Acquires the per-deltaspace lock and
+    /// holds it for the lifetime of the returned handle, mirroring
+    /// `store_passthrough_chunked_inner`. The caller drives parts via
+    /// [`Self::upload_passthrough_part`] then finalizes with
+    /// [`Self::finish_passthrough_multipart`] (or aborts).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn begin_passthrough_multipart(
+        &self,
+        bucket: &str,
+        key: &str,
+        total_size: u64,
+        content_type: Option<String>,
+        user_metadata: HashMap<String, String>,
+    ) -> Result<PassthroughMultipartHandle, EngineError> {
+        if total_size > self.max_passthrough_object_size {
+            return Err(EngineError::TooLarge {
+                size: total_size,
+                max: self.max_passthrough_object_size,
+            });
+        }
+
+        self.metadata_cache.invalidate(bucket, key);
+        let (obj_key, deltaspace_id) = Self::validated_key(bucket, key)?;
+        let guard = self.acquire_prefix_lock(&deltaspace_id).await;
+
+        // The create call needs metadata headers (content-type, user
+        // metadata) so the backend stamps them at create time.
+        let mut create_meta = FileMetadata::new_passthrough(
+            obj_key.filename.clone(),
+            String::new(),
+            String::new(),
+            total_size,
+            content_type.clone(),
+        );
+        create_meta.user_metadata = user_metadata.clone();
+
+        let upload = self
+            .storage
+            .create_multipart_upload(bucket, &deltaspace_id, &obj_key.filename, &create_meta)
+            .await?;
+
+        Ok(PassthroughMultipartHandle {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            deltaspace_id,
+            filename: obj_key.filename,
+            total_size,
+            content_type,
+            user_metadata,
+            upload,
+            _guard: guard,
+        })
+    }
+
+    /// Upload one part of an in-progress passthrough multipart upload.
+    /// IMMUTABLE in the handle so the caller can drive parts CONCURRENTLY.
+    /// Returns the [`UploadedPart`] receipt (the caller collects + sorts
+    /// them). Memory stays O(in-flight parts) — the bytes are owned by the
+    /// caller's bounded `buffer_unordered` and dropped after this returns.
+    pub async fn upload_passthrough_part(
+        &self,
+        handle: &PassthroughMultipartHandle,
+        part_number: i32,
+        data: Bytes,
+    ) -> Result<UploadedPart, EngineError> {
+        let part = self
+            .storage
+            .upload_part(
+                &handle.upload,
+                &handle.deltaspace_id,
+                &handle.filename,
+                part_number,
+                data,
+            )
+            .await?;
+        Ok(part)
+    }
+
+    /// Finalize a passthrough multipart upload: complete on the backend,
+    /// write FileMetadata (with the supplied source hashes + multipart ETag),
+    /// and clean the old delta variant. Consumes the handle (releases the
+    /// lock). `parts` and `assembled` must be in part-number order;
+    /// `assembled` is empty for native backends.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finish_passthrough_multipart(
+        &self,
+        mut handle: PassthroughMultipartHandle,
+        mut parts: Vec<UploadedPart>,
+        assembled: Vec<Bytes>,
+        sha256: String,
+        md5: String,
+        multipart_etag: Option<String>,
+    ) -> Result<StoreResult, EngineError> {
+        // `parts` must be part-number-ordered for the multipart complete;
+        // `assembled` (buffering backends only) is already caller-ordered.
+        parts.sort_by_key(|p| p.part_number);
+
+        let mut metadata = FileMetadata::new_passthrough(
+            handle.filename.clone(),
+            sha256,
+            md5,
+            handle.total_size,
+            handle.content_type.clone(),
+        );
+        metadata.user_metadata = std::mem::take(&mut handle.user_metadata);
+        metadata.multipart_etag = multipart_etag;
+
+        self.storage
+            .complete_multipart_upload(
+                &handle.upload,
+                &handle.deltaspace_id,
+                &handle.filename,
+                &parts,
+                &assembled,
+                &metadata,
+            )
+            .await?;
+
+        if let Err(e) = self
+            .delete_delta_idempotent(&handle.bucket, &handle.deltaspace_id, &handle.filename)
+            .await
+        {
+            warn!(
+                "Failed to clean up old delta after multipart passthrough write: {}",
+                e
+            );
+        }
+
+        let result = StoreResult {
+            metadata,
+            stored_size: handle.total_size,
+        };
+        self.metadata_cache
+            .insert(&handle.bucket, &handle.key, result.metadata.clone());
+        Ok(result)
+    }
+
+    /// Abort an in-progress passthrough multipart upload (best-effort).
+    /// Consumes the handle (releases the prefix lock).
+    pub async fn abort_passthrough_multipart(&self, handle: PassthroughMultipartHandle) {
+        if let Err(e) = self
+            .storage
+            .abort_multipart_upload(&handle.upload, &handle.deltaspace_id, &handle.filename)
+            .await
+        {
+            warn!(
+                "Failed to abort multipart upload {}/{}: {}",
+                handle.bucket, handle.key, e
+            );
+        }
     }
 
     /// Store as passthrough without delta compression

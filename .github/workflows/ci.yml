@@ -430,6 +430,7 @@ jobs:
             --test migrate_job_test \
             --test quota_test \
             --test replication_test \
+            --test streaming_copy_test \
             --test savings_test \
             --test admission_test \
             --test aws_chunked_upload_test \

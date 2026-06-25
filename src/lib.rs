@@ -36,5 +36,6 @@ pub mod slack_format;
 pub mod storage;
 pub mod tls;
 pub(crate) mod transfer;
+pub mod transfer_plan;
 pub mod types;
 pub mod usage_scanner;

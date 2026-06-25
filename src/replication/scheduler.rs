@@ -127,6 +127,10 @@ async fn run_due_rules(
                 ttl_secs: lease_ttl_secs(replication),
                 heartbeat_secs: heartbeat_secs(replication),
             }),
+            crate::replication::RunConcurrency {
+                transfers: replication.transfers,
+                upload_concurrency: replication.upload_concurrency,
+            },
         )
         .await
         {

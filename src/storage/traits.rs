@@ -322,6 +322,97 @@ pub trait StorageBackend: Send + Sync {
             .await
     }
 
+    // === Multipart upload operations (Phase B: streaming large-object copy) ===
+    //
+    // These four methods let the transfer layer drive a multipart upload
+    // to the backend with bounded memory. `S3Backend` overrides them with
+    // native aws-sdk multipart so the prod S3→S3 path stays O(part_size).
+    // The DEFAULT impls (filesystem + test spies) report `native: false`,
+    // which makes the transfer layer retain each part's bytes and hand the
+    // assembled body to `complete_multipart_upload` — correct but O(object)
+    // in memory. Proxy-AES-encrypting backends are gated OFF at the
+    // transfer layer (`backend_supports_native_multipart`), so multipart is
+    // never invoked on them — their default impl just needs to compile.
+
+    /// Begin a multipart upload. `native: false` (the default) tells the
+    /// caller this backend has no incremental part durability — it must
+    /// retain part bytes and pass them to `complete_multipart_upload`.
+    async fn create_multipart_upload(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        metadata: &FileMetadata,
+    ) -> Result<MultipartUpload, StorageError> {
+        let _ = (prefix, filename, metadata);
+        Ok(MultipartUpload {
+            bucket: bucket.to_string(),
+            upload_id: "buffered-default".to_string(),
+            native: false,
+            backend: None,
+        })
+    }
+
+    /// Upload one part (1-indexed `part_number`), returning its ETag.
+    /// The default is a no-op that derives an ETag from the part bytes;
+    /// the caller keeps the bytes for `complete` because `native: false`.
+    async fn upload_part(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+        part_number: i32,
+        data: Bytes,
+    ) -> Result<UploadedPart, StorageError> {
+        // The buffering default ignores part ETags in `complete`, so a
+        // placeholder is sufficient; the caller retains `data` itself.
+        let _ = (upload, prefix, filename, &data);
+        Ok(UploadedPart {
+            part_number,
+            etag: String::new(),
+        })
+    }
+
+    /// Complete a multipart upload. `assembled` carries every part's bytes
+    /// in order (populated by the caller for `native: false` backends);
+    /// native backends ignore it and finalize from the part ETags. Returns
+    /// the final multipart ETag.
+    async fn complete_multipart_upload(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+        parts: &[UploadedPart],
+        assembled: &[Bytes],
+        metadata: &FileMetadata,
+    ) -> Result<String, StorageError> {
+        let _ = parts;
+        self.put_passthrough_chunked(&upload.bucket, prefix, filename, assembled, metadata)
+            .await?;
+        Ok(format!("\"{}\"", metadata.md5))
+    }
+
+    /// Abort an in-progress multipart upload (best-effort cleanup).
+    async fn abort_multipart_upload(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+    ) -> Result<(), StorageError> {
+        let _ = (upload, prefix, filename);
+        Ok(())
+    }
+
+    /// Encryption-mode label for the backend serving `bucket`, matching
+    /// `BackendEncryptionConfig::mode_tag` (`"none"` / `"aes256-gcm-proxy"`
+    /// / `"sse-kms"` / `"sse-s3"`). Feeds the pure
+    /// `transfer_plan::backend_supports_native_multipart` capability gate.
+    /// Default is `"none"` (plaintext); the `EncryptingBackend` wrapper and
+    /// `RoutingBackend` override it.
+    fn multipart_storage_label(&self, _bucket: &str) -> &'static str {
+        "none"
+    }
+
     // === Scanning operations ===
 
     /// Scan a deltaspace directory and return all file metadata
@@ -421,6 +512,33 @@ pub trait StorageBackend: Send + Sync {
     ) -> Result<Option<DelegatedListResult>, StorageError> {
         Ok(None)
     }
+}
+
+/// Handle for an in-progress multipart upload (Phase B streaming copy).
+#[derive(Debug, Clone)]
+pub struct MultipartUpload {
+    /// Real bucket the upload targets (may differ from the visible bucket
+    /// for routing backends).
+    pub bucket: String,
+    /// Backend-assigned upload id (S3 `UploadId`; synthetic for the
+    /// buffering default).
+    pub upload_id: String,
+    /// True when each `upload_part` is durably written incrementally (S3):
+    /// the caller may drop part bytes after upload. False (the default)
+    /// means the caller must retain part bytes for `complete`.
+    pub native: bool,
+    /// Routing attribution: the configured backend name this upload was
+    /// resolved to. Set by `RoutingBackend::create_multipart_upload` so
+    /// `upload_part`/`complete`/`abort` re-target the SAME backend without
+    /// re-probing. `None` for single-backend deployments.
+    pub backend: Option<String>,
+}
+
+/// One completed part of a multipart upload (1-indexed number + ETag).
+#[derive(Debug, Clone)]
+pub struct UploadedPart {
+    pub part_number: i32,
+    pub etag: String,
 }
 
 /// Result from `list_objects_delegated` when the backend handles delimiter
@@ -649,6 +767,56 @@ macro_rules! impl_storage_backend_for_box {
                 (**self)
                     .put_passthrough_chunked(bucket, prefix, filename, chunks, metadata)
                     .await
+            }
+
+            async fn create_multipart_upload(
+                &self,
+                bucket: &str,
+                prefix: &str,
+                filename: &str,
+                metadata: &FileMetadata,
+            ) -> Result<MultipartUpload, StorageError> {
+                (**self)
+                    .create_multipart_upload(bucket, prefix, filename, metadata)
+                    .await
+            }
+            async fn upload_part(
+                &self,
+                upload: &MultipartUpload,
+                prefix: &str,
+                filename: &str,
+                part_number: i32,
+                data: Bytes,
+            ) -> Result<UploadedPart, StorageError> {
+                (**self)
+                    .upload_part(upload, prefix, filename, part_number, data)
+                    .await
+            }
+            async fn complete_multipart_upload(
+                &self,
+                upload: &MultipartUpload,
+                prefix: &str,
+                filename: &str,
+                parts: &[UploadedPart],
+                assembled: &[Bytes],
+                metadata: &FileMetadata,
+            ) -> Result<String, StorageError> {
+                (**self)
+                    .complete_multipart_upload(upload, prefix, filename, parts, assembled, metadata)
+                    .await
+            }
+            async fn abort_multipart_upload(
+                &self,
+                upload: &MultipartUpload,
+                prefix: &str,
+                filename: &str,
+            ) -> Result<(), StorageError> {
+                (**self)
+                    .abort_multipart_upload(upload, prefix, filename)
+                    .await
+            }
+            fn multipart_storage_label(&self, bucket: &str) -> &'static str {
+                (**self).multipart_storage_label(bucket)
             }
 
             async fn scan_deltaspace(
