@@ -142,6 +142,21 @@ impl ObjectKey {
     pub fn validate_prefix(prefix: &str) -> Result<(), KeyValidationError> {
         validate_key_path(prefix, true)
     }
+
+    /// Stricter validation for the INGEST (PUT) path: everything `validate_object`
+    /// rejects, PLUS internal empty path segments (`//`). We refuse to STORE a
+    /// malformed `a//b` key (a client path-join bug) — but reads/deletes still
+    /// use `validate_object` so pre-existing `//` objects stay reachable for
+    /// cleanup. A single trailing `/` (folder marker) is unaffected.
+    pub fn validate_ingest(&self) -> Result<(), KeyValidationError> {
+        self.validate_object()?;
+        if self.prefix.trim_end_matches('/').contains("//") {
+            return Err(KeyValidationError(
+                "Key must not contain empty path segments ('//')".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Display for ObjectKey {
@@ -697,6 +712,24 @@ mod tests {
     #[test]
     fn test_validate_prefix_allows_normal() {
         assert!(ObjectKey::validate_prefix("releases/v1.0/").is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_double_slash() {
+        // The CI-uploader path-join bug: an internal `//` is refused at INGEST.
+        assert!(ObjectKey::parse("b", "ror/builds//enterprise/x.zip")
+            .validate_ingest()
+            .is_err());
+        // ...but reads/deletes stay permissive so existing `//` objects are
+        // reachable for cleanup.
+        assert!(ObjectKey::parse("b", "ror/builds//enterprise/x.zip")
+            .validate_object()
+            .is_ok());
+        // A clean key + a single trailing slash (folder marker) stay valid on ingest.
+        assert!(ObjectKey::parse("b", "ror/builds/enterprise/x.zip")
+            .validate_ingest()
+            .is_ok());
+        assert!(ObjectKey::validate_prefix("ror/builds/").is_ok());
     }
 
     #[test]

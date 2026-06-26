@@ -840,6 +840,18 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         Ok((obj_key, deltaspace_id))
     }
 
+    /// Like `validated_key` but stricter — the INGEST (PUT) gate. Rejects `//`
+    /// so a malformed key can't be STORED; reads/deletes keep using
+    /// `validated_key` so pre-existing `//` objects stay reachable for cleanup.
+    fn validated_key_ingest(bucket: &str, key: &str) -> Result<(ObjectKey, String), EngineError> {
+        let obj_key = ObjectKey::parse(bucket, key);
+        obj_key
+            .validate_ingest()
+            .map_err(|e| EngineError::InvalidArgument(e.to_string()))?;
+        let deltaspace_id = obj_key.deltaspace_id();
+        Ok((obj_key, deltaspace_id))
+    }
+
     /// Look up object metadata by checking both delta and passthrough storage,
     /// returning the most recent version if both exist.
     async fn resolve_object_metadata(
