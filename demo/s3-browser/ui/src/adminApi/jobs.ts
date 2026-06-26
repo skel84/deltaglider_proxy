@@ -37,8 +37,53 @@ interface JobFailureEntry {
   error: string;
 }
 
+// === Replication parity audit (the "Verify" tab) ===
+export type Verifier = 'sha256' | 'etag_size' | 'size_only';
+export type FindingKind = 'match' | 'checksum_mismatch' | 'missing_on_dest' | 'orphan_on_dest';
+
+export interface ParityFinding {
+  key: string;
+  kind: FindingKind;
+  verifier?: Verifier;
+  unverifiable: boolean;
+  detail: string;
+}
+
+export interface ParityOutcome {
+  rule_name: string;
+  source_bucket: string;
+  dest_bucket: string;
+  source_objects: number;
+  dest_objects: number;
+  matched: number;
+  missing_on_dest: number;
+  orphan_on_dest: number;
+  checksum_mismatch: number;
+  unverifiable: number;
+  truncated: boolean;
+  /** THE signal: true iff !truncated && missing/orphan/mismatch/unverifiable all 0. */
+  in_sync: boolean;
+  scanned_at: number; // unix SECONDS
+  missing_samples: ParityFinding[];
+  orphan_samples: ParityFinding[];
+  mismatch_samples: ParityFinding[];
+}
+
 export async function getJobs(): Promise<JobsOverview> {
   return fetchJson('/api/admin/jobs', 'Jobs');
+}
+
+/**
+ * On-demand source-vs-dest parity audit for a replication rule.
+ * Synchronous POST: metadata-only compare, seconds typical, capped + truncatable.
+ */
+export async function verifyReplicationParity(ruleName: string): Promise<ParityOutcome> {
+  const res = await adminFetch(
+    `/api/admin/jobs/replication:${encodeURIComponent(ruleName)}/verify`,
+    'POST'
+  );
+  if (!res.ok) await throwApiError(res, 'Verify replication parity');
+  return safeJson(res);
 }
 
 export async function getJobRuns(id: string): Promise<{ runs: JobRunEntry[] }> {

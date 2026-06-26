@@ -9,6 +9,7 @@ import { jobStatusLabel, jobStatusTone, kindLabel, parseJobId } from '../../jobs
 import { useJobFailures, useJobRuns } from '../../queries/jobs';
 import ReplicationRuleFields from '../ReplicationRuleFields';
 import LifecycleRuleFields from '../LifecycleRuleFields';
+import VerifyTab from './VerifyTab';
 import { useBucketNames } from '../../queries/backends';
 
 const { Text } = Typography;
@@ -221,6 +222,16 @@ export default function JobDrawer({
             ? [
                 { key: 'runs', label: 'Runs', children: runsTable },
                 { key: 'failures', label: 'Failures', children: failuresTable },
+              ]
+            : []),
+          // Verify is replication-only and needs a server-known rule to audit.
+          ...(serverRow && parsed?.subsystem === 'replication'
+            ? [
+                {
+                  key: 'verify',
+                  label: 'Verify',
+                  children: <VerifyTab ruleName={parsed.key} />,
+                },
               ]
             : []),
         ]}

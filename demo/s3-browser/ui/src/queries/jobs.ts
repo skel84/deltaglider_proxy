@@ -2,8 +2,9 @@
  * Unified jobs queries. The list polls fast (2s) while anything is live
  * — a running one-off or a running rule — and goes quiet otherwise.
  */
-import { useQuery } from '@tanstack/react-query';
-import { getJobFailures, getJobRuns, getJobs } from '../adminApi';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { getJobFailures, getJobRuns, getJobs, verifyReplicationParity } from '../adminApi';
+import type { ParityOutcome } from '../adminApi';
 import { isActiveJobStatus } from '../jobsView';
 import { qk } from './keys';
 
@@ -34,5 +35,16 @@ export function useJobFailures(id: string | null) {
     queryKey: qk.jobs.failures(id ?? ''),
     queryFn: () => getJobFailures(id as string),
     enabled: !!id,
+  });
+}
+
+/**
+ * On-demand parity verification for a replication rule. A mutation, NOT a
+ * query: it never runs on mount, never polls — the user clicks "Run
+ * verification" and we surface isPending / data / error.
+ */
+export function useVerifyParity() {
+  return useMutation<ParityOutcome, Error, string>({
+    mutationFn: (ruleName: string) => verifyReplicationParity(ruleName),
   });
 }

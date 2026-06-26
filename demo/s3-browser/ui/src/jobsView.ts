@@ -148,6 +148,24 @@ export function busyJobForBucket(rows: JobRow[], bucket: string): JobRow | null 
   );
 }
 
+/**
+ * Tag color + label for a parity finding kind (the Verify tab findings table).
+ * Pure so the mapping is unit-tested without rendering. AntD Tag colors:
+ * missing=amber/gold, orphan(extra)=blue, mismatch=red.
+ */
+export function parityKindMeta(kind: string): { label: string; color: string } {
+  switch (kind) {
+    case 'missing_on_dest':
+      return { label: 'Missing on dest', color: 'gold' };
+    case 'orphan_on_dest':
+      return { label: 'Extra on dest', color: 'blue' };
+    case 'checksum_mismatch':
+      return { label: 'Checksum mismatch', color: 'red' };
+    default:
+      return { label: kind, color: 'default' };
+  }
+}
+
 /** A rule definition as the section editors carry it (name is enough here). */
 export interface NamedRule {
   name: string;

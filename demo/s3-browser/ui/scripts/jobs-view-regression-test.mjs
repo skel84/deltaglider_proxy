@@ -19,6 +19,7 @@ const {
   progressLabel,
   busyJobForBucket,
   mergeDraftRules,
+  parityKindMeta,
 } = await import(moduleUrl);
 
 const row = (over = {}) => ({
@@ -125,5 +126,11 @@ assert.equal(byId['replication:fresh'].row.status, 'idle');
 assert.equal(byId['lifecycle:lc'].pendingDelete, false);
 assert.equal(byId['maintenance:9'].draft, false, 'one-offs pass through');
 assert.equal(byId['maintenance:9'].pendingDelete, false);
+
+// ── parityKindMeta (Verify tab findings table) ──────────────────────────────
+assert.deepEqual(parityKindMeta('missing_on_dest'), { label: 'Missing on dest', color: 'gold' });
+assert.deepEqual(parityKindMeta('orphan_on_dest'), { label: 'Extra on dest', color: 'blue' });
+assert.deepEqual(parityKindMeta('checksum_mismatch'), { label: 'Checksum mismatch', color: 'red' });
+assert.deepEqual(parityKindMeta('match'), { label: 'match', color: 'default' }, 'unknown kind falls through');
 
 console.log('jobs view regression checks passed');
