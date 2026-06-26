@@ -6,6 +6,7 @@
 //! Listing, runs, and failures live in the jobs module.
 
 use super::AdminState;
+use crate::config_sections::{ReplicationConfig, ReplicationRule};
 use crate::replication;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -29,22 +30,27 @@ pub struct RunNowResponse {
 /// Trigger an immediate synchronous run of a rule. Used by the admin
 /// UI + integration tests. Honours the paused flag: a paused rule
 /// returns 409 Conflict.
-pub async fn run_now(
-    Path(name): Path<String>,
-    State(state): State<Arc<AdminState>>,
-) -> Result<Json<RunNowResponse>, (StatusCode, String)> {
-    // Snapshot config first, release the lock immediately so we don't
-    // hold it across the (potentially long) replication run.
-    let repl = {
-        let cfg = state.config.read().await;
-        cfg.replication.clone()
-    };
+/// Snapshot the replication config (lock released immediately) and find the
+/// named rule, or 404. Returns the whole `repl` too — callers need its flags.
+async fn snapshot_and_find_rule(
+    state: &Arc<AdminState>,
+    name: &str,
+) -> Result<(ReplicationConfig, ReplicationRule), (StatusCode, String)> {
+    let repl = { state.config.read().await.replication.clone() };
     let rule = repl
         .rules
         .iter()
         .find(|r| r.name == name)
         .cloned()
         .ok_or_else(|| (StatusCode::NOT_FOUND, "rule not found".to_string()))?;
+    Ok((repl, rule))
+}
+
+pub async fn run_now(
+    Path(name): Path<String>,
+    State(state): State<Arc<AdminState>>,
+) -> Result<Json<RunNowResponse>, (StatusCode, String)> {
+    let (repl, rule) = snapshot_and_find_rule(&state, &name).await?;
 
     // M2 fix: respect both the global kill-switch (`replication.enabled`)
     // and the per-rule `enabled` flag. Pre-fix, an admin-triggered
@@ -194,16 +200,7 @@ pub async fn verify(
     Path(name): Path<String>,
     State(state): State<Arc<AdminState>>,
 ) -> Result<Json<replication::ParityOutcome>, (StatusCode, String)> {
-    let repl = {
-        let cfg = state.config.read().await;
-        cfg.replication.clone()
-    };
-    let rule = repl
-        .rules
-        .iter()
-        .find(|r| r.name == name)
-        .cloned()
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "rule not found".to_string()))?;
+    let (_repl, rule) = snapshot_and_find_rule(&state, &name).await?;
 
     info!("Replication verify via admin API: rule='{}'", name);
 

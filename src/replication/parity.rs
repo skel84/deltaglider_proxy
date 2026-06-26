@@ -486,6 +486,40 @@ fn is_skippable_key(key: &str) -> bool {
 /// not the source globs — an excluded-but-present dest object is a genuine
 /// orphan). Caps total scanned at `MAX_PARITY_OBJECTS`; `truncated=true`
 /// rather than hang for huge buckets.
+/// Paginate one bucket+prefix, feeding each object to `keep`. `keep` inserts
+/// (and returns `Ok(true)` if it consumed a slot, `Ok(false)` to skip). Caps
+/// at `max` kept objects. Returns `Ok(truncated)`.
+async fn scan_prefix(
+    engine: &DynEngine,
+    bucket: &str,
+    prefix: &str,
+    max: usize,
+    mut keep: impl FnMut(&str, &FileMetadata) -> Result<bool, String>,
+) -> Result<bool, String> {
+    let mut kept = 0usize;
+    let mut truncated = false;
+    let mut pager = crate::job_loop::Pager::fresh();
+    'pages: while pager.begin_page().is_some() {
+        let page = engine
+            .list_objects(bucket, prefix, None, PAGE_SIZE, pager.token(), true)
+            .await
+            .map_err(|e| format!("list {bucket}/{prefix} page failed: {e}"))?;
+        for (key, meta) in &page.objects {
+            if kept >= max {
+                truncated = true;
+                break 'pages;
+            }
+            if keep(key, meta)? {
+                kept += 1;
+            }
+        }
+        if !pager.advance(page.is_truncated, page.next_continuation_token) {
+            break;
+        }
+    }
+    Ok(truncated || pager.truncated_by_page_budget())
+}
+
 pub async fn parity_audit(
     engine: &DynEngine,
     rule: &ReplicationRule,
@@ -502,90 +536,53 @@ pub async fn parity_audit(
     // by the worker's raw source_key) can be looked up from a dest-namespace
     // finding even when source.prefix != destination.prefix.
     let mut dest_to_source: HashMap<String, String> = HashMap::new();
-    let mut truncated = false;
 
     // Each side gets its OWN budget (capped at max_objects) so a balanced large
     // mirror isn't spuriously truncated and a big source can't starve the dest
     // scan into emitting false 'missing' findings.
-    let mut src_count: usize = 0;
-
-    // --- Scan SOURCE ---
-    let mut pager = crate::job_loop::Pager::fresh();
-    'src_pages: while let Some(_page) = pager.begin_page() {
-        let page = engine
-            .list_objects(
-                &rule.source.bucket,
-                &source_prefix,
-                None,
-                PAGE_SIZE,
-                pager.token(),
-                true,
-            )
-            .await
-            .map_err(|e| format!("list source page failed: {e}"))?;
-        for (key, meta) in &page.objects {
-            if src_count >= max_objects {
-                truncated = true;
-                break 'src_pages;
-            }
+    let src_truncated = scan_prefix(
+        engine,
+        &rule.source.bucket,
+        &source_prefix,
+        max_objects,
+        |key, meta| {
             // Keep only what replication would act on (dir markers, internal
             // keys, glob excludes all filtered here).
-            let decision =
-                should_replicate(key, meta, None, ConflictPolicy::SourceWins, &inc, &exc);
-            if !matches!(decision, Decision::Copy { .. }) {
-                continue;
+            if !matches!(
+                should_replicate(key, meta, None, ConflictPolicy::SourceWins, &inc, &exc),
+                Decision::Copy { .. }
+            ) {
+                return Ok(false);
             }
             let dest_key = rewrite_key(&rule.source.prefix, &rule.destination.prefix, key)
                 .map_err(|e| e.to_string())?;
-            dest_to_source.insert(dest_key.clone(), key.clone());
+            dest_to_source.insert(dest_key.clone(), key.to_string());
             source.insert(dest_key, ObjState::from_metadata(meta));
-            src_count += 1;
-        }
-        if !pager.advance(page.is_truncated, page.next_continuation_token) {
-            break;
-        }
-    }
-    if pager.truncated_by_page_budget() {
-        truncated = true;
-    }
+            Ok(true)
+        },
+    )
+    .await?;
 
-    // --- Scan DEST ---
-    let mut dst_count: usize = 0;
-    let mut pager = crate::job_loop::Pager::fresh();
-    'dst_pages: while let Some(_page) = pager.begin_page() {
-        let page = engine
-            .list_objects(
-                &rule.destination.bucket,
-                &dest_prefix,
-                None,
-                PAGE_SIZE,
-                pager.token(),
-                true,
-            )
-            .await
-            .map_err(|e| format!("list dest page failed: {e}"))?;
-        for (key, meta) in &page.objects {
-            if dst_count >= max_objects {
-                truncated = true;
-                break 'dst_pages;
-            }
+    let dst_truncated = scan_prefix(
+        engine,
+        &rule.destination.bucket,
+        &dest_prefix,
+        max_objects,
+        |key, meta| {
             if is_skippable_key(key) {
-                continue;
+                return Ok(false);
             }
             let mut st = ObjState::from_metadata(meta);
             // Resolve rule ownership now, while rule.name is in scope — the
             // foreign-orphan discriminator for remediation.
             st.owned_by_rule = Some(event_consumer::owned_by_rule(meta, &rule.name));
-            dest.insert(key.clone(), st);
-            dst_count += 1;
-        }
-        if !pager.advance(page.is_truncated, page.next_continuation_token) {
-            break;
-        }
-    }
-    if pager.truncated_by_page_budget() {
-        truncated = true;
-    }
+            dest.insert(key.to_string(), st);
+            Ok(true)
+        },
+    )
+    .await?;
+
+    let truncated = src_truncated || dst_truncated;
 
     if truncated {
         warn!(
