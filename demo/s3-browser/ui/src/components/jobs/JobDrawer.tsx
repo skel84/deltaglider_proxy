@@ -2,10 +2,13 @@
  * Job detail drawer: Definition (editable for rule kinds via the parent's
  * section editors; read-only parameters for one-offs), Runs, Failures.
  */
+import { useEffect, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Alert, Drawer, Empty, Table, Tabs, Tag, Typography } from 'antd';
 import type { LifecycleConfig, ReplicationConfig } from '../../adminApi';
 import type { JobRow } from '../../jobsView';
-import { jobStatusLabel, jobStatusTone, kindLabel, parseJobId } from '../../jobsView';
+import { isActiveJobStatus, jobStatusLabel, jobStatusTone, kindLabel, parseJobId } from '../../jobsView';
+import { qk } from '../../queries/keys';
 import { useJobFailures, useJobRuns } from '../../queries/jobs';
 import ReplicationRuleFields from '../ReplicationRuleFields';
 import LifecycleRuleFields from '../LifecycleRuleFields';
@@ -46,9 +49,43 @@ export default function JobDrawer({
   const parsed = jobId ? parseJobId(jobId) : null;
   const serverRow = rows.find((r) => r.id === jobId) ?? null;
   // Runs/failures only exist for jobs the SERVER knows (not drafts).
+  // These are NOT polled — the jobs LIST already polls (2s while active) and
+  // carries the live progress in `serverRow`. We overlay that onto the running
+  // run row below, and refetch the history ONCE when the run finishes.
   const runsQuery = useJobRuns(serverRow ? jobId : null);
   const failuresQuery = useJobFailures(serverRow ? jobId : null);
   const bucketNames = useBucketNames();
+
+  // Refetch run history + failures exactly when the active run transitions to a
+  // terminal state — event-driven, so no second poller. The list poll is the
+  // single live source; this just captures the final numbers + the next run.
+  const qc = useQueryClient();
+  const wasActive = useRef(false);
+  const liveActive = serverRow ? isActiveJobStatus(serverRow.status) : false;
+  useEffect(() => {
+    if (wasActive.current && !liveActive && serverRow) {
+      qc.invalidateQueries({ queryKey: qk.jobs.runs(serverRow.id) });
+      qc.invalidateQueries({ queryKey: qk.jobs.failures(serverRow.id) });
+    }
+    wasActive.current = liveActive;
+  }, [liveActive, serverRow, qc]);
+
+  // Overlay the live (list-polled) progress onto the running run row so its
+  // scanned/processed/status tick without re-fetching. Matched by started_at.
+  const liveRuns = (() => {
+    const runs = runsQuery.data?.runs ?? [];
+    if (!serverRow || !liveActive) return runs;
+    return runs.map((r) =>
+      r.started_at === serverRow.started_at && isActiveJobStatus(r.status)
+        ? {
+            ...r,
+            status: serverRow.status,
+            objects_processed: serverRow.progress.processed,
+            errors: serverRow.progress.failed,
+          }
+        : r,
+    );
+  })();
 
   const replIndex =
     parsed?.subsystem === 'replication'
@@ -137,7 +174,7 @@ export default function JobDrawer({
 
   const runsTable = (
     <Table
-      dataSource={runsQuery.data?.runs ?? []}
+      dataSource={liveRuns}
       rowKey="id"
       size="small"
       pagination={false}
