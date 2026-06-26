@@ -20,6 +20,9 @@ const {
   busyJobForBucket,
   mergeDraftRules,
   parityKindMeta,
+  conflictPolicyLabel,
+  rerunVerdictMeta,
+  fixActionMeta,
 } = await import(moduleUrl);
 
 const row = (over = {}) => ({
@@ -132,5 +135,90 @@ assert.deepEqual(parityKindMeta('missing_on_dest'), { label: 'Missing on dest', 
 assert.deepEqual(parityKindMeta('orphan_on_dest'), { label: 'Extra on dest', color: 'blue' });
 assert.deepEqual(parityKindMeta('checksum_mismatch'), { label: 'Checksum mismatch', color: 'red' });
 assert.deepEqual(parityKindMeta('match'), { label: 'match', color: 'default' }, 'unknown kind falls through');
+
+// ── conflictPolicyLabel ─────────────────────────────────────────────────────
+assert.equal(conflictPolicyLabel('newer-wins'), 'newer wins');
+assert.equal(conflictPolicyLabel('source-wins'), 'source wins');
+assert.equal(conflictPolicyLabel('skip-if-dest-exists'), 'skip if destination exists');
+
+// ── rerunVerdictMeta (the policy-aware verdict chip) ────────────────────────
+// yes → green/good.
+assert.deepEqual(rerunVerdictMeta({ verdict: 'yes' }), {
+  label: 'Re-run fixes this',
+  color: 'green',
+  tone: 'good',
+});
+// conditional → blue/maybe.
+assert.deepEqual(rerunVerdictMeta({ verdict: 'conditional', why: 'newer_wins_depends_on_timestamps' }), {
+  label: 'Depends on timestamps',
+  color: 'blue',
+  tone: 'maybe',
+});
+// THE LIE — skip-if-dest-exists mismatch: a HARD no (red).
+{
+  const m = rerunVerdictMeta({ verdict: 'no', why: 'policy_skips_existing_dest' });
+  assert.equal(m.color, 'red', 'policy-skip is a hard (red) no');
+  assert.equal(m.tone, 'bad');
+  assert.match(m.label, /skips existing destination/);
+}
+// dest newer / copy failing — also hard (red) no.
+assert.equal(rerunVerdictMeta({ verdict: 'no', why: 'dest_newer_than_source' }).color, 'red');
+assert.equal(rerunVerdictMeta({ verdict: 'no', why: 'copy_keeps_failing' }).color, 'red');
+// orphan-needs-delete / foreign — soft (gold) no: the real fix is an out-of-band delete.
+assert.equal(rerunVerdictMeta({ verdict: 'no', why: 'orphan_needs_delete' }).color, 'gold');
+assert.equal(rerunVerdictMeta({ verdict: 'no', why: 'foreign_not_ours' }).color, 'gold');
+for (const why of ['policy_skips_existing_dest', 'dest_newer_than_source', 'orphan_needs_delete', 'foreign_not_ours', 'copy_keeps_failing']) {
+  assert.equal(rerunVerdictMeta({ verdict: 'no', why }).tone, 'bad', `no:${why} is a bad tone`);
+}
+
+// ── fixActionMeta (the guided-action affordance) ────────────────────────────
+// run_now is the ONLY runnable action.
+assert.deepEqual(fixActionMeta({ action: 'run_now' }), { label: 'Run now', runnable: true });
+// change_conflict_policy → instructional, carries the target policy in the label.
+{
+  const m = fixActionMeta({ action: 'change_conflict_policy', to: 'source-wins' });
+  assert.equal(m.label, 'Change policy to source-wins');
+  assert.equal(m.runnable, false);
+  assert.match(m.how, /conflict policy/);
+}
+// enable_replicate_deletes.
+{
+  const m = fixActionMeta({ action: 'enable_replicate_deletes' });
+  assert.equal(m.label, 'Enable mirror-delete');
+  assert.equal(m.runnable, false);
+  assert.match(m.how, /replicate_deletes/);
+}
+// copy_overwrite.
+{
+  const m = fixActionMeta({ action: 'copy_overwrite' });
+  assert.equal(m.label, 'Overwrite manually');
+  assert.equal(m.runnable, false);
+  assert.match(m.how, /bulk copy/);
+}
+// delete_from_dest — label distinguishes foreign vs ours.
+assert.equal(fixActionMeta({ action: 'delete_from_dest', foreign: true }).label, 'Delete foreign object');
+assert.equal(fixActionMeta({ action: 'delete_from_dest', foreign: false }).label, 'Delete from destination');
+assert.match(fixActionMeta({ action: 'delete_from_dest', foreign: true }).how, /bulk delete/);
+// resolve_copy_failure — uses the finding's failure detail when given.
+{
+  const m = fixActionMeta({ action: 'resolve_copy_failure' }, 'last error: AccessDenied');
+  assert.equal(m.label, 'Fix the copy error');
+  assert.equal(m.runnable, false);
+  assert.equal(m.how, 'last error: AccessDenied');
+}
+assert.match(fixActionMeta({ action: 'resolve_copy_failure' }).how, /Resolve the underlying copy error/);
+// manual_review — no how-to.
+assert.deepEqual(fixActionMeta({ action: 'manual_review' }), { label: 'Review manually', runnable: false });
+// Only run_now is ever runnable.
+for (const fix of [
+  { action: 'copy_overwrite' },
+  { action: 'change_conflict_policy', to: 'newer-wins' },
+  { action: 'enable_replicate_deletes' },
+  { action: 'delete_from_dest', foreign: false },
+  { action: 'resolve_copy_failure' },
+  { action: 'manual_review' },
+]) {
+  assert.equal(fixActionMeta(fix).runnable, false, `${fix.action} is guidance-only`);
+}
 
 console.log('jobs view regression checks passed');

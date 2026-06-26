@@ -41,12 +41,71 @@ interface JobFailureEntry {
 export type Verifier = 'sha256' | 'etag_size' | 'size_only';
 export type FindingKind = 'match' | 'checksum_mismatch' | 'missing_on_dest' | 'orphan_on_dest';
 
+/** The rule's conflict policy (kebab-case on the wire — see ConflictPolicy). */
+export type ConflictPolicy = 'newer-wins' | 'source-wins' | 'skip-if-dest-exists';
+
+/** The diagnosed cause of a finding (mirrors backend `ReasonCode`). */
+export type ReasonCode =
+  | 'never_copied'
+  | 'copy_failing'
+  | 'source_modified_after_copy'
+  | 'dest_modified_after_copy'
+  | 'diverged_same_timestamp'
+  | 'diverged_unknown_age'
+  | 'rule_owned_orphan_source_deleted'
+  | 'foreign_orphan';
+
+/** Tri-state "will a re-run fix this?" verdict (never a bool). Discriminated on `verdict`. */
+export type RerunVerdict =
+  | { verdict: 'yes' }
+  | {
+      verdict: 'no';
+      why:
+        | 'policy_skips_existing_dest'
+        | 'dest_newer_than_source'
+        | 'orphan_needs_delete'
+        | 'foreign_not_ours'
+        | 'copy_keeps_failing';
+    }
+  | { verdict: 'conditional'; why: 'newer_wins_depends_on_timestamps' };
+
+/** The guided fix. Discriminated on `action`; only `run_now` is executable. */
+export type FixAction =
+  | { action: 'run_now' }
+  | { action: 'copy_overwrite' }
+  | { action: 'delete_from_dest'; foreign: boolean }
+  | { action: 'change_conflict_policy'; to: ConflictPolicy }
+  | { action: 'enable_replicate_deletes' }
+  | { action: 'resolve_copy_failure' }
+  | { action: 'manual_review' };
+
+/** Cause + policy-aware re-run verdict + guided fix, per finding. */
+export interface Remediation {
+  reason: ReasonCode;
+  rerun_helps: RerunVerdict;
+  fix: FixAction;
+  /** Human, ≤1 line — backend already wrote good copy; prefer rendering this. */
+  reason_detail: string;
+  fix_detail: string;
+}
+
 export interface ParityFinding {
   key: string;
   kind: FindingKind;
   verifier?: Verifier;
   unverifiable: boolean;
   detail: string;
+  /** Cause + "will re-run help?" + guided fix. Absent until the backend annotates. */
+  remediation?: Remediation;
+}
+
+/** Sample-scoped tally of remediation verdicts (NOT exact totals — see count fields). */
+export interface ActionableSummary {
+  rerun_fixes: number;
+  rerun_conditional: number;
+  needs_manual: number;
+  copy_failing: number;
+  foreign_orphans: number;
 }
 
 export interface ParityOutcome {
@@ -64,6 +123,12 @@ export interface ParityOutcome {
   /** THE signal: true iff !truncated && missing/orphan/mismatch/unverifiable all 0. */
   in_sync: boolean;
   scanned_at: number; // unix SECONDS
+  /** The rule's conflict policy — sets up WHY the verdicts read as they do. */
+  conflict_policy: ConflictPolicy;
+  /** Whether the rule mirrors source deletes to the destination. */
+  replicate_deletes: boolean;
+  /** Sample-scoped remediation tally (see ActionableSummary). */
+  actionable: ActionableSummary;
   missing_samples: ParityFinding[];
   orphan_samples: ParityFinding[];
   mismatch_samples: ParityFinding[];

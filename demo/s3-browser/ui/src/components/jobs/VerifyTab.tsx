@@ -11,14 +11,15 @@
  */
 import { Alert, Button, Table, Tag, Typography } from 'antd';
 import {
+  CaretRightOutlined,
   CheckOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
 import type { FindingKind, ParityFinding, ParityOutcome, Verifier } from '../../adminApi';
-import { parityKindMeta } from '../../jobsView';
-import { useVerifyParity } from '../../queries/jobs';
+import { conflictPolicyLabel, fixActionMeta, parityKindMeta, rerunVerdictMeta } from '../../jobsView';
+import { useRunReplicationNow, useVerifyParity } from '../../queries/jobs';
 import { useColors } from '../../ThemeContext';
 import { timeAgo } from '../../utils';
 
@@ -54,9 +55,13 @@ function toneFor(o: ParityOutcome): Tone {
 export default function VerifyTab({ ruleName }: Props) {
   const c = useColors();
   const verify = useVerifyParity();
+  const runNow = useRunReplicationNow();
   const data = verify.data;
 
   const run = () => verify.mutate(ruleName);
+  // The one executable per-finding fix: run the rule, then re-verify.
+  const onRunNow = () =>
+    runNow.mutate(ruleName, { onSuccess: () => verify.mutate(ruleName) });
 
   // ── idle ──────────────────────────────────────────────────────────────────
   if (verify.isIdle && !data) {
@@ -106,7 +111,15 @@ export default function VerifyTab({ ruleName }: Props) {
 
   // ── result ────────────────────────────────────────────────────────────────
   if (!data) return <LoadingBlock c={c} />;
-  return <ParityResult outcome={data} onReverify={run} c={c} />;
+  return (
+    <ParityResult
+      outcome={data}
+      onReverify={run}
+      onRunNow={onRunNow}
+      runNowPending={runNow.isPending}
+      c={c}
+    />
+  );
 }
 
 function LoadingBlock({ c }: { c: ReturnType<typeof useColors> }) {
@@ -142,13 +155,18 @@ function LoadingBlock({ c }: { c: ReturnType<typeof useColors> }) {
 
 // ── The verdict panel ─────────────────────────────────────────────────────────
 
-function ParityResult({
+export function ParityResult({
   outcome,
   onReverify,
+  onRunNow,
+  runNowPending,
   c,
 }: {
   outcome: ParityOutcome;
   onReverify: () => void;
+  /** Executes the rule's run-now (the only executable fix). Omitted = disabled CTA. */
+  onRunNow?: () => void;
+  runNowPending?: boolean;
   c: ReturnType<typeof useColors>;
 }) {
   const tone = toneFor(outcome);
@@ -243,6 +261,9 @@ function ParityResult({
           </div>
         )}
 
+        {/* Rule-context line — WHY the verdicts read as they do. */}
+        <RuleContextLine outcome={outcome} c={c} />
+
         {/* Difference chips (only when not in sync) */}
         {!inSync && (
           <div
@@ -268,6 +289,9 @@ function ParityResult({
             )}
           </div>
         )}
+
+        {/* Honest, sample-scoped actionable summary (only when not in sync). */}
+        {!inSync && <ActionableLine outcome={outcome} c={c} />}
 
         {/* Provenance footnote */}
         <div
@@ -314,7 +338,67 @@ function ParityResult({
         )}
 
       {/* Findings table */}
-      {!inSync && <FindingsTable outcome={outcome} c={c} />}
+      {!inSync && (
+        <FindingsTable
+          outcome={outcome}
+          c={c}
+          onRunNow={onRunNow}
+          runNowPending={runNowPending}
+        />
+      )}
+    </div>
+  );
+}
+
+/** "Conflict policy: <human> · Mirror delete: on/off" — sets up the verdicts. */
+function RuleContextLine({
+  outcome,
+  c,
+}: {
+  outcome: ParityOutcome;
+  c: ReturnType<typeof useColors>;
+}) {
+  return (
+    <div style={{ fontSize: 12.5, color: c.TEXT_MUTED, marginTop: 12 }}>
+      Conflict policy:{' '}
+      <span style={{ color: c.TEXT_SECONDARY, fontWeight: 600 }}>
+        {conflictPolicyLabel(outcome.conflict_policy)}
+      </span>{' '}
+      · Mirror delete:{' '}
+      <span style={{ color: c.TEXT_SECONDARY, fontWeight: 600 }}>
+        {outcome.replicate_deletes ? 'on' : 'off'}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Honest, sample-scoped one-liner derived from `outcome.actionable`:
+ * "Re-run will fix N · M need attention · K failing". Each clause only renders
+ * when its count is non-zero; the whole line is hidden when nothing is actionable.
+ */
+function ActionableLine({
+  outcome,
+  c,
+}: {
+  outcome: ParityOutcome;
+  c: ReturnType<typeof useColors>;
+}) {
+  const a = outcome.actionable;
+  const parts: string[] = [];
+  if (a.rerun_fixes > 0) parts.push(`Re-run will fix ${a.rerun_fixes.toLocaleString()}`);
+  if (a.rerun_conditional > 0)
+    parts.push(`${a.rerun_conditional.toLocaleString()} depend on timestamps`);
+  if (a.needs_manual > 0) parts.push(`${a.needs_manual.toLocaleString()} need attention`);
+  if (a.copy_failing > 0) parts.push(`${a.copy_failing.toLocaleString()} failing`);
+  if (parts.length === 0) return null;
+  return (
+    <div
+      style={{ fontSize: 13, color: c.TEXT_SECONDARY, marginTop: 14, lineHeight: 1.5 }}
+      title="Counts cover the sampled findings shown below, not the exact totals."
+    >
+      {parts.join(' · ')}
+      <span style={{ color: c.TEXT_MUTED }}> (in the sampled findings)</span>
     </div>
   );
 }
@@ -344,9 +428,13 @@ function Chip({ color, text }: { color: string; text: string }) {
 function FindingsTable({
   outcome,
   c,
+  onRunNow,
+  runNowPending,
 }: {
   outcome: ParityOutcome;
   c: ReturnType<typeof useColors>;
+  onRunNow?: () => void;
+  runNowPending?: boolean;
 }) {
   // Concat the per-category samples (each capped at 100 server-side).
   const rows: ParityFinding[] = [
@@ -379,7 +467,7 @@ function FindingsTable({
                   fontFamily: 'var(--font-mono)',
                   fontSize: 12,
                   display: 'inline-block',
-                  maxWidth: 260,
+                  maxWidth: 220,
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
@@ -393,7 +481,7 @@ function FindingsTable({
           },
           {
             title: 'Issue',
-            width: 150,
+            width: 140,
             render: (_: unknown, f) => {
               const kind: FindingKind = f.kind;
               const meta = parityKindMeta(kind);
@@ -401,16 +489,16 @@ function FindingsTable({
             },
           },
           {
-            title: 'Detail',
-            render: (_: unknown, f) => {
-              const vl = verifierLabel(f.verifier);
-              return (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {f.detail}
-                  {vl && <span style={{ color: c.TEXT_MUTED }}> · {vl}</span>}
-                </Text>
-              );
-            },
+            title: 'Why',
+            width: 250,
+            render: (_: unknown, f) => <WhyCell finding={f} c={c} />,
+          },
+          {
+            title: 'Fix',
+            width: 230,
+            render: (_: unknown, f) => (
+              <FixCell finding={f} c={c} onRunNow={onRunNow} runNowPending={runNowPending} />
+            ),
           },
         ]}
       />
@@ -419,6 +507,87 @@ function FindingsTable({
           Showing first {shown.toLocaleString()} of {totalDiffsExclUnverifiable.toLocaleString()} differences
         </Text>
       )}
+      <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 8, color: c.TEXT_MUTED }}>
+        After fixing, run verification again to confirm.
+      </Text>
+    </div>
+  );
+}
+
+/** Why = verdict chip (re-run will/won't help) + the backend's reason_detail. */
+function WhyCell({ finding, c }: { finding: ParityFinding; c: ReturnType<typeof useColors> }) {
+  const rem = finding.remediation;
+  // Defensive: un-annotated finding (shouldn't happen) → fall back to old detail.
+  if (!rem) {
+    const vl = verifierLabel(finding.verifier);
+    return (
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {finding.detail}
+        {vl && <span style={{ color: c.TEXT_MUTED }}> · {vl}</span>}
+      </Text>
+    );
+  }
+  const v = rerunVerdictMeta(rem.rerun_helps);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <Tag color={v.color} style={{ marginInlineEnd: 0, whiteSpace: 'normal' }}>
+        {v.label}
+      </Tag>
+      <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.45 }}>
+        {rem.reason_detail}
+      </Text>
+    </div>
+  );
+}
+
+/**
+ * Fix = a "Run now" button when re-run is the fix (the only executable action),
+ * otherwise an instructional chip + muted one-line guidance (native `title`
+ * carries the long form). Un-annotated findings render nothing here.
+ */
+function FixCell({
+  finding,
+  c,
+  onRunNow,
+  runNowPending,
+}: {
+  finding: ParityFinding;
+  c: ReturnType<typeof useColors>;
+  onRunNow?: () => void;
+  runNowPending?: boolean;
+}) {
+  const rem = finding.remediation;
+  if (!rem) return <Text type="secondary" style={{ fontSize: 12, color: c.TEXT_MUTED }}>—</Text>;
+  const meta = fixActionMeta(rem.fix, rem.fix_detail);
+
+  if (meta.runnable) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <Button
+          size="small"
+          type="primary"
+          icon={<CaretRightOutlined />}
+          loading={runNowPending}
+          disabled={!onRunNow}
+          onClick={onRunNow}
+          title={onRunNow ? rem.fix_detail : 'Run-now is unavailable here'}
+        >
+          Run now
+        </Button>
+        <Text type="secondary" style={{ fontSize: 11.5, color: c.TEXT_MUTED, lineHeight: 1.4 }}>
+          {rem.fix_detail}
+        </Text>
+      </div>
+    );
+  }
+
+  // Guidance only — no write button. Chip + how-to (title carries fix_detail).
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} title={rem.fix_detail}>
+      <Tag style={{ marginInlineEnd: 0, whiteSpace: 'normal' }}>{meta.label}</Tag>
+      <Text type="secondary" style={{ fontSize: 11.5, color: c.TEXT_MUTED, lineHeight: 1.4 }}>
+        {meta.how ?? rem.fix_detail}
+      </Text>
     </div>
   );
 }

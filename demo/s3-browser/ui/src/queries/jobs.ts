@@ -2,8 +2,14 @@
  * Unified jobs queries. The list polls fast (2s) while anything is live
  * — a running one-off or a running rule — and goes quiet otherwise.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { getJobFailures, getJobRuns, getJobs, verifyReplicationParity } from '../adminApi';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  getJobFailures,
+  getJobRuns,
+  getJobs,
+  runJobAction,
+  verifyReplicationParity,
+} from '../adminApi';
 import type { ParityOutcome } from '../adminApi';
 import { isActiveJobStatus } from '../jobsView';
 import { qk } from './keys';
@@ -46,5 +52,21 @@ export function useJobFailures(id: string | null) {
 export function useVerifyParity() {
   return useMutation<ParityOutcome, Error, string>({
     mutationFn: (ruleName: string) => verifyReplicationParity(ruleName),
+  });
+}
+
+/**
+ * Run a replication rule now — the ONLY executable per-finding fix in the
+ * Verify tab (re-uses the shared run-now action; everything else is guidance).
+ * Invalidates the jobs list so the row's status reflects the run.
+ */
+export function useRunReplicationNow() {
+  const qc = useQueryClient();
+  return useMutation<unknown, Error, string>({
+    mutationFn: (ruleName: string) =>
+      runJobAction(`replication:${ruleName}`, 'run-now'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.jobs.list() });
+    },
   });
 }

@@ -10,6 +10,8 @@
  * rule definitions.
  */
 
+import type { ConflictPolicy, FixAction, RerunVerdict } from './adminApi';
+
 export type JobKind = 'replication' | 'lifecycle' | 'reencrypt' | 'migrate' | string;
 export type JobAction = 'pause' | 'resume' | 'run-now' | 'preview' | 'cancel';
 
@@ -163,6 +165,109 @@ export function parityKindMeta(kind: string): { label: string; color: string } {
       return { label: 'Checksum mismatch', color: 'red' };
     default:
       return { label: kind, color: 'default' };
+  }
+}
+
+/** Human label for a conflict policy (the rule-context line). */
+export function conflictPolicyLabel(p: ConflictPolicy): string {
+  switch (p) {
+    case 'newer-wins':
+      return 'newer wins';
+    case 'source-wins':
+      return 'source wins';
+    case 'skip-if-dest-exists':
+      return 'skip if destination exists';
+    default:
+      return p;
+  }
+}
+
+/**
+ * The verdict chip for "will re-running the rule fix this finding?" — pure so
+ * the AntD-Tag color + tone are unit-tested without rendering. Discriminated on
+ * `verdict`: `yes` → green; `conditional` → blue; `no` → gold for the soft
+ * "needs a delete / not ours" cases, red for the hard policy lies (re-run
+ * provably skips / keeps the dest / keeps failing).
+ */
+export function rerunVerdictMeta(rerun: RerunVerdict): {
+  label: string;
+  color: string;
+  tone: 'good' | 'bad' | 'maybe';
+} {
+  switch (rerun.verdict) {
+    case 'yes':
+      return { label: 'Re-run fixes this', color: 'green', tone: 'good' };
+    case 'conditional':
+      return { label: 'Depends on timestamps', color: 'blue', tone: 'maybe' };
+    case 'no': {
+      // Gold = soft (an out-of-band delete is the real fix, nothing lied);
+      // red = the hard policy lie (re-run runs but provably won't help).
+      const soft = rerun.why === 'orphan_needs_delete' || rerun.why === 'foreign_not_ours';
+      const label =
+        rerun.why === 'policy_skips_existing_dest'
+          ? "Re-run won't help: policy skips existing destination"
+          : rerun.why === 'dest_newer_than_source'
+            ? "Re-run won't help: destination is newer"
+            : rerun.why === 'orphan_needs_delete'
+              ? "Re-run won't help: needs a delete"
+              : rerun.why === 'foreign_not_ours'
+                ? "Re-run won't help: not written by this rule"
+                : "Re-run won't help: copy keeps failing";
+      return { label, color: soft ? 'gold' : 'red', tone: 'bad' };
+    }
+    default:
+      return { label: "Re-run won't help", color: 'red', tone: 'bad' };
+  }
+}
+
+/**
+ * The guided-action affordance for a fix. `runnable` is true ONLY for the one
+ * executable action (`run_now`); everything else is instructional text. `how`
+ * is the one-line operator guidance (rendered as muted helper text + native
+ * `title`). Discriminated on `action`. `failureDetail` (the finding's
+ * `fix_detail`) feeds the copy-failure how-to when present.
+ */
+export function fixActionMeta(
+  fix: FixAction,
+  failureDetail?: string
+): { label: string; runnable: boolean; how?: string } {
+  switch (fix.action) {
+    case 'run_now':
+      return { label: 'Run now', runnable: true };
+    case 'change_conflict_policy':
+      return {
+        label: `Change policy to ${fix.to}`,
+        runnable: false,
+        how: "Edit the rule's conflict policy in Definition, then re-verify.",
+      };
+    case 'enable_replicate_deletes':
+      return {
+        label: 'Enable mirror-delete',
+        runnable: false,
+        how: 'Set replicate_deletes on the rule, then run it.',
+      };
+    case 'copy_overwrite':
+      return {
+        label: 'Overwrite manually',
+        runnable: false,
+        how: 'Copy the object to the destination (Browser → bulk copy), then re-verify.',
+      };
+    case 'delete_from_dest':
+      return {
+        label: fix.foreign ? 'Delete foreign object' : 'Delete from destination',
+        runnable: false,
+        how: 'Remove it via Browser → bulk delete.',
+      };
+    case 'resolve_copy_failure':
+      return {
+        label: 'Fix the copy error',
+        runnable: false,
+        how: failureDetail || 'Resolve the underlying copy error, then re-run.',
+      };
+    case 'manual_review':
+      return { label: 'Review manually', runnable: false };
+    default:
+      return { label: 'Review manually', runnable: false };
   }
 }
 
