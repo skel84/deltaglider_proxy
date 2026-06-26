@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.5.1 — 2026-06-26
+
 ### Added
 
 - **Replication parity audit — "is my mirror verified identical?"** A new
