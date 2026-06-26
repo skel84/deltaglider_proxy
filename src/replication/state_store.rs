@@ -70,6 +70,15 @@ pub struct FailureInsert<'a> {
     pub error_message: &'a str,
 }
 
+/// One row of the consecutive-failure ledger (`replication_object_failures`).
+/// Distinct from `FailureRecord` (the append-only run-history table).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectFailure {
+    pub consecutive_failures: u32,
+    pub last_error: String,
+    pub last_failed_at: i64,
+}
+
 /// Totals emitted by the worker at run termination.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunTotals {
@@ -494,6 +503,51 @@ impl ConfigDb {
         Ok(count >= threshold as i64)
     }
 
+    /// Bounded join over the per-object failure ledger for a fixed set of
+    /// SAMPLED keys (≤300 from a parity audit). Chunks the `IN (…)` list at
+    /// 500 params; empty `keys` returns an empty map WITHOUT touching the DB.
+    pub fn replication_object_failures_for_keys(
+        &self,
+        rule: &str,
+        keys: &[&str],
+    ) -> Result<std::collections::HashMap<String, ObjectFailure>, ConfigDbError> {
+        let mut out = std::collections::HashMap::new();
+        if keys.is_empty() {
+            return Ok(out);
+        }
+        for chunk in keys.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT source_key, consecutive_failures, last_error, last_failed_at
+                 FROM replication_object_failures
+                 WHERE rule_name = ? AND source_key IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+            binds.push(&rule);
+            for k in chunk {
+                binds.push(k);
+            }
+            let rows = stmt.query_map(binds.as_slice(), |r| {
+                let key: String = r.get(0)?;
+                let count: i64 = r.get(1)?;
+                Ok((
+                    key,
+                    ObjectFailure {
+                        consecutive_failures: count.max(0) as u32,
+                        last_error: r.get(2)?,
+                        last_failed_at: r.get(3)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (k, v) = row?;
+                out.insert(k, v);
+            }
+        }
+        Ok(out)
+    }
+
     /// Recent failures for a rule, newest-first, capped at `limit`.
     pub fn replication_recent_failures(
         &self,
@@ -831,5 +885,34 @@ mod tests {
             .unwrap()
             .continuation_token
             .is_none());
+    }
+
+    #[test]
+    fn object_failures_for_keys_returns_present_only() {
+        let db = db();
+        db.replication_record_object_failure("r", "a", "err-a", 10)
+            .unwrap();
+        db.replication_record_object_failure("r", "a", "err-a2", 20)
+            .unwrap();
+        db.replication_record_object_failure("r", "b", "err-b", 30)
+            .unwrap();
+
+        let got = db
+            .replication_object_failures_for_keys("r", &["a", "b", "c"])
+            .unwrap();
+        assert_eq!(got.len(), 2, "absent key 'c' is omitted");
+        let a = got.get("a").unwrap();
+        assert_eq!(a.consecutive_failures, 2);
+        assert_eq!(a.last_error, "err-a2");
+        assert_eq!(a.last_failed_at, 20);
+        assert_eq!(got.get("b").unwrap().consecutive_failures, 1);
+        assert!(!got.contains_key("c"));
+    }
+
+    #[test]
+    fn object_failures_for_keys_empty_skips_query() {
+        let db = db();
+        let got = db.replication_object_failures_for_keys("r", &[]).unwrap();
+        assert!(got.is_empty());
     }
 }

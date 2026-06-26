@@ -16,16 +16,20 @@
 //! foreign dest). A naive sha-compare would false-alarm every foreign
 //! object, so the verifier degrades through three tiers (see `compare_pair`).
 
+use crate::config_db::ConfigDb;
 use crate::config_sections::{ConflictPolicy, ReplicationRule};
 use crate::deltaglider::DynEngine;
 use crate::types::FileMetadata;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::warn;
 
+use super::event_consumer;
 use super::planner::{
     compile_rule_globs, normalize_prefix, rewrite_key, should_replicate, Decision,
 };
+use super::remediation::{analyze_finding, FindingFacts, Remediation};
+use super::state_store::ObjectFailure;
 
 /// Per-category sample cap surfaced to the UI (exact counts stay unbounded).
 pub const SAMPLE_CAP: usize = 100;
@@ -47,10 +51,18 @@ pub struct ObjState {
     pub etag: Option<String>,
     /// Part count parsed off a `"...-N"` multipart ETag, if any.
     pub multipart_parts: Option<u32>,
+    /// Object creation time (unix seconds) — the age signal for newer-wins
+    /// remediation. `compare_pair`/`diff_parity` ignore this.
+    pub created_at: Option<i64>,
+    /// `Some(true/false)` once the dest scan resolves rule ownership; `None`
+    /// on source entries and until annotated (rule-agnostic at construction).
+    pub owned_by_rule: Option<bool>,
 }
 
 impl ObjState {
     /// Build from listing metadata. Mirrors the plan's field derivation.
+    /// `owned_by_rule` is left `None` here (rule-agnostic) — the dest scan
+    /// loop sets it where `rule.name` is in scope.
     pub fn from_metadata(m: &FileMetadata) -> Self {
         let sha256 = (!m.file_sha256.is_empty()).then(|| m.file_sha256.clone());
         let etag = m
@@ -67,6 +79,8 @@ impl ObjState {
             size: m.file_size,
             etag,
             multipart_parts,
+            created_at: Some(m.created_at.timestamp()),
+            owned_by_rule: None,
         }
     }
 }
@@ -102,6 +116,10 @@ pub struct ParityFinding {
     pub verifier: Option<Verifier>,
     pub unverifiable: bool,
     pub detail: String,
+    /// Cause + "will re-run help?" + guided fix. `None` until annotated
+    /// (the pure `diff_parity` never sets it); a nested object once present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<Remediation>,
 }
 
 /// PURE three-tier compare of one source/dest pair (both keys present).
@@ -227,6 +245,7 @@ pub fn diff_parity(
                                         verifier,
                                         unverifiable,
                                         detail,
+                                        remediation: None,
                                     },
                                 );
                             }
@@ -247,6 +266,7 @@ pub fn diff_parity(
                                 verifier: None,
                                 unverifiable: false,
                                 detail: "present on source, absent on destination".to_string(),
+                                remediation: None,
                             },
                         );
                         s.next();
@@ -261,6 +281,7 @@ pub fn diff_parity(
                                 verifier: None,
                                 unverifiable: false,
                                 detail: "present on destination, absent on source".to_string(),
+                                remediation: None,
                             },
                         );
                         d.next();
@@ -277,6 +298,7 @@ pub fn diff_parity(
                         verifier: None,
                         unverifiable: false,
                         detail: "present on source, absent on destination".to_string(),
+                        remediation: None,
                     },
                 );
                 s.next();
@@ -291,6 +313,7 @@ pub fn diff_parity(
                         verifier: None,
                         unverifiable: false,
                         detail: "present on destination, absent on source".to_string(),
+                        remediation: None,
                     },
                 );
                 d.next();
@@ -305,6 +328,109 @@ fn push_capped(v: &mut Vec<ParityFinding>, f: ParityFinding) {
     if v.len() < SAMPLE_CAP {
         v.push(f);
     }
+}
+
+/// PURE: walk the bounded sample vecs, reconstruct `FindingFacts` per finding
+/// from the `source`/`dest` maps + the failure `ledger`, run `analyze_finding`,
+/// and store the `Remediation` on each finding. Mutates `diff` in place.
+///
+/// - Missing: source ts, dst ts `None` (absent on dest).
+/// - Mismatch: both timestamps from the present pair.
+/// - Orphan: dest ts + `owned_by_rule` (resolved during the dest scan).
+/// - Ledger lookup is by the dest-namespace sample key (the keys `diff` carries).
+pub fn annotate_findings(
+    diff: &mut ParityDiff,
+    source: &BTreeMap<String, ObjState>,
+    dest: &BTreeMap<String, ObjState>,
+    policy: ConflictPolicy,
+    replicate_deletes: bool,
+    ledger: &HashMap<String, ObjectFailure>,
+) {
+    for f in &mut diff.missing_samples {
+        let src = source.get(&f.key);
+        let facts = FindingFacts {
+            kind: f.kind,
+            policy,
+            replicate_deletes,
+            src_created_at: src.and_then(|s| s.created_at),
+            dst_created_at: None,
+            dest_owned_by_rule: None,
+            ledger: ledger.get(&f.key),
+        };
+        f.remediation = Some(analyze_finding(&facts));
+    }
+    for f in &mut diff.mismatch_samples {
+        let facts = FindingFacts {
+            kind: f.kind,
+            policy,
+            replicate_deletes,
+            src_created_at: source.get(&f.key).and_then(|s| s.created_at),
+            dst_created_at: dest.get(&f.key).and_then(|d| d.created_at),
+            dest_owned_by_rule: None,
+            ledger: ledger.get(&f.key),
+        };
+        f.remediation = Some(analyze_finding(&facts));
+    }
+    for f in &mut diff.orphan_samples {
+        let dst = dest.get(&f.key);
+        let facts = FindingFacts {
+            kind: f.kind,
+            policy,
+            replicate_deletes,
+            src_created_at: None,
+            dst_created_at: dst.and_then(|d| d.created_at),
+            dest_owned_by_rule: dst.and_then(|d| d.owned_by_rule),
+            ledger: ledger.get(&f.key),
+        };
+        f.remediation = Some(analyze_finding(&facts));
+    }
+}
+
+/// PURE: fold the annotated samples into the sample-scoped `ActionableSummary`.
+pub fn fold_actionable(diff: &ParityDiff) -> ActionableSummary {
+    use super::remediation::{ReasonCode, RerunVerdict};
+    let mut s = ActionableSummary::default();
+    let all = diff
+        .missing_samples
+        .iter()
+        .chain(&diff.orphan_samples)
+        .chain(&diff.mismatch_samples);
+    for f in all {
+        let Some(rem) = &f.remediation else { continue };
+        match rem.rerun_helps {
+            RerunVerdict::Yes => s.rerun_fixes += 1,
+            RerunVerdict::Conditional { .. } => s.rerun_conditional += 1,
+            RerunVerdict::No { .. } => {
+                if rem.reason != ReasonCode::CopyFailing {
+                    s.needs_manual += 1;
+                }
+            }
+        }
+        if rem.reason == ReasonCode::CopyFailing {
+            s.copy_failing += 1;
+        }
+        if rem.reason == ReasonCode::ForeignOrphan {
+            s.foreign_orphans += 1;
+        }
+    }
+    s
+}
+
+/// Sample-scoped tally of remediation verdicts across the annotated findings.
+/// Bounded by the per-category sample caps — NOT the exact diff totals (those
+/// stay in `ParityOutcome`'s count fields).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ActionableSummary {
+    /// Re-run will fix it (`RerunVerdict::Yes`).
+    pub rerun_fixes: u64,
+    /// Re-run's outcome depends on timestamps (`RerunVerdict::Conditional`).
+    pub rerun_conditional: u64,
+    /// Needs operator action — a `No` verdict that isn't a copy-failure.
+    pub needs_manual: u64,
+    /// The copy keeps failing (`ReasonCode::CopyFailing`).
+    pub copy_failing: u64,
+    /// Foreign orphans on the destination (`ReasonCode::ForeignOrphan`).
+    pub foreign_orphans: u64,
 }
 
 /// The serialized audit verdict consumed by the frontend.
@@ -324,6 +450,12 @@ pub struct ParityOutcome {
     /// The signal: strict — `unverifiable` counts against it.
     pub in_sync: bool,
     pub scanned_at: i64,
+    /// The rule's conflict policy — sets up WHY the verdicts read as they do.
+    pub conflict_policy: ConflictPolicy,
+    /// Whether the rule mirrors source deletes to the destination.
+    pub replicate_deletes: bool,
+    /// Sample-scoped remediation tally (see `ActionableSummary`).
+    pub actionable: ActionableSummary,
     pub missing_samples: Vec<ParityFinding>,
     pub orphan_samples: Vec<ParityFinding>,
     pub mismatch_samples: Vec<ParityFinding>,
@@ -347,6 +479,7 @@ pub async fn parity_audit(
     engine: &DynEngine,
     rule: &ReplicationRule,
     max_objects: usize,
+    failures: Option<&tokio::sync::Mutex<ConfigDb>>,
 ) -> Result<ParityOutcome, String> {
     let (inc, exc) = compile_rule_globs(rule).map_err(|e| e.to_string())?;
     let source_prefix = normalize_prefix(&rule.source.prefix);
@@ -418,7 +551,11 @@ pub async fn parity_audit(
             if is_skippable_key(key) {
                 continue;
             }
-            dest.insert(key.clone(), ObjState::from_metadata(meta));
+            let mut st = ObjState::from_metadata(meta);
+            // Resolve rule ownership now, while rule.name is in scope — the
+            // foreign-orphan discriminator for remediation.
+            st.owned_by_rule = Some(event_consumer::owned_by_rule(meta, &rule.name));
+            dest.insert(key.clone(), st);
             total += 1;
         }
         if !pager.advance(page.is_truncated, page.next_continuation_token) {
@@ -438,13 +575,44 @@ pub async fn parity_audit(
 
     let source_objects = source.len() as u64;
     let dest_objects = dest.len() as u64;
-    let diff = diff_parity(&source, &dest);
+    let mut diff = diff_parity(&source, &dest);
 
     let in_sync = !truncated
         && diff.missing_on_dest == 0
         && diff.orphan_on_dest == 0
         && diff.checksum_mismatch == 0
         && diff.unverifiable == 0;
+
+    // Annotate the bounded samples (≤300 keys) with the causal model. The
+    // ledger join is one small `IN (…)` query over exactly those keys; empty
+    // when no config DB was passed (still a correct, ledger-less diagnosis).
+    let sample_keys: Vec<&str> = diff
+        .missing_samples
+        .iter()
+        .chain(&diff.orphan_samples)
+        .chain(&diff.mismatch_samples)
+        .map(|f| f.key.as_str())
+        .collect();
+    // Lock the DB ONLY here, for the synchronous ledger query — never across
+    // the listing awaits above (a `&ConfigDb` is `!Send`, so holding one across
+    // an await would make this future non-`Send` and unusable as a handler).
+    let ledger: HashMap<String, ObjectFailure> = match failures {
+        Some(mutex) => {
+            let db = mutex.lock().await;
+            db.replication_object_failures_for_keys(&rule.name, &sample_keys)
+                .unwrap_or_default()
+        }
+        None => HashMap::new(),
+    };
+    annotate_findings(
+        &mut diff,
+        &source,
+        &dest,
+        rule.conflict,
+        rule.replicate_deletes,
+        &ledger,
+    );
+    let actionable = fold_actionable(&diff);
 
     Ok(ParityOutcome {
         rule_name: rule.name.clone(),
@@ -460,6 +628,9 @@ pub async fn parity_audit(
         truncated,
         in_sync,
         scanned_at: super::current_unix_seconds(),
+        conflict_policy: rule.conflict,
+        replicate_deletes: rule.replicate_deletes,
+        actionable,
         missing_samples: diff.missing_samples,
         orphan_samples: diff.orphan_samples,
         mismatch_samples: diff.mismatch_samples,
@@ -477,6 +648,8 @@ mod tests {
             size,
             etag: etag.map(|s| s.to_string()),
             multipart_parts: parts,
+            created_at: None,
+            owned_by_rule: None,
         }
     }
 
@@ -694,6 +867,8 @@ mod tests {
                 size,
                 etag,
                 multipart_parts: parts,
+                created_at: None,
+                owned_by_rule: None,
             })
     }
 
@@ -777,5 +952,93 @@ mod tests {
         assert_eq!(st.sha256, None);
         assert_eq!(st.etag.as_deref(), Some("md5val"));
         assert_eq!(st.multipart_parts, None);
+    }
+
+    #[test]
+    fn objstate_carries_created_at_and_no_ownership() {
+        let now = chrono::Utc::now();
+        let m = FileMetadata::new_passthrough("x".into(), "sha".into(), "md5val".into(), 7, None);
+        // new_passthrough stamps created_at = now; assert we propagate it.
+        let st = ObjState::from_metadata(&m);
+        assert_eq!(st.created_at, Some(m.created_at.timestamp()));
+        assert!(st.created_at.unwrap() >= now.timestamp() - 5);
+        assert_eq!(st.owned_by_rule, None, "ownership is rule-agnostic here");
+    }
+
+    // ─────────────── annotate_findings ───────────────
+
+    #[test]
+    fn annotate_missing_no_ledger_is_run_now() {
+        use super::super::remediation::{FixAction, ReasonCode, RerunVerdict};
+        let mut src = st(Some("h"), 1, None, None);
+        src.created_at = Some(500);
+        let source = map(&[("k", src)]);
+        let dest: BTreeMap<String, ObjState> = BTreeMap::new();
+        let mut diff = diff_parity(&source, &dest);
+        annotate_findings(
+            &mut diff,
+            &source,
+            &dest,
+            ConflictPolicy::NewerWins,
+            false,
+            &HashMap::new(),
+        );
+        let rem = diff.missing_samples[0].remediation.as_ref().unwrap();
+        assert_eq!(rem.reason, ReasonCode::NeverCopied);
+        assert_eq!(rem.rerun_helps, RerunVerdict::Yes);
+        assert_eq!(rem.fix, FixAction::RunNow);
+    }
+
+    #[test]
+    fn annotate_skip_mismatch_is_the_lie_and_folds_to_needs_manual() {
+        use super::super::remediation::{NoReason, RerunVerdict};
+        // Same size, differing sha → mismatch under SkipIfDestExists.
+        let mut s = st(Some("AAAA"), 10, None, None);
+        s.created_at = Some(100);
+        let mut d = st(Some("BBBB"), 10, None, None);
+        d.created_at = Some(100);
+        d.owned_by_rule = Some(true);
+        let source = map(&[("k", s)]);
+        let dest = map(&[("k", d)]);
+        let mut diff = diff_parity(&source, &dest);
+        annotate_findings(
+            &mut diff,
+            &source,
+            &dest,
+            ConflictPolicy::SkipIfDestExists,
+            false,
+            &HashMap::new(),
+        );
+        let rem = diff.mismatch_samples[0].remediation.as_ref().unwrap();
+        assert_eq!(
+            rem.rerun_helps,
+            RerunVerdict::No {
+                why: NoReason::PolicySkipsExistingDest
+            }
+        );
+        let summary = fold_actionable(&diff);
+        assert_eq!(summary.needs_manual, 1);
+        assert_eq!(summary.rerun_fixes, 0);
+    }
+
+    #[test]
+    fn annotate_orphan_uses_dest_ownership() {
+        use super::super::remediation::ReasonCode;
+        let source: BTreeMap<String, ObjState> = BTreeMap::new();
+        let mut d = st(Some("h"), 5, None, None);
+        d.owned_by_rule = Some(false); // foreign
+        let dest = map(&[("z", d)]);
+        let mut diff = diff_parity(&source, &dest);
+        annotate_findings(
+            &mut diff,
+            &source,
+            &dest,
+            ConflictPolicy::NewerWins,
+            true,
+            &HashMap::new(),
+        );
+        let rem = diff.orphan_samples[0].remediation.as_ref().unwrap();
+        assert_eq!(rem.reason, ReasonCode::ForeignOrphan);
+        assert_eq!(fold_actionable(&diff).foreign_orphans, 1);
     }
 }

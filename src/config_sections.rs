@@ -1089,7 +1089,7 @@ pub struct ReplicationEndpoint {
     pub prefix: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConflictPolicy {
     /// Copy only if source is strictly newer than destination (default).

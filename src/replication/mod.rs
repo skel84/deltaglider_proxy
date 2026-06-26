@@ -20,6 +20,7 @@
 pub mod event_consumer;
 pub mod parity;
 pub mod planner;
+pub mod remediation;
 pub mod scheduler;
 pub mod state_store;
 pub mod worker;
@@ -28,7 +29,11 @@ pub use parity::{parity_audit, ParityOutcome};
 pub use planner::{
     normalize_prefix, plan_batch, rewrite_key, should_replicate, BatchPlan, Decision,
 };
+pub use remediation::{
+    analyze_finding, ConditionalReason, FindingFacts, FixAction, NoReason, ReasonCode, Remediation,
+    RerunVerdict,
+};
 pub use state_store::{
-    current_unix_seconds, FailureRecord, ReplicationState, RunRecord, RunTotals,
+    current_unix_seconds, FailureRecord, ObjectFailure, ReplicationState, RunRecord, RunTotals,
 };
 pub use worker::{run_rule, RunConcurrency, RunLease, RunOutcome};

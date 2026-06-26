@@ -208,10 +208,17 @@ pub async fn verify(
     info!("Replication verify via admin API: rule='{}'", name);
 
     let engine = state.s3_state.engine.load().clone();
-    let outcome =
-        replication::parity_audit(&engine, &rule, replication::parity::MAX_PARITY_OBJECTS)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Pass the DB mutex so the audit can join the per-object failure ledger.
+    // parity_audit locks it ONLY for the synchronous tail query, never across
+    // its listing awaits. A None DB still yields a correct (ledger-less) diff.
+    let outcome = replication::parity_audit(
+        &engine,
+        &rule,
+        replication::parity::MAX_PARITY_OBJECTS,
+        state.config_db.as_deref(),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     crate::audit::audit_log(
         "replication_verify",
