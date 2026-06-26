@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.5.2 — 2026-06-26
+
 ### Fixed
 
 - **Reject malformed `//` keys at ingest.** The proxy is the S3 gateway, but it
