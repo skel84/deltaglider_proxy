@@ -83,6 +83,7 @@ pub enum JobAction {
     RunNow,
     Preview,
     Cancel,
+    Verify,
 }
 
 impl JobAction {
@@ -93,6 +94,7 @@ impl JobAction {
             "run-now" => Some(Self::RunNow),
             "preview" => Some(Self::Preview),
             "cancel" => Some(Self::Cancel),
+            "verify" => Some(Self::Verify),
             _ => None,
         }
     }
@@ -108,6 +110,7 @@ impl JobAction {
             Self::RunNow => "run-now",
             Self::Preview => "preview",
             Self::Cancel => "cancel",
+            Self::Verify => "verify",
         }
     }
 }
@@ -115,7 +118,12 @@ impl JobAction {
 /// The uniform capability matrix — what each subsystem's jobs support.
 pub fn supported_actions(sub: JobSubsystem) -> &'static [JobAction] {
     match sub {
-        JobSubsystem::Replication => &[JobAction::Pause, JobAction::Resume, JobAction::RunNow],
+        JobSubsystem::Replication => &[
+            JobAction::Pause,
+            JobAction::Resume,
+            JobAction::RunNow,
+            JobAction::Verify,
+        ],
         JobSubsystem::Lifecycle => &[
             JobAction::Pause,
             JobAction::Resume,
@@ -619,6 +627,13 @@ pub async fn job_action(
                 Json(serde_json::to_value(resp).map_err(internal)?),
             ))
         }
+        (JobSubsystem::Replication, JobAction::Verify) => {
+            let Json(resp) = super::replication::verify(Path(name), State(state)).await?;
+            Ok((
+                StatusCode::OK,
+                Json(serde_json::to_value(resp).map_err(internal)?),
+            ))
+        }
         (JobSubsystem::Lifecycle, JobAction::Pause) => {
             super::lifecycle::pause(Path(name), State(state)).await?;
             Ok((StatusCode::NO_CONTENT, Json(serde_json::json!({}))))
@@ -718,7 +733,7 @@ mod tests {
         use JobAction::*;
         assert_eq!(
             supported_actions(JobSubsystem::Replication),
-            &[Pause, Resume, RunNow]
+            &[Pause, Resume, RunNow, Verify]
         );
         assert_eq!(
             supported_actions(JobSubsystem::Lifecycle),
@@ -726,6 +741,9 @@ mod tests {
         );
         assert_eq!(supported_actions(JobSubsystem::Maintenance), &[Cancel]);
         assert_eq!(JobAction::parse("run-now"), Some(RunNow));
+        assert_eq!(JobAction::parse("verify"), Some(Verify));
         assert_eq!(JobAction::parse("nope"), None);
+        // Verify is replication-only.
+        assert!(!supported_actions(JobSubsystem::Lifecycle).contains(&Verify));
     }
 }

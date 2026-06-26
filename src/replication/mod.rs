@@ -18,11 +18,13 @@
 //! executes due rules via the same worker used by "Run now".
 
 pub mod event_consumer;
+pub mod parity;
 pub mod planner;
 pub mod scheduler;
 pub mod state_store;
 pub mod worker;
 
+pub use parity::{parity_audit, ParityOutcome};
 pub use planner::{
     normalize_prefix, plan_batch, rewrite_key, should_replicate, BatchPlan, Decision,
 };

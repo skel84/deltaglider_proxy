@@ -187,6 +187,44 @@ pub async fn run_now(
     }))
 }
 
+/// Audit source↔destination parity for a rule (read-only). Gated ONLY on
+/// rule existence — auditing a disabled rule before enabling it is valid.
+/// No lease, no maintenance-gate: it only lists metadata.
+pub async fn verify(
+    Path(name): Path<String>,
+    State(state): State<Arc<AdminState>>,
+) -> Result<Json<replication::ParityOutcome>, (StatusCode, String)> {
+    let repl = {
+        let cfg = state.config.read().await;
+        cfg.replication.clone()
+    };
+    let rule = repl
+        .rules
+        .iter()
+        .find(|r| r.name == name)
+        .cloned()
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "rule not found".to_string()))?;
+
+    info!("Replication verify via admin API: rule='{}'", name);
+
+    let engine = state.s3_state.engine.load().clone();
+    let outcome =
+        replication::parity_audit(&engine, &rule, replication::parity::MAX_PARITY_OBJECTS)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    crate::audit::audit_log(
+        "replication_verify",
+        "admin",
+        &name,
+        &HeaderMap::new(),
+        &rule.source.bucket,
+        &rule.source.prefix,
+    );
+
+    Ok(Json(outcome))
+}
+
 /// Check whether a rule with the given name exists in the live config.
 /// M1 fix: previously pause/resume called `replication_ensure_state`
 /// before this check, leaving an orphan DB row for ghost rules even
