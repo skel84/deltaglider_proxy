@@ -19,7 +19,7 @@ DGP_CONFIG_SYNC_BUCKET=dgp-iam-sync
 
 After every IAM mutation, the mutating instance uploads the encrypted DB to the bucket. The other instances poll every 5 minutes and download when the ETag changes. All instances must share the same bootstrap password — it's the DB encryption key.
 
-Update uploads use `If-Match` compare-and-swap protection by default. If your S3-compatible endpoint rejects conditional update PUTs and you have exactly one writer, you may set `advanced.config_sync_update_cas: false` or `DGP_CONFIG_SYNC_UPDATE_CAS=false`. Do not disable update CAS when more than one instance can mutate IAM.
+Update uploads use `If-Match` compare-and-swap protection by default. If your S3-compatible endpoint rejects conditional update PUTs and you have exactly one writer, you may set `advanced.config_sync_update_cas: false` or `DGP_CONFIG_SYNC_UPDATE_CAS=false`. With that opt-out, an existing remote DB that the local bootstrap key cannot adopt is also treated as the target for a single-writer replacement upload. Do not disable update CAS when more than one instance can mutate IAM.
 
 ## 2. Designate one writer
 

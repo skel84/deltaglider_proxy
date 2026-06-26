@@ -638,7 +638,7 @@ advanced:
 
 Sync uses the same S3 credentials as the storage backend (`DGP_BE_AWS_*`) and only works when the storage backend is S3 (not filesystem). On every IAM mutation, the DB is uploaded to `s3://<bucket>/.deltaglider/config.db`; readers poll the S3 ETag every 5 minutes and download on change.
 
-By default update uploads use `If-Match` compare-and-swap protection. For a single-writer deployment on an S3-compatible endpoint that rejects conditional update PUTs, set `advanced.config_sync_update_cas: false` or `DGP_CONFIG_SYNC_UPDATE_CAS=false`. First-create uploads still use `If-None-Match: *`; disabling update CAS is not safe for multi-writer use.
+By default update uploads use `If-Match` compare-and-swap protection. For a single-writer deployment on an S3-compatible endpoint that rejects conditional update PUTs, set `advanced.config_sync_update_cas: false` or `DGP_CONFIG_SYNC_UPDATE_CAS=false`. First-create uploads still use `If-None-Match: *`; if a remote object already exists but cannot be adopted by the local bootstrap key, the next upload is treated as an unguarded single-writer replacement. Disabling update CAS is not safe for multi-writer use.
 
 ---
 

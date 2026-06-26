@@ -63,6 +63,10 @@ fn upload_guard(expected_etag: Option<&str>, config_sync_update_cas: bool) -> Up
     }
 }
 
+fn record_unadopted_remote_etag(config_sync_update_cas: bool) -> bool {
+    !config_sync_update_cas
+}
+
 impl ConfigDbSync {
     /// Create a new sync instance from the backend config and sync bucket name.
     ///
@@ -243,6 +247,13 @@ impl ConfigDbSync {
                      NOT replacing local copy: {}",
                     e
                 );
+                if record_unadopted_remote_etag(self.config_sync_update_cas) {
+                    *self.last_etag.write().await = remote_etag;
+                    tracing::warn!(
+                        "Config DB S3 sync update CAS is disabled; treating existing unadopted \
+                         remote object as the target for the next single-writer upload"
+                    );
+                }
                 return Ok(None);
             }
         }
@@ -526,5 +537,15 @@ mod tests {
             upload_guard(Some("\"etag-1\""), false),
             UploadGuard::UnguardedUpdate
         );
+    }
+
+    #[test]
+    fn invalid_remote_etag_is_not_recorded_when_update_cas_is_enabled() {
+        assert!(!record_unadopted_remote_etag(true));
+    }
+
+    #[test]
+    fn invalid_remote_etag_is_recorded_only_for_single_writer_update_cas_opt_out() {
+        assert!(record_unadopted_remote_etag(false));
     }
 }
