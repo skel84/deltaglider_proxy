@@ -38,6 +38,8 @@ pub const SAMPLE_CAP: usize = 100;
 pub const MAX_PARITY_OBJECTS: usize = 200_000;
 /// Objects per `list_objects` page.
 const PAGE_SIZE: u32 = 1000;
+/// Per-page list retries on a transient throttle (503) before giving up.
+const LIST_MAX_ATTEMPTS: u32 = 5;
 
 /// The comparable shape of one object, distilled from `FileMetadata`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,10 +502,30 @@ async fn scan_prefix(
     let mut truncated = false;
     let mut pager = crate::job_loop::Pager::fresh();
     'pages: while pager.begin_page().is_some() {
-        let page = engine
-            .list_objects(bucket, prefix, None, PAGE_SIZE, pager.token(), true)
-            .await
-            .map_err(|e| format!("list {bucket}/{prefix} page failed: {e}"))?;
+        // Retry transient list errors (Hetzner 503 throttle on a long scan)
+        // with backoff instead of failing the whole audit on one blip.
+        let page = {
+            let mut attempt = 0u32;
+            loop {
+                match engine
+                    .list_objects(bucket, prefix, None, PAGE_SIZE, pager.token(), true)
+                    .await
+                {
+                    Ok(p) => break p,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        attempt += 1;
+                        if attempt >= LIST_MAX_ATTEMPTS
+                            || !crate::transfer::is_transient_copy_error(&msg)
+                        {
+                            return Err(format!("list {bucket}/{prefix} page failed: {msg}"));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64))
+                            .await;
+                    }
+                }
+            }
+        };
         for (key, meta) in &page.objects {
             if kept >= max {
                 truncated = true;
