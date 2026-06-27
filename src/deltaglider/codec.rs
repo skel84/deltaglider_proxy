@@ -16,11 +16,77 @@ use tracing::{debug, instrument, warn};
 /// Default 60s is generous for 100MB max object size — xdelta3 typically
 /// processes 100MB in <5s. Hung processes are killed to prevent cascading.
 /// Override via `DGP_CODEC_TIMEOUT_SECS` for testing or constrained environments.
+///
+/// This wall-clock timeout governs the BUFFERED path (`encode`/`decode`), where
+/// the whole operation is bounded (input ≤ max_size, finishes in seconds). The
+/// STREAMING path (`encode_from_reader`/`decode_to_writer`) uses a STALL timeout
+/// instead — see `codec_stall_timeout` — because a legitimate multi-GB stream
+/// can run far past 60s while making steady progress.
 fn codec_timeout() -> Duration {
     Duration::from_secs(crate::config::env_parse_with_default(
         "DGP_CODEC_TIMEOUT_SECS",
         60,
     ))
+}
+
+/// No-progress timeout for the STREAMING codec path. The streaming pump bumps a
+/// progress clock on every chunk it reads from xdelta3's stdout; the watchdog
+/// kills the child only if NO progress is made for this long. Spike B measured
+/// the largest normal inter-chunk gap at ~13ms on a 1.6GB decode, so 30s has a
+/// ~2300× margin over legitimate slow-but-working progress while still reaping a
+/// genuinely hung process or a full-disk spool quickly.
+fn codec_stall_timeout() -> Duration {
+    Duration::from_secs(crate::config::env_parse_with_default(
+        "DGP_CODEC_STALL_SECS",
+        30,
+    ))
+}
+
+/// Absolute ceiling for a single streaming codec op, regardless of progress.
+/// The stall timeout alone can't bound a crafted delta that makes xdelta3 spin
+/// forever while trickling a byte every few seconds (Spike B note). This hard
+/// cap (default 2h — generous for a 100GB object even on slow storage) is the
+/// backstop. Set high; it should never fire for a legitimate transfer.
+fn codec_absolute_ceiling() -> Duration {
+    Duration::from_secs(crate::config::env_parse_with_default(
+        "DGP_CODEC_ABSOLUTE_SECS",
+        2 * 60 * 60,
+    ))
+}
+
+/// Shared progress clock for the streaming watchdog. The pump stores the
+/// monotonic nanos of the last successful stdout read; the watchdog reads it to
+/// decide whether xdelta3 has stalled. `start` is the op's spawn instant, used
+/// for the absolute ceiling.
+struct ProgressClock {
+    start: Instant,
+    last_progress: std::sync::atomic::AtomicU64, // nanos since `start`
+}
+
+impl ProgressClock {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            last_progress: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    /// Record forward progress (called by the pump after each chunk).
+    fn tick(&self) {
+        let elapsed = self.start.elapsed().as_nanos() as u64;
+        self.last_progress
+            .store(elapsed, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// Nanos since the last tick (how long we've been stalled).
+    fn stalled_for(&self) -> Duration {
+        let now = self.start.elapsed().as_nanos() as u64;
+        let last = self
+            .last_progress
+            .load(std::sync::atomic::Ordering::Relaxed);
+        Duration::from_nanos(now.saturating_sub(last))
+    }
+    fn total_elapsed(&self) -> Duration {
+        self.start.elapsed()
+    }
 }
 
 /// Wait for a child process with a timeout. Kills the child if the deadline is exceeded.
@@ -176,6 +242,135 @@ fn pipe_stdin_stdout_stderr(
         );
 
         // Signal the watchdog to stand down
+        let (ref flag, ref condvar, _) = *done;
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        condvar.notify_one();
+
+        result
+    })
+}
+
+/// STREAMING pump: feed xdelta3 stdin from a `Read`, drain stdout in fixed
+/// chunks to a `sink` callback, all with BOUNDED memory (the chunk buffers,
+/// never the whole object). Replaces the `read_to_end` buffering of
+/// `pipe_stdin_stdout_stderr` for the unbounded-size path.
+///
+/// Memory model (Spike A/C proven): peak heap is `CHUNK` × a small constant; the
+/// source is mmap'd by xdelta3 from a file (not piped), and the output is handed
+/// chunk-by-chunk to `sink` (which writes a spool file + hashes), never buffered.
+///
+/// Watchdog: STALL-based, not wall-clock. `progress.tick()` fires after every
+/// stdout chunk; the watchdog kills the child if no progress for
+/// `stall_timeout`, OR if the absolute `ceiling` is exceeded (backstop against a
+/// trickle-forever crafted delta). Spike B confirmed normal inter-chunk gaps are
+/// ~13ms, so the stall timeout never misfires on legitimate slow streams.
+///
+/// Returns `(write_result, stdout_bytes_total)`. `sink` errors abort the pump.
+#[allow(clippy::too_many_arguments)]
+fn pipe_streaming<R, W>(
+    child_stdin: std::process::ChildStdin,
+    child_stdout: std::process::ChildStdout,
+    mut child_stderr: std::process::ChildStderr,
+    mut input: R,
+    mut sink: W,
+    child_id: u32,
+    stall_timeout: Duration,
+    ceiling: Duration,
+    progress: &ProgressClock,
+) -> (IoResult<()>, IoResult<u64>, IoResult<Vec<u8>>)
+where
+    R: Read + Send,
+    W: FnMut(&[u8]) -> IoResult<()> + Send,
+{
+    /// Streaming pump chunk size. 256KiB matches Spike B's measurement chunk and
+    /// is a good balance of syscall overhead vs resident memory.
+    const PUMP_CHUNK: usize = 256 * 1024;
+
+    let done = std::sync::Arc::new((
+        std::sync::atomic::AtomicBool::new(false),
+        std::sync::Condvar::new(),
+        std::sync::Mutex::new(()),
+    ));
+
+    std::thread::scope(|s| {
+        // Stall-based watchdog. Wakes every `slice` to re-check progress instead
+        // of sleeping the whole timeout, so it reaps a hung child promptly.
+        let done_clone = done.clone();
+        s.spawn(move || {
+            let (ref flag, ref condvar, ref mutex) = *done_clone;
+            let slice = std::cmp::min(stall_timeout, Duration::from_secs(1));
+            loop {
+                let guard = mutex.lock().unwrap();
+                let (_g, _to) = condvar.wait_timeout(guard, slice).unwrap();
+                if flag.load(std::sync::atomic::Ordering::Acquire) {
+                    return; // pump finished — stand down
+                }
+                let stalled = progress.stalled_for() >= stall_timeout;
+                let over_ceiling = progress.total_elapsed() >= ceiling;
+                if stalled || over_ceiling {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(child_id as i32, libc::SIGKILL);
+                    }
+                    warn!(
+                        "Watchdog killed streaming xdelta3 (pid {}): {}",
+                        child_id,
+                        if over_ceiling {
+                            format!("exceeded absolute ceiling {}s", ceiling.as_secs())
+                        } else {
+                            format!("no progress for {}s", stall_timeout.as_secs())
+                        }
+                    );
+                    return;
+                }
+            }
+        });
+
+        // Writer: stream the input into xdelta3 stdin in chunks (bounded).
+        let writer = s.spawn(move || {
+            let mut stdin = child_stdin;
+            let mut buf = vec![0u8; PUMP_CHUNK];
+            loop {
+                let n = input.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                stdin.write_all(&buf[..n])?;
+            }
+            stdin.flush()?;
+            drop(stdin); // EOF → child finishes
+            Ok::<(), std::io::Error>(())
+        });
+
+        // Reader: drain stdout chunk-by-chunk to the sink, ticking progress.
+        let stdout_reader = s.spawn(move || {
+            let mut rdr = child_stdout;
+            let mut buf = vec![0u8; PUMP_CHUNK];
+            let mut total: u64 = 0;
+            loop {
+                let n = rdr.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                progress.tick();
+                sink(&buf[..n])?;
+                total += n as u64;
+            }
+            Ok::<u64, std::io::Error>(total)
+        });
+
+        let stderr_reader = s.spawn(|| {
+            let mut buf = Vec::new();
+            child_stderr.read_to_end(&mut buf)?;
+            Ok::<Vec<u8>, std::io::Error>(buf)
+        });
+
+        let result = (
+            writer.join().unwrap(),
+            stdout_reader.join().unwrap(),
+            stderr_reader.join().unwrap(),
+        );
+
         let (ref flag, ref condvar, _) = *done;
         flag.store(true, std::sync::atomic::Ordering::Release);
         condvar.notify_one();
@@ -464,6 +659,113 @@ impl DeltaCodec {
         }
     }
 
+    /// STREAMING decode: reconstruct target from a source FILE + a streamed
+    /// delta, writing the output chunk-by-chunk to `out`. Bounded memory — the
+    /// source is mmap'd by xdelta3 (Spike A: 73MB RSS on a 2.5GB source), the
+    /// delta streams in, the output streams out. Returns bytes written.
+    ///
+    /// The caller owns `source_path` (a seekable file) so the reference temp
+    /// file's lifecycle / quota can be managed outside the codec (Phase 2).
+    pub fn decode_to_writer<R: Read + Send, W: Write + Send>(
+        &self,
+        source_path: &std::path::Path,
+        delta: R,
+        out: W,
+    ) -> Result<u64, CodecError> {
+        self.run_xdelta3_streaming("-d", source_path, delta, out)
+    }
+
+    /// STREAMING encode: produce a delta of a streamed target against a source
+    /// FILE, writing the delta chunk-by-chunk to `out`. Bounded memory (Spike C:
+    /// 2MB RSS on a 1.5GB target). The caller decides delta-vs-passthrough from
+    /// the bytes written to `out` (it can cap `out` and abort). Returns delta
+    /// bytes written.
+    pub fn encode_from_reader<R: Read + Send, W: Write + Send>(
+        &self,
+        source_path: &std::path::Path,
+        target: R,
+        out: W,
+    ) -> Result<u64, CodecError> {
+        self.run_xdelta3_streaming("-e", source_path, target, out)
+    }
+
+    /// Shared streaming driver for `decode_to_writer` / `encode_from_reader`.
+    /// Mirrors `run_xdelta3` (same args, same -a/armor logic) but drives the
+    /// STALL-based streaming pump instead of the buffered one, and takes the
+    /// source as a path the caller owns rather than a `&[u8]` it copies.
+    fn run_xdelta3_streaming<R: Read + Send, W: Write + Send>(
+        &self,
+        mode: &str,
+        source_path: &std::path::Path,
+        input: R,
+        mut out: W,
+    ) -> Result<u64, CodecError> {
+        let make_error = |msg: String| -> CodecError {
+            if mode == "-e" {
+                CodecError::EncodeFailed(msg)
+            } else {
+                CodecError::DecodeFailed(msg)
+            }
+        };
+        if !self.cli_available {
+            return Err(make_error(
+                "xdelta3 CLI binary is not available".to_string(),
+            ));
+        }
+        let source_str = source_path
+            .to_str()
+            .ok_or_else(|| make_error("source path is not valid UTF-8".to_string()))?;
+
+        // Same arg construction as the buffered path (incl. version-aware -a).
+        let mut args: Vec<&str> = vec![mode, "-D"];
+        if self.armor_supported {
+            args.push("-a");
+        }
+        args.extend(["-s", source_str, "-c"]);
+
+        let mut child = Command::new("xdelta3")
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| make_error(format!("xdelta3 CLI not available: {}", e)))?;
+
+        let child_id = child.id();
+        let child_stdin = child.stdin.take().expect("piped stdin");
+        let child_stdout = child.stdout.take().expect("piped stdout");
+        let child_stderr = child.stderr.take().expect("piped stderr");
+
+        let progress = ProgressClock::new();
+        let (write_result, total, stderr_result) = pipe_streaming(
+            child_stdin,
+            child_stdout,
+            child_stderr,
+            input,
+            |chunk: &[u8]| out.write_all(chunk),
+            child_id,
+            codec_stall_timeout(),
+            codec_absolute_ceiling(),
+            &progress,
+        );
+        write_result?;
+        let total = total?;
+        let stderr_bytes = stderr_result.unwrap_or_default();
+
+        // The streaming watchdog uses raw kill(); reap the child here (its
+        // wall-clock is bounded by the absolute ceiling the watchdog enforces).
+        let status = wait_with_timeout(&mut child, codec_absolute_ceiling())?;
+        if status.success() {
+            out.flush()?;
+            Ok(total)
+        } else {
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            let op = if mode == "-e" { "encode" } else { "decode" };
+            warn!("xdelta3 streaming {} failed: {}", op, stderr);
+            Err(make_error(format!("xdelta3 CLI failed: {}", stderr)))
+        }
+    }
+
     /// Calculate compression ratio (delta_size / original_size)
     pub fn compression_ratio(original_size: usize, delta_size: usize) -> f32 {
         if original_size == 0 {
@@ -503,6 +805,80 @@ mod tests {
         let reconstructed = codec.decode(source, &delta).unwrap();
 
         assert_eq!(reconstructed, target);
+    }
+
+    /// Write `data` to a fresh temp file and return it (the seekable source the
+    /// streaming codec entry points require).
+    fn source_tempfile(data: &[u8]) -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(data).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn streaming_encode_then_streaming_decode_roundtrips() {
+        let codec = DeltaCodec::default();
+        // A meaningfully-sized, similar pair so the delta is real but small.
+        let source: Vec<u8> = (0..200_000u32).flat_map(|n| n.to_le_bytes()).collect();
+        let mut target = source.clone();
+        for off in [1000usize, 400_000, 790_000] {
+            target[off] ^= 0xff;
+        }
+        let src_file = source_tempfile(&source);
+
+        // Streaming encode: target via Read, delta to a Vec sink.
+        let mut delta = Vec::new();
+        let dn = codec
+            .encode_from_reader(src_file.path(), &target[..], &mut delta)
+            .unwrap();
+        assert_eq!(dn as usize, delta.len());
+        assert!(delta.len() < target.len(), "delta should beat raw size");
+
+        // Streaming decode: delta via Read, reconstruction to a Vec sink.
+        let mut recon = Vec::new();
+        let rn = codec
+            .decode_to_writer(src_file.path(), &delta[..], &mut recon)
+            .unwrap();
+        assert_eq!(rn as usize, recon.len());
+        assert_eq!(recon, target, "streaming roundtrip must be byte-exact");
+    }
+
+    #[test]
+    fn streaming_decode_matches_buffered_decode() {
+        // A delta made by the BUFFERED encode must decode identically through the
+        // STREAMING path — proves format compatibility between the two paths.
+        let codec = DeltaCodec::default();
+        let source = vec![7u8; 100_000];
+        let mut target = source.clone();
+        target.extend_from_slice(b"appended tail that differs");
+        let delta = codec.encode(&source, &target).unwrap();
+
+        let src_file = source_tempfile(&source);
+        let mut recon = Vec::new();
+        codec
+            .decode_to_writer(src_file.path(), &delta[..], &mut recon)
+            .unwrap();
+        assert_eq!(recon, target);
+    }
+
+    #[test]
+    fn progress_clock_detects_stall() {
+        // The stall watchdog rests on ProgressClock: after a tick, stalled_for
+        // starts climbing; another tick resets it.
+        let clock = ProgressClock::new();
+        clock.tick();
+        std::thread::sleep(Duration::from_millis(30));
+        let stalled = clock.stalled_for();
+        assert!(
+            stalled >= Duration::from_millis(20),
+            "stall should accrue after a tick: {stalled:?}"
+        );
+        clock.tick();
+        assert!(
+            clock.stalled_for() < Duration::from_millis(20),
+            "a fresh tick resets the stall window"
+        );
     }
 
     #[test]

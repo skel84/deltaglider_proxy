@@ -342,8 +342,32 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
     },
     EnvVarEntry {
         name: "DGP_CODEC_TIMEOUT_SECS",
-        description: "xdelta3 subprocess timeout in seconds (default: 60)",
+        description: "xdelta3 subprocess timeout in seconds for the buffered path (default: 60)",
         example: "60",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_CODEC_STALL_SECS",
+        description: "Streaming codec: kill xdelta3 if no stdout progress for this long (default: 30)",
+        example: "30",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_CODEC_ABSOLUTE_SECS",
+        description: "Streaming codec: absolute ceiling for one op, regardless of progress (default: 7200)",
+        example: "7200",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_SPOOL_DIR",
+        description: "Directory for streaming codec spool files (default: system temp dir)",
+        example: "/var/lib/deltaglider/spool",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_SPOOL_MAX_BYTES",
+        description: "Byte budget for concurrent spool files; acquirers back-pressure when full (default: 16 GiB)",
+        example: "17179869184",
         category: "Delta Engine",
     },
     EnvVarEntry {
@@ -2653,6 +2677,10 @@ mod tests {
             "DGP_CORS_PERMISSIVE",                   // demo::ui_router()
             "DGP_REQUEST_TIMEOUT_SECS",              // startup::build_s3_router()
             "DGP_CODEC_TIMEOUT_SECS",                // deltaglider::codec::codec_timeout()
+            "DGP_CODEC_STALL_SECS",                  // deltaglider::codec::codec_stall_timeout()
+            "DGP_CODEC_ABSOLUTE_SECS",               // deltaglider::codec::codec_absolute_ceiling()
+            "DGP_SPOOL_DIR",                         // deltaglider::spool::SpoolDir::from_env()
+            "DGP_SPOOL_MAX_BYTES",                   // deltaglider::spool::SpoolDir::from_env()
             "DGP_RATE_LIMIT_MAX_ATTEMPTS",           // rate_limiter::default_auth()
             "DGP_RATE_LIMIT_WINDOW_SECS",            // rate_limiter::default_auth()
             "DGP_RATE_LIMIT_LOCKOUT_SECS",           // rate_limiter::default_auth()
