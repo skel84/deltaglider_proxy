@@ -782,6 +782,16 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         self.codec.is_cli_available()
     }
 
+    /// The installed xdelta3 version line (e.g. "Xdelta version 3.0.11..."), if any.
+    pub fn cli_version(&self) -> Option<&str> {
+        self.codec.cli_version()
+    }
+
+    /// Whether the codec passes `-a` (armor disabled) to xdelta3 (3.1+ only).
+    pub fn codec_armor_disabled(&self) -> bool {
+        self.codec.armor_disabled()
+    }
+
     /// Returns the maximum object size in bytes.
     pub fn max_object_size(&self) -> u64 {
         self.max_object_size

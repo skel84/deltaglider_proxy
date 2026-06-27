@@ -190,23 +190,85 @@ pub struct DeltaCodec {
     /// Whether the xdelta3 CLI binary is available.
     /// Probed once at construction time to avoid per-request discovery failures.
     cli_available: bool,
+    /// The installed xdelta3 version line (`xdelta3 -V`), captured at probe time.
+    /// `None` when the binary is absent. Surfaced at boot so operators can see
+    /// exactly which xdelta3 is in play (the version determines the delta
+    /// FORMAT + the armor default — see `armor_supported`).
+    cli_version: Option<String>,
+    /// Whether this xdelta3 accepts the `-a` (disable armor) flag. `-a` is a
+    /// 3.1+ option: newer xdelta3 turns "armor" (a whole-stream BLAKE3 frame)
+    /// ON BY DEFAULT, which can't write to a pipe and aborts our piped encode.
+    /// Older xdelta3 (3.0.x, e.g. Debian/Ubuntu's 3.0.11) has NO `-a` and would
+    /// ERROR on the unknown flag — so we PROBE for support and pass `-a` only
+    /// when accepted. Detected at construction, never per-request.
+    armor_supported: bool,
 }
 
 impl DeltaCodec {
     /// Create a new codec with size limit.
     /// Probes for the xdelta3 CLI binary once at construction.
     pub fn new(max_size: usize) -> Self {
-        let cli_available = Self::probe_cli();
+        let cli_version = Self::probe_version();
+        let cli_available = cli_version.is_some();
+        let armor_supported = cli_available && Self::probe_armor_flag();
         Self {
             max_size,
             cli_available,
+            cli_version,
+            armor_supported,
         }
     }
 
-    /// Check if the xdelta3 CLI binary is available.
-    fn probe_cli() -> bool {
-        match Command::new("xdelta3").arg("-V").output() {
-            Ok(output) => output.status.success(),
+    /// Probe `xdelta3 -V`, returning the trimmed first version line on success
+    /// (e.g. "Xdelta version 3.0.11..."), or `None` if the binary is missing /
+    /// errors. `-V` prints to stderr.
+    fn probe_version() -> Option<String> {
+        let output = Command::new("xdelta3").arg("-V").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        // Version banner goes to stderr; fall back to stdout just in case.
+        let banner = if output.stderr.is_empty() {
+            String::from_utf8_lossy(&output.stdout)
+        } else {
+            String::from_utf8_lossy(&output.stderr)
+        };
+        banner.lines().next().map(|l| l.trim().to_string())
+    }
+
+    /// Probe whether `-a` (disable armor) is a recognised flag. We do a real
+    /// tiny encode WITH `-a` (source+target = the same 1 byte, piped exactly
+    /// like the hot path) and accept the flag only if that round-trips. This is
+    /// robust against version-string parsing — it tests the actual behaviour,
+    /// and never false-positives on an old build that prints its banner-and-
+    /// exits-0 on an unknown flag (the encode itself must succeed).
+    fn probe_armor_flag() -> bool {
+        use std::io::Write;
+        let Ok(src) = NamedTempFile::new() else {
+            return false;
+        };
+        // Source file content is irrelevant; just needs to exist + be seekable.
+        if std::fs::write(src.path(), b"x").is_err() {
+            return false;
+        }
+        let Some(src_path) = src.path().to_str() else {
+            return false;
+        };
+        let child = Command::new("xdelta3")
+            .args(["-a", "-e", "-D", "-s", src_path, "-c"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let Ok(mut child) = child else {
+            return false;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(b"y");
+            // drop closes the pipe → EOF
+        }
+        match child.wait_with_output() {
+            Ok(out) => out.status.success(),
             Err(_) => false,
         }
     }
@@ -214,6 +276,17 @@ impl DeltaCodec {
     /// Returns whether the xdelta3 CLI is available.
     pub fn is_cli_available(&self) -> bool {
         self.cli_available
+    }
+
+    /// The installed xdelta3 version line, if available.
+    pub fn cli_version(&self) -> Option<&str> {
+        self.cli_version.as_deref()
+    }
+
+    /// Whether `-a` (disable armor) is passed to xdelta3 — true on 3.1+ builds
+    /// that accept it (and need it to encode through a pipe), false on 3.0.x.
+    pub fn armor_disabled(&self) -> bool {
+        self.armor_supported
     }
 
     /// Returns the max object size this codec will accept (in bytes).
@@ -321,12 +394,31 @@ impl DeltaCodec {
             .to_str()
             .ok_or_else(|| make_error("temp file path is not valid UTF-8".to_string()))?;
 
+        // Base args. -D is critical for transparent object storage: xdelta3
+        // otherwise auto-decompresses recognised compressed inputs (gzip/xz/etc.)
+        // and recompresses on decode, which preserves logical content but not
+        // byte identity. S3 clients require exact original bytes.
+        //
+        // -a disables "armor" — a whole-stream BLAKE3 integrity frame that newer
+        // xdelta3 (3.1+) turns ON BY DEFAULT. Armor must seek back over the whole
+        // stream to hash it, but we feed the target via a PIPE (non-seekable), so
+        // without -a newer builds abort with "armor requires a seekable target:
+        // /dev/stdin". -a also keeps the output a plain RFC-3284 VCDIFF — format-
+        // identical to deltas made by older xdelta3 — so a delta produced on any
+        // version decodes on any other. We never rely on armor's check: the
+        // engine SHA-256-verifies every reconstruction itself.
+        //
+        // CRITICAL: -a is a 3.1+ flag. Older xdelta3 (3.0.x, what Debian/Ubuntu
+        // ship today) has no -a and would ERROR on it, so we only pass it when
+        // `armor_supported` (probed at construction). On 3.0.x there's no armor
+        // to disable anyway.
+        let mut args: Vec<&str> = vec![mode, "-D"];
+        if self.armor_supported {
+            args.push("-a");
+        }
+        args.extend(["-s", source_path, "-c"]);
         let result = Command::new("xdelta3")
-            // -D is critical for transparent object storage: xdelta3 otherwise
-            // auto-decompresses recognised compressed inputs (gzip/xz/etc.) and
-            // recompresses on decode, which preserves logical content but not
-            // byte identity. S3 clients require exact original bytes.
-            .args([mode, "-D", "-s", source_path, "-c"])
+            .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

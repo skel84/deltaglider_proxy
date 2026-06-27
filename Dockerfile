@@ -27,8 +27,12 @@ RUN npm run build
 # release runs, so the lost cargo-chef dep-layer is not a meaningful regression.
 FROM rust:1.92-bookworm AS rust-build
 RUN apt-get -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
-    pkg-config xdelta3 \
-    && rm -rf /var/lib/apt/lists/*
+    pkg-config xdelta3=3.0.11-dfsg-1.2 \
+    && rm -rf /var/lib/apt/lists/* \
+    # Pin xdelta3 so the delta FORMAT the proxy produces can't silently drift on
+    # a base-image bump (newer xdelta3 armors by default — see codec.rs `-a`).
+    # Assert it actually landed.
+    && xdelta3 -V 2>&1 | grep -q "3.0.11"
 WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/

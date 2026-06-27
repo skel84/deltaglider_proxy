@@ -486,7 +486,20 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .with_bucket_usage(bucket_usage.clone());
     if engine.is_cli_available() {
-        info!("  xdelta3 CLI: available (legacy delta interop enabled)");
+        // Log the exact version on EVERY boot — it determines the delta format +
+        // the armor default (see codec.rs `-a`), so it's the first thing to check
+        // when delta encode/decode misbehaves across environments.
+        info!(
+            "  xdelta3 CLI: {} (armor {})",
+            engine
+                .cli_version()
+                .unwrap_or("available (version unknown)"),
+            if engine.codec_armor_disabled() {
+                "disabled via -a (3.1+)"
+            } else {
+                "n/a (3.0.x)"
+            }
+        );
     } else {
         return Err("xdelta3 CLI not found. Install xdelta3 before starting the proxy.".into());
     }
