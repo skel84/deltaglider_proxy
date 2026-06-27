@@ -55,6 +55,7 @@ export default function RunProgressBar({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
+          gap: 6,
           fontSize: 11,
           fontWeight: 600,
           fontVariantNumeric: 'tabular-nums',
@@ -62,7 +63,12 @@ export default function RunProgressBar({
           pointerEvents: 'none',
         }}
       >
-        {copied.toLocaleString()}
+        <span>{copied.toLocaleString()} copied</span>
+        {errors > 0 && (
+          <span style={{ color: '#0a0f1c' }}>
+            · {errors.toLocaleString()} error{errors === 1 ? '' : 's'}
+          </span>
+        )}
       </span>
     </div>
   );

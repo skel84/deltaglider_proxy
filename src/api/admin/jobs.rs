@@ -60,9 +60,15 @@ pub fn parse_job_id(id: &str) -> Option<(JobSubsystem, &str)> {
 }
 
 /// One status vocabulary:
-/// `idle | queued | running | cancelling | succeeded | failed | cancelled`.
+/// `idle | queued | running | cancelling | succeeded | completed_with_errors |
+/// failed | cancelled`.
 /// The raw subsystem value is reported alongside (`status_raw`); unknown
 /// raw values normalize to `idle` (total function — never panics).
+///
+/// `completed_with_errors` is its OWN normalized state, distinct from both
+/// `succeeded` and `failed`: the sweep finished but ≥1 object errored (a
+/// transient destination 500, say). Collapsing it into `failed` made healthy
+/// runs that copied thousands of objects look broken.
 pub fn normalize_status(raw: &str) -> &'static str {
     match raw {
         "idle" => "idle",
@@ -70,6 +76,7 @@ pub fn normalize_status(raw: &str) -> &'static str {
         "running" => "running",
         "cancelling" => "cancelling",
         "succeeded" | "completed" => "succeeded",
+        "completed_with_errors" => "completed_with_errors",
         "failed" => "failed",
         "cancelled" => "cancelled",
         _ => "idle",

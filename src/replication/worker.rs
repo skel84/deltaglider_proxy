@@ -410,11 +410,18 @@ pub async fn run_rule(
         }
     }
 
-    // Final status: any failure (fatal OR per-object) → "failed".
-    // Pre-fix the status was only "failed" when EVERY copy errored,
-    // which silently lied to dashboards on partial-failure runs (M1).
-    let status = if hit_fatal_error || had_any_error {
+    // Final status, three-way:
+    // - "failed": a FATAL error (couldn't list source), OR the sweep errored
+    //   AND copied NOTHING — it accomplished nothing reliable.
+    // - "completed_with_errors": the sweep made PARTIAL progress — it copied
+    //   some objects but ≥1 errored (e.g. a transient destination 500). The run
+    //   still copied everything else; flagging it "failed" cried wolf on
+    //   99.99%-good runs and buried real fatal failures in the noise.
+    // - "succeeded": clean pass, zero errors.
+    let status = if hit_fatal_error || (had_any_error && totals.objects_copied == 0) {
         "failed".to_string()
+    } else if had_any_error {
+        "completed_with_errors".to_string()
     } else {
         "succeeded".to_string()
     };

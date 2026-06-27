@@ -1197,13 +1197,19 @@ async fn test_replication_any_error_flips_status_to_failed() {
          when copying into a missing destination bucket. body={}",
         body
     );
-    // Pre-fix wave-3 M1: status could read "succeeded" if even one
-    // copy slipped through the cracks (or if the all-fail predicate
-    // was wrong). Post-fix any non-zero error count → "failed".
+    // This scenario copies into a MISSING destination bucket, so every
+    // copy errors and `objects_copied == 0`. A sweep that errored and
+    // copied NOTHING is a genuine failure — status must be "failed", not
+    // the partial-progress "completed_with_errors" (which is reserved for
+    // runs that copied SOME objects but hit a transient error on others).
+    assert_eq!(
+        body["objects_copied"].as_i64().unwrap_or(-1),
+        0,
+        "test pre-condition: nothing should copy into a missing bucket. body={body}"
+    );
     assert_eq!(
         status, "failed",
-        "M1 REGRESSION: errors={} but status={} (must be 'failed' on any error). body={}",
-        errors, status, body
+        "errors={errors} copied=0 but status={status} (copied-nothing-and-errored must be 'failed'). body={body}"
     );
 }
 

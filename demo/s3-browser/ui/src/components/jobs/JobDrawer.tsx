@@ -205,7 +205,9 @@ export default function JobDrawer({
           title: 'Status',
           width: 100,
           render: (_: unknown, r) => (
-            <Tag color={jobStatusTone({ status: r.status })}>{r.status}</Tag>
+            <Tag color={jobStatusTone({ status: r.status })}>
+              {jobStatusLabel({ status: r.status })}
+            </Tag>
           ),
         },
         {

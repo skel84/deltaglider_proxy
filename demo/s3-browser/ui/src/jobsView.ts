@@ -62,6 +62,10 @@ export function jobStatusTone(row: Pick<JobRow, 'status' | 'paused' | 'enabled'>
       return 'warning';
     case 'succeeded':
       return 'success';
+    case 'completed_with_errors':
+      // Amber, NOT red: the sweep finished and copied everything it could —
+      // a transient per-object error doesn't make the run a failure.
+      return 'warning';
     case 'failed':
       return 'error';
     case 'cancelled':
@@ -75,6 +79,9 @@ export function jobStatusTone(row: Pick<JobRow, 'status' | 'paused' | 'enabled'>
 export function jobStatusLabel(row: Pick<JobRow, 'status' | 'paused' | 'enabled'>): string {
   if (row.enabled === false) return 'disabled';
   if (row.paused) return 'paused';
+  // Shorten the verbose backend status for the chip; the run's error count is
+  // shown separately in the Runs table.
+  if (row.status === 'completed_with_errors') return 'completed · errors';
   return row.status;
 }
 
