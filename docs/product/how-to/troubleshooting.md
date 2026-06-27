@@ -10,12 +10,25 @@ This guide maps the symptoms you'll see in the wild to their fixes. If your symp
 2. **User disabled.** Access → Users → confirm the row is `Enabled`.
 3. **Deny rule wins.** Any matching Deny rule in the user's permissions (or any group they're in) wins over an Allow. Grep the user's permissions + the groups'.
 4. **`iam_mode: declarative`** and you're trying to mutate IAM via the admin API. Expected behaviour — the API returns `403 { "error": "iam_declarative" }`. Edit YAML and apply the document.
+5. **Stale `${username}` template.** A permission resource written as `${username}` instead of `${iam:username}` is not substituted, so it matches nothing and the user is denied. Fix the template; the save-time config advisories flag this.
 
 If the audit log is **empty** and you still see 403, the denial is in SigV4 verification, not IAM:
 
 - Check `/_/metrics` for `deltaglider_auth_failures_total{reason="invalid_signature"}`.
 - Is the client's system clock within `DGP_CLOCK_SKEW_SECONDS` (default 300s) of the server? Look for `RequestTimeTooSkewed` in the client error.
 - Is the access key typo'd? The proxy returns a generic AccessDenied rather than leaking key-existence.
+
+## Intermittent 403s / one client locks out everyone
+
+Symptom: requests succeed most of the time but **intermittently** fail, and the failures cluster — when one client is busy, *other* clients start failing too. This is rate-limit lockout from a **shared bucket**, not an auth problem.
+
+Cause: the proxy is behind a reverse proxy (Coolify, Traefik, nginx, ALB) but `DGP_TRUST_PROXY_HEADERS` is `false`, so every request looks like it comes from the proxy's IP. All clients share one rate-limit bucket; one busy client exhausts it and the rest get throttled.
+
+Tells:
+- Throttling returns `503 SlowDown`, but a client retry that re-sends auth can surface as `403`; the auth/lockout log lines now include `bucket_key=` and `trust_proxy=` — if `bucket_key` is your proxy's IP for unrelated clients, that's the smoking gun.
+- The save-time config advisories flag the rate-limit-on + trust-off combination.
+
+Fix: set `DGP_TRUST_PROXY_HEADERS=true` (only behind a trusted proxy that injects `X-Forwarded-For`/`X-Real-IP`). See [Rate limits](../reference/rate-limits.md#ip-extraction).
 
 ## Admin login fails with the right password
 
@@ -143,6 +156,8 @@ Fix: run only one instance as the IAM administration surface and point the other
 ## Audit ring is empty after a restart
 
 The audit ring is **in-memory only**. It resets to empty on every restart — that's by design. For persistent audit, the authoritative source is stdout `tracing::info!` — scrape it into your log pipeline.
+
+For operational (non-audit) logs — rate-limit, S3-error, replication lines — use **Observability → System logs** for a live, filterable tail without SSH; see [View live logs](view-live-logs.md). For retention, ship the `DGP_LOG_FORMAT=json` stdout stream to your aggregator.
 
 Increase `DGP_AUDIT_RING_SIZE` (default 500) if you want a larger in-memory window for the admin UI view.
 

@@ -70,7 +70,7 @@ env -i curl -sw "%{http_code}\n" -o /dev/null -X PUT \
 # 403 — anonymous writes are always denied
 ```
 
-Anonymous fetches appear in **Settings → Diagnostics → Audit** as `user=$anonymous`.
+Anonymous fetches appear in **Settings → Observability → Audit** as `user=$anonymous`.
 
 ## Lock writes down
 

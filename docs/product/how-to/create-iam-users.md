@@ -134,7 +134,7 @@ aws --profile acme-proxy s3 cp s3://db-archive/nightly/dump.sql.gz .
 # fatal error: An error occurred (AccessDenied)
 ```
 
-Every denial lands in the audit log (**Settings → Diagnostics → Audit**) with user, action, bucket, and path.
+Every denial lands in the audit log (**Settings → Observability → Audit**) with user, action, bucket, and path.
 
 ## Related
 

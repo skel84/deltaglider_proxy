@@ -18,6 +18,7 @@ YAML is the only supported format. TOML support was removed in v1.4.1: a `.toml`
 - [Access — IAM mode](#access--iam-mode)
 - [Admission chain](#admission-chain)
 - [Security](#security)
+  - [Config advisories](#config-advisories)
   - [Rate limiting](#rate-limiting)
 - [TLS](#tls)
 - [Config sync](#config-sync)
@@ -165,6 +166,18 @@ Resolution order at startup: `RUST_LOG` > `DGP_LOG_LEVEL` > `advanced.log_level`
 advanced:
   log_level: deltaglider_proxy=info,tower_http=warn
 ```
+
+#### Structured logs and the in-GUI log ring
+
+Three env-only knobs control log output and the admin **System logs** viewer (see [View live logs](../how-to/view-live-logs.md)):
+
+| Env var | Default | Effect |
+|---|---|---|
+| `DGP_LOG_FORMAT` | `text` | `json` emits one JSON object per stdout line — `jq`-greppable by client IP, bucket, action. Startup-only. |
+| `DGP_LOG_RING_SIZE` | `2000` | Capacity of the in-memory operational-log ring behind the admin Logs viewer. |
+| `DGP_LOG_RING_LEVEL` | `info` | Minimum severity captured into the ring/live-tail stream, independent of `DGP_LOG_LEVEL`. |
+
+The ring is per-instance, in-memory, and bounded — a triage convenience. Point a log shipper at the `DGP_LOG_FORMAT=json` stdout stream for retention and aggregation.
 
 ### `request_timeout_secs`
 
@@ -514,7 +527,7 @@ Trust `X-Forwarded-For` / `X-Real-IP` for rate limiting and `aws:SourceIp` IAM c
 | **Default** | `false` (secure-by-default) |
 | **Hot-reload** | No |
 
-Behind a reverse proxy that sets these headers, set to `true`.
+**Production-critical behind a reverse proxy.** If the proxy sits behind Coolify, Traefik, nginx, Caddy, or an ALB and this stays `false`, every request appears to come from the proxy's own IP — so all clients collapse onto a **single shared rate-limit bucket**, and one busy client can lock out everyone else with `503 SlowDown`. Set it to `true` whenever a trusted reverse proxy injects `X-Forwarded-For` / `X-Real-IP`. The save-time config advisories (see [Config advisories](#config-advisories)) flag the rate-limit-on + trust-off combination for you. Leave it `false` only when the proxy is directly internet-facing (otherwise a client could spoof the headers).
 
 ### `session_ttl_hours`
 
@@ -562,6 +575,17 @@ Require HTTPS for admin session cookies (`Secure` flag).
 | **Env var** | `DGP_SECURE_COOKIES` |
 | **Default** | `true` |
 | **Hot-reload** | No |
+
+### Config advisories
+
+At save time — in the admin **Apply** dialog and in `config apply` / `config lint` — the proxy runs a set of cross-field checks and surfaces warnings for combinations that are individually valid but suspicious together. They never block a save; they flag footguns before they reach production. Current rules:
+
+| Advisory | Fires when | Why it matters |
+|---|---|---|
+| Shared rate-limit bucket | Rate limiting is enabled but `trust_proxy_headers` is `false` | Behind a reverse proxy, every client collapses onto the proxy's IP and one shared bucket — one client can lock out all others. |
+| Stale IAM template | A permission resource uses a bare `${username}` instead of `${iam:username}` | The bare form is not substituted, so the rule matches nothing and silently denies the user. |
+| Frozen bucket quota | A bucket's `quota_bytes` is `0` | A zero quota rejects all writes to that bucket. |
+| Redundant public prefix | `public_prefixes` are set while `authentication: none` | Auth is already open, so the public-prefix rules add nothing. |
 
 ### Rate limiting
 
@@ -963,6 +987,10 @@ Exhaustive list of every `DGP_*` variable the server reads. The unit test `test_
 | `DGP_CONFIG` | auto | Path to the YAML config file (`.yaml` / `.yml`) |
 | `DGP_LISTEN_ADDR` | `0.0.0.0:9000` | HTTP listen address |
 | `DGP_LOG_LEVEL` | `deltaglider_proxy=debug,tower_http=debug` | Tracing filter (overridden by `RUST_LOG`) |
+| `DGP_LOG_FORMAT` | `text` | Stdout log format: `text` or `json` (one JSON object per line) |
+| `DGP_LOG_RING_SIZE` | `2000` | In-memory operational-log ring capacity (admin Logs viewer) |
+| `DGP_LOG_RING_LEVEL` | `info` | Minimum severity captured into the log ring/stream |
+| `DGP_AUDIT_RING_SIZE` | `500` | In-memory audit ring capacity (admin Audit log viewer) |
 | `DGP_BLOCKING_THREADS` | 512 | Max tokio blocking threads |
 | `DGP_REQUEST_TIMEOUT_SECS` | 300 | Per-request timeout (returns 504) |
 | `DGP_MAX_CONCURRENT_REQUESTS` | 1024 | Tower concurrency limit |
