@@ -106,20 +106,11 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
 
         let (obj_key, deltaspace_id) = Self::validated_key_ingest(bucket, key)?;
 
-        // Usage-counter accounting: capture the PRIOR object metadata (if this
-        // key already exists, S3 PUT is an upsert) so the counter can net the
-        // overwrite to +0 objects instead of double-counting. Only resolved when
-        // a counter is attached. Small TOCTOU window vs the write below is
-        // acceptable — the counter is best-effort/approximate and reconciled by
-        // Refresh; a concurrent same-key PUT is already racy at the S3 layer.
-        let prior_for_counter: Option<FileMetadata> = if self.bucket_usage.is_some() {
-            self.resolve_metadata(bucket, &deltaspace_id, &obj_key)
-                .await
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
+        // Usage-counter accounting: capture the PRIOR object metadata (S3 PUT is
+        // an upsert) so the counter nets an overwrite to +0 instead of double-
+        // counting. Small TOCTOU window vs the write below is acceptable — the
+        // counter is best-effort and reconciled by Refresh.
+        let prior_for_counter = self.prior_for_counter(bucket, key).await;
 
         // Calculate hashes
         let sha256 = hex::encode(Sha256::digest(data));
@@ -868,15 +859,7 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
 
         // Overwrite-net accounting for the usage counter (see store_inner). The
         // handle already holds the per-deltaspace lock, so this is race-safe.
-        let obj_key = crate::types::ObjectKey::parse(&handle.bucket, &handle.key);
-        let prior_for_counter: Option<FileMetadata> = if self.bucket_usage.is_some() {
-            self.resolve_metadata(&handle.bucket, &handle.deltaspace_id, &obj_key)
-                .await
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
+        let prior_for_counter = self.prior_for_counter(&handle.bucket, &handle.key).await;
 
         let mut metadata = FileMetadata::new_passthrough(
             handle.filename.clone(),

@@ -53,6 +53,24 @@ pub struct BucketUsageRow {
     pub last_scan_at: Option<i64>,
 }
 
+/// Savings % from a logical/stored pair — the ONE clamp (0..=99.99, "100%"
+/// never reaches the UI). Mirrors `SavingsTotals::savings_percentage`; `None`
+/// when nothing is measurable. Used by both the per-bucket counter endpoint and
+/// the aggregate `/_/stats`.
+pub fn savings_pct(logical_bytes: u64, stored_bytes: u64) -> Option<f64> {
+    if logical_bytes == 0 {
+        return None;
+    }
+    Some(((1.0 - stored_bytes as f64 / logical_bytes as f64) * 100.0).clamp(0.0, 99.99))
+}
+
+impl BucketUsageRow {
+    /// This row's savings % (see [`savings_pct`]).
+    pub fn savings_pct(&self) -> Option<f64> {
+        savings_pct(self.logical_bytes, self.stored_bytes)
+    }
+}
+
 /// The (count, logical, stored) delta a single object contributes, signed.
 ///
 /// Mirrors [`SavingsTotals::accumulate`] EXACTLY so the inline counter and the
@@ -253,30 +271,50 @@ pub fn is_transient_bucket(bucket: &str) -> bool {
     bucket.starts_with("__dgmigrate_")
 }
 
-/// Best-effort apply: log-and-drop on error so a counter hiccup never fails
-/// the S3 path (mirrors `enqueue_object_event`'s contract). Skips transient
-/// internal buckets.
-pub fn record_object(
-    usage: &Option<std::sync::Arc<BucketUsage>>,
-    bucket: &str,
-    meta: &FileMetadata,
-    sign: i8,
-) {
-    let Some(u) = usage else { return };
-    record_object_into(u, bucket, meta, sign);
-}
-
-/// Like [`record_object`] but against an already-unwrapped handle (the engine
-/// holds `&BucketUsage` directly when applying a multi-step net delta).
-pub fn record_object_into(u: &BucketUsage, bucket: &str, meta: &FileMetadata, sign: i8) {
-    if is_transient_bucket(bucket) {
-        return;
-    }
-    if let Err(e) = u.apply_object(bucket, meta, sign) {
-        warn!(
-            "bucket_usage: failed to apply object delta for {}: {}",
-            bucket, e
-        );
+impl BucketUsage {
+    /// The ONE counter mutation every write path goes through. Applies a single
+    /// net delta: subtract `removed`'s contribution (the prior object on an
+    /// overwrite, or the deleted object), add `added`'s (the new object), and
+    /// adjust `stored_bytes` by `ref_bytes_delta` (a seeded reference is `+`, a
+    /// reclaimed one `-`). Best-effort — log-and-drop so a counter hiccup never
+    /// fails the S3 path (mirrors `enqueue_object_event`). Skips transient
+    /// internal buckets (`__dgmigrate_*`).
+    ///
+    /// Folding the whole net delta here is deliberate: three hand-maintained
+    /// copies of "subtract old, add new, adjust ref" is exactly how the
+    /// overwrite over-count bug crept in originally.
+    pub fn apply_net(
+        &self,
+        bucket: &str,
+        removed: Option<&FileMetadata>,
+        added: Option<&FileMetadata>,
+        ref_bytes_delta: i64,
+    ) {
+        if is_transient_bucket(bucket) {
+            return;
+        }
+        let (mut dc, mut dl, mut ds) = (0i64, 0i64, ref_bytes_delta);
+        if let Some(m) = removed {
+            let (c, l, s) = usage_delta_for(m, -1);
+            dc += c;
+            dl += l;
+            ds += s;
+        }
+        if let Some(m) = added {
+            let (c, l, s) = usage_delta_for(m, 1);
+            dc += c;
+            dl += l;
+            ds += s;
+        }
+        if dc == 0 && dl == 0 && ds == 0 {
+            return;
+        }
+        if let Err(e) = self.apply_delta(bucket, dc, dl, ds) {
+            warn!(
+                "bucket_usage: failed to apply net delta for {}: {}",
+                bucket, e
+            );
+        }
     }
 }
 

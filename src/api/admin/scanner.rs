@@ -111,19 +111,12 @@ pub async fn get_usage(
 fn usage_json(bucket: &str, row: Option<crate::bucket_usage::BucketUsageRow>) -> serde_json::Value {
     match row {
         Some(r) => {
-            // savings% from the counter's logical vs stored (same math as the scan).
-            let savings = if r.logical_bytes > 0 {
-                let pct = (1.0 - (r.stored_bytes as f64 / r.logical_bytes as f64)) * 100.0;
-                Some(pct.clamp(0.0, 99.99))
-            } else {
-                None
-            };
             serde_json::json!({
                 "bucket": bucket,
                 "object_count": r.object_count,
                 "logical_bytes": r.logical_bytes,
                 "stored_bytes": r.stored_bytes,
-                "savings_percentage": savings,
+                "savings_percentage": r.savings_pct(),
                 "last_scan_at": r.last_scan_at,
                 "never_scanned": r.last_scan_at.is_none(),
             })

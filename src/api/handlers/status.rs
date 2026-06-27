@@ -33,10 +33,6 @@ pub struct StatsResponse {
     pub total_original_size: u64,
     pub total_stored_size: u64,
     pub savings_percentage: f64,
-    /// Retained for wire compatibility — always false now that stats read the
-    /// O(1) per-bucket counter (no scan, no cap). A bucket whose counter has
-    /// never been refreshed simply reports its inline-maintained running total.
-    pub truncated: bool,
 }
 
 /// Stats handler
@@ -84,7 +80,6 @@ async fn compute_stats(
             total_original_size: 0,
             total_stored_size: 0,
             savings_percentage: 0.0,
-            truncated: false,
         });
     };
 
@@ -109,18 +104,11 @@ async fn compute_stats(
         })
     };
 
-    let savings_percentage = if logical > 0 {
-        ((1.0 - (stored as f64 / logical as f64)) * 100.0).clamp(0.0, 99.99)
-    } else {
-        0.0
-    };
-
     Ok(StatsResponse {
         total_objects: object_count,
         total_original_size: logical,
         total_stored_size: stored,
-        savings_percentage,
-        truncated: false,
+        savings_percentage: crate::bucket_usage::savings_pct(logical, stored).unwrap_or(0.0),
     })
 }
 

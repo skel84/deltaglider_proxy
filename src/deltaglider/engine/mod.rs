@@ -724,49 +724,37 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
     ///   with `record_delete`'s reclamation subtraction, so inline == scan).
     fn record_store(&self, bucket: &str, result: &StoreResult) {
         let Some(u) = &self.bucket_usage else { return };
-        if crate::bucket_usage::is_transient_bucket(bucket) {
-            return;
-        }
-        if let Some(prior) = result.replaced.as_deref() {
-            crate::bucket_usage::record_object_into(u, bucket, prior, -1);
-        }
-        crate::bucket_usage::record_object_into(u, bucket, &result.metadata, 1);
-        if result.reference_created_bytes > 0 {
-            if let Err(e) = u.apply_delta(bucket, 0, 0, result.reference_created_bytes as i64) {
-                tracing::warn!(
-                    "bucket_usage: failed to add new reference bytes for {}: {}",
-                    bucket,
-                    e
-                );
-            }
-        }
+        // net: -prior (if overwrite) + new object, + any newly-seeded reference.
+        u.apply_net(
+            bucket,
+            result.replaced.as_deref(),
+            Some(&result.metadata),
+            result.reference_created_bytes as i64,
+        );
     }
 
     /// Best-effort: fold a deleted object out of the bucket counter (-1), plus
     /// any reclaimed reference bytes (stored-only) so stored_bytes stays exact.
     fn record_delete(&self, bucket: &str, meta: &FileMetadata, reclaimed_ref_bytes: u64) {
-        if crate::bucket_usage::is_transient_bucket(bucket) {
-            return;
-        }
-        crate::bucket_usage::record_object(&self.bucket_usage, bucket, meta, -1);
-        if reclaimed_ref_bytes > 0 {
-            if let Some(u) = &self.bucket_usage {
-                if let Err(e) = u.apply_delta(bucket, 0, 0, -(reclaimed_ref_bytes as i64)) {
-                    tracing::warn!(
-                        "bucket_usage: failed to subtract reclaimed reference bytes for {}: {}",
-                        bucket,
-                        e
-                    );
-                }
-            }
-        }
+        let Some(u) = &self.bucket_usage else { return };
+        u.apply_net(bucket, Some(meta), None, -(reclaimed_ref_bytes as i64));
+    }
+
+    /// Resolve the prior object at `bucket/key` for overwrite-net accounting —
+    /// only when a counter is attached. `None` on miss / no counter.
+    async fn prior_for_counter(&self, bucket: &str, key: &str) -> Option<FileMetadata> {
+        self.bucket_usage.as_ref()?;
+        let (obj_key, deltaspace_id) = Self::validated_key(bucket, key).ok()?;
+        self.resolve_metadata(bucket, &deltaspace_id, &obj_key)
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Best-effort counter update for the delta-passthrough FAST PATH
     /// (`transfer.rs`), which ships a `.delta` verbatim via `put_delta_raw` and
-    /// thus bypasses the `store()` choke point. Overwrite-aware (resolves the
-    /// prior dest object so a re-copy onto an existing key nets to +0) and adds
-    /// any reference the copy seeded. Mirrors [`Self::record_store`].
+    /// thus bypasses the `store()` choke point. Overwrite-aware + adds any
+    /// reference the copy seeded. Mirrors [`Self::record_store`].
     pub async fn record_fast_path_copy(
         &self,
         bucket: &str,
@@ -774,29 +762,14 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         delta_meta: &FileMetadata,
         seeded_reference_bytes: u64,
     ) {
+        let prior = self.prior_for_counter(bucket, dest_key).await;
         let Some(u) = &self.bucket_usage else { return };
-        if crate::bucket_usage::is_transient_bucket(bucket) {
-            return;
-        }
-        // Resolve the prior dest object so an overwrite nets to +0 objects.
-        if let Ok((obj_key, deltaspace_id)) = Self::validated_key(bucket, dest_key) {
-            if let Ok(Some(prior)) = self
-                .resolve_metadata(bucket, &deltaspace_id, &obj_key)
-                .await
-            {
-                crate::bucket_usage::record_object_into(u, bucket, &prior, -1);
-            }
-        }
-        crate::bucket_usage::record_object_into(u, bucket, delta_meta, 1);
-        if seeded_reference_bytes > 0 {
-            if let Err(e) = u.apply_delta(bucket, 0, 0, seeded_reference_bytes as i64) {
-                tracing::warn!(
-                    "bucket_usage: fast-path seeded reference bytes for {}: {}",
-                    bucket,
-                    e
-                );
-            }
-        }
+        u.apply_net(
+            bucket,
+            prior.as_ref(),
+            Some(delta_meta),
+            seeded_reference_bytes as i64,
+        );
     }
 
     /// Return a reference to the metadata cache (for handler-level access).
