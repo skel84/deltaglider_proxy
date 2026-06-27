@@ -300,6 +300,307 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
             .await
     }
 
+    /// STREAMING delta PUT (Phase 4): store a large delta-eligible object whose
+    /// body is already on a seekable spool file, WITHOUT buffering it in RAM.
+    ///
+    /// Memory is bounded by the codec pump (Spike C: 2MB RSS on a 1.5GB target).
+    /// Flow:
+    /// 1. Hash the body by streaming the spool (sha256 + md5) — no full-RAM read.
+    /// 2. If not delta-eligible / compression off / no reference yet → passthrough
+    ///    straight from the body spool (store_passthrough_file).
+    /// 3. Else: materialise the reference to a spool, encode_from_reader(body →
+    ///    delta spool) capped at `ratio_threshold × size`. If the cap trips or the
+    ///    ratio loses → passthrough from the body spool (we still have it). Else →
+    ///    commit the delta.
+    ///
+    /// The caller owns `body` (a `Spool`); it lives until this returns.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn store_spooled_delta(
+        &self,
+        bucket: &str,
+        key: &str,
+        body: &crate::deltaglider::spool::Spool,
+        size: u64,
+        content_type: Option<String>,
+        user_metadata: std::collections::HashMap<String, String>,
+        multipart_etag: Option<String>,
+    ) -> Result<StoreResult, EngineError> {
+        use tokio::io::AsyncReadExt;
+
+        self.metadata_cache.invalidate(bucket, key);
+        if size > self.max_object_size {
+            return Err(EngineError::TooLarge {
+                size,
+                max: self.max_object_size,
+            });
+        }
+        let (obj_key, deltaspace_id) = Self::validated_key_ingest(bucket, key)?;
+        let prior_for_counter = self.prior_for_counter(bucket, key).await;
+        let mpe = multipart_etag.clone().unwrap_or_default();
+
+        // (1) Hash the body by streaming the spool — bounded memory.
+        let (sha256, md5) = {
+            let path = body.path().to_path_buf();
+            tokio::task::spawn_blocking(move || -> std::io::Result<(String, String)> {
+                use std::io::Read;
+                let mut f = std::fs::File::open(&path)?;
+                let mut sh = Sha256::new();
+                let mut mh = Md5::new();
+                let mut buf = vec![0u8; 256 * 1024];
+                loop {
+                    let n = f.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    sh.update(&buf[..n]);
+                    mh.update(&buf[..n]);
+                }
+                Ok((hex::encode(sh.finalize()), hex::encode(mh.finalize())))
+            })
+            .await
+            .map_err(|e| EngineError::Storage(StorageError::Other(format!("hash task: {e}"))))?
+            .map_err(|e| EngineError::Storage(StorageError::from(e)))?
+        };
+
+        let etag = if mpe.is_empty() {
+            format!("\"{md5}\"")
+        } else {
+            mpe.clone()
+        };
+
+        // (2) Not delta-eligible → passthrough from the body spool.
+        let compression_disabled = !self.bucket_policies.compression_enabled(bucket);
+        if compression_disabled || !self.file_router.is_delta_eligible(&obj_key.filename) {
+            let result = self
+                .store_passthrough_file_with_multipart_etag(
+                    bucket,
+                    key,
+                    body.path(),
+                    size,
+                    content_type.clone(),
+                    user_metadata.clone(),
+                    etag.clone(),
+                )
+                .await?;
+            self.metadata_cache
+                .insert(bucket, key, result.metadata.clone());
+            return Ok(result.with_accounting(prior_for_counter, 0));
+        }
+
+        let _guard = self.acquire_prefix_lock(&deltaspace_id).await;
+        let has_existing_reference = self.storage.has_reference(bucket, &deltaspace_id).await;
+
+        // No reference yet → this object becomes the deltaspace baseline. Creating
+        // the baseline reads the object once into RAM (put_reference takes &[u8]);
+        // a streaming put_reference_from_file is a Phase-4.1 refinement. The
+        // object is then stored AS the reference (the reconstruction of the first
+        // member is the reference itself).
+        if !has_existing_reference {
+            let data = tokio::fs::read(body.path())
+                .await
+                .map_err(StorageError::from)?;
+            let ctx = StoreContext {
+                bucket,
+                obj_key: &obj_key,
+                deltaspace_id: &deltaspace_id,
+                data: &data,
+                sha256: sha256.clone(),
+                md5: md5.clone(),
+                content_type: content_type.clone(),
+                user_metadata: user_metadata.clone(),
+                multipart_etag: multipart_etag.clone(),
+            };
+            let ref_meta = self.set_reference_baseline(&ctx).await?;
+            // Store this first member as a (self) delta against the fresh
+            // reference — the buffered path's baseline branch does the same via
+            // encode_and_store; here the delta of identical bytes is tiny.
+            let result = self.encode_and_store(ctx, &ref_meta, false).await?;
+            drop(_guard);
+            self.metadata_cache
+                .insert(bucket, key, result.metadata.clone());
+            return Ok(result.with_accounting(prior_for_counter, 0));
+        }
+
+        // (3) Encode from the body spool against the reference, capped.
+        let ref_spool = self.spool.acquire(size).await.map_err(StorageError::from)?;
+        self.storage
+            .get_reference_to_file(bucket, &deltaspace_id, ref_spool.path())
+            .await?;
+        let delta_spool = self.spool.acquire(size).await.map_err(StorageError::from)?;
+
+        let effective_ratio = self.bucket_policies.max_delta_ratio(bucket);
+        let cap = ((size as f64) * (effective_ratio as f64)).ceil() as u64;
+        let _permit = self.try_acquire_codec()?;
+        let codec = self.codec.clone();
+        let ref_path = ref_spool.path().to_path_buf();
+        let body_path = body.path().to_path_buf();
+        let delta_path = delta_spool.path().to_path_buf();
+        let encode_start = Instant::now();
+
+        // Encode body→delta spool, aborting if the delta exceeds the cap (ratio
+        // loses — Spike C). A capped-write error signals "passthrough wins".
+        let encode_res =
+            tokio::task::spawn_blocking(move || -> Result<Option<u64>, EngineError> {
+                use std::io::Write;
+                struct CapWriter<W: Write> {
+                    inner: W,
+                    written: u64,
+                    cap: u64,
+                    capped: bool,
+                }
+                impl<W: Write> Write for CapWriter<W> {
+                    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                        self.written = self.written.saturating_add(buf.len() as u64);
+                        if self.written > self.cap {
+                            self.capped = true;
+                            return Err(std::io::Error::other("delta exceeded ratio cap"));
+                        }
+                        self.inner.write_all(buf)?;
+                        Ok(buf.len())
+                    }
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        self.inner.flush()
+                    }
+                }
+                let body = std::fs::File::open(&body_path)
+                    .map_err(|e| EngineError::Storage(StorageError::from(e)))?;
+                let out = std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&delta_path)
+                    .map_err(|e| EngineError::Storage(StorageError::from(e)))?;
+                let mut sink = CapWriter {
+                    inner: std::io::BufWriter::new(out),
+                    written: 0,
+                    cap,
+                    capped: false,
+                };
+                match codec.encode_from_reader(&ref_path, body, &mut sink) {
+                    Ok(n) => {
+                        sink.flush()
+                            .map_err(|e| EngineError::Storage(StorageError::from(e)))?;
+                        Ok(Some(n))
+                    }
+                    // Cap tripped → ratio loses; signal passthrough (None).
+                    Err(_) if sink.capped => Ok(None),
+                    Err(e) => Err(EngineError::Codec(e)),
+                }
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(StorageError::Other(format!("encode task: {e}")))
+            })??;
+        drop(_permit);
+        self.with_metrics(|m| {
+            m.delta_encode_duration_seconds
+                .observe(encode_start.elapsed().as_secs_f64())
+        });
+
+        match encode_res {
+            None => {
+                // Ratio lost → passthrough from the body spool. Keep the existing
+                // reference (other objects in this deltaspace need it).
+                drop((ref_spool, delta_spool));
+                drop(_guard);
+                let result = self
+                    .store_passthrough_file_with_multipart_etag(
+                        bucket,
+                        key,
+                        body.path(),
+                        size,
+                        content_type.clone(),
+                        user_metadata.clone(),
+                        etag.clone(),
+                    )
+                    .await?;
+                self.metadata_cache
+                    .insert(bucket, key, result.metadata.clone());
+                Ok(result.with_accounting(prior_for_counter, 0))
+            }
+            Some(delta_size) => {
+                // Delta wins → read the delta spool (small, < cap) + commit it.
+                let mut df = tokio::fs::File::open(delta_spool.path())
+                    .await
+                    .map_err(StorageError::from)?;
+                let mut delta_bytes = Vec::with_capacity(delta_size as usize);
+                df.read_to_end(&mut delta_bytes)
+                    .await
+                    .map_err(StorageError::from)?;
+                let result = self
+                    .commit_streamed_delta(
+                        bucket,
+                        &deltaspace_id,
+                        &obj_key,
+                        delta_bytes,
+                        size,
+                        sha256,
+                        md5,
+                        content_type.clone(),
+                        user_metadata.clone(),
+                        multipart_etag.clone(),
+                    )
+                    .await?;
+                drop((ref_spool, delta_spool, _guard));
+                self.metadata_cache
+                    .insert(bucket, key, result.metadata.clone());
+                Ok(result.with_accounting(prior_for_counter, 0))
+            }
+        }
+    }
+
+    /// Persist a pre-computed delta (from the streaming PUT path) as a delta
+    /// object. Mirrors the delta-commit tail of `commit_delta_or_passthrough`,
+    /// but takes the original `size` explicitly (the body isn't in RAM) and the
+    /// already-encoded `delta` bytes.
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_streamed_delta(
+        &self,
+        bucket: &str,
+        deltaspace_id: &str,
+        obj_key: &ObjectKey,
+        delta: Vec<u8>,
+        size: u64,
+        sha256: String,
+        md5: String,
+        content_type: Option<String>,
+        user_metadata: std::collections::HashMap<String, String>,
+        multipart_etag: Option<String>,
+    ) -> Result<StoreResult, EngineError> {
+        let ref_meta = self
+            .storage
+            .get_reference_metadata(bucket, deltaspace_id)
+            .await?;
+        self.with_metrics(|m| {
+            m.delta_decisions_total.with_label_values(&["delta"]).inc();
+            let saved = size.saturating_sub(delta.len() as u64);
+            m.delta_bytes_saved_total.inc_by(saved);
+        });
+        let mut metadata = FileMetadata::new_delta(
+            obj_key.filename.clone(),
+            sha256,
+            md5,
+            size,
+            "reference.bin".to_string(),
+            ref_meta.file_sha256.clone(),
+            delta.len() as u64,
+            content_type,
+        );
+        metadata.user_metadata = user_metadata;
+        metadata.multipart_etag = multipart_etag;
+        let stored_size = delta.len() as u64;
+        self.storage
+            .put_delta(bucket, deltaspace_id, &obj_key.filename, &delta, &metadata)
+            .await?;
+        // Clean up any prior passthrough variant at this key.
+        if let Err(e) = self
+            .delete_passthrough_idempotent(bucket, deltaspace_id, &obj_key.filename)
+            .await
+        {
+            warn!("Failed to clean up passthrough after delta write: {}", e);
+        }
+        Ok(StoreResult::new(metadata, stored_size))
+    }
+
     /// Decide whether to commit the encoded delta or fall back to passthrough,
     /// then persist the chosen storage strategy.
     async fn commit_delta_or_passthrough(

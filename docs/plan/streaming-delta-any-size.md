@@ -131,7 +131,26 @@ reference = seekable temp file; delta output is small + capped).
 - Range: reconstruct-to-spool once, seek(start), stream end-start. Short-TTL
   `(bucket,key,sha256)→SharedSpool` cache so parallel multipart ranges decode once.
 
-### Phase 4 — PUT: streaming encode (blocks 8,9,10,11)
+### Phase 4 — PUT: streaming encode (blocks 8,9,10,11) — ✅ CORE DONE
+
+`store_spooled_delta` (store.rs): body on a seekable spool → stream-hash → encode
+from the spool against the reference, capped at ratio_threshold (Spike C
+cap-and-abort); delta wins → commit_streamed_delta; ratio loses → passthrough
+from the body spool. First member creates the baseline. Wired into the s3s
+adapter PUT for delta-eligible objects > spool threshold. Tested through the S3
+API (test_streaming_spool_store_put: delta + passthrough-fallback, byte-exact).
+
+**Phase 4.1 (tracked, not yet done):** the body is still COLLECTED in the adapter
+(SigV4 payload-hash verification needs it) then spooled — so ingest isn't yet
+bounded-memory end-to-end. Closing it needs SigV4 streaming-payload support
+(stream body → spool while hashing, before verify). Also: baseline creation
+reads the first member into RAM (put_reference takes &[u8]) — needs a
+put_reference_from_file; and transfer.rs/CopyObject still use buffering
+retrieve() (now unblocked — can switch to retrieve_stream → store_spooled_delta).
+Encode-side stall-tick (watchdog ticks only on stdout; big-input/sparse-output
+encode could false-stall) — still TODO.
+
+#### Original Phase 4 design notes
 - 4a `store_streaming(bucket, key, body: Stream<Bytes>, declared_len, …)`:
   reference→temp (P2); body→xdelta3 stdin as it arrives; delta→bounded spool
   (hard cap `ratio_threshold × declared_len`); tee body through Sha256+Md5

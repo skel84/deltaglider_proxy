@@ -795,6 +795,32 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         self.codec.cli_version()
     }
 
+    /// Bytes above which a delta-eligible PUT routes through the streaming spool
+    /// store (`store_spooled_delta`). Tied to `max_object_size`; overridable via
+    /// `DGP_SPOOL_THRESHOLD_BYTES` (shared with the GET-side threshold).
+    pub fn spool_store_threshold(&self) -> u64 {
+        crate::config::env_parse_with_default("DGP_SPOOL_THRESHOLD_BYTES", self.max_object_size)
+    }
+
+    /// Whether `key`'s filename is delta-eligible (used by the adapter to decide
+    /// the streaming-store route before constructing a spool).
+    pub fn is_delta_eligible_key(&self, key: &str) -> bool {
+        let filename = key.rsplit('/').next().unwrap_or(key);
+        self.file_router.is_delta_eligible(filename)
+    }
+
+    /// Acquire a spool file from the engine's quota'd spool dir (for the adapter
+    /// to stage a large PUT body before `store_spooled_delta`).
+    pub async fn spool_acquire(
+        &self,
+        bytes: u64,
+    ) -> Result<crate::deltaglider::spool::Spool, EngineError> {
+        self.spool
+            .acquire(bytes)
+            .await
+            .map_err(|e| EngineError::Storage(StorageError::from(e)))
+    }
+
     /// Whether the codec passes `-a` (armor disabled) to xdelta3 (3.1+ only).
     pub fn codec_armor_disabled(&self) -> bool {
         self.codec.armor_disabled()

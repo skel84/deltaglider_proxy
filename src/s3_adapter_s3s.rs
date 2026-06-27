@@ -792,16 +792,48 @@ impl s3s::S3 for DeltaGliderS3Service {
         .await?;
         let content_type = input.content_type;
         let user_metadata = input.metadata.unwrap_or_default();
-        let result = engine
-            .store(
-                &input.bucket,
-                &input.key,
-                &data,
-                content_type,
-                user_metadata,
-            )
-            .await
-            .map_err(engine_error_to_s3s)?;
+        // Large delta-eligible objects: route through the streaming spool store so
+        // the delta encode + ratio decision run with BOUNDED memory (Phase 4).
+        // The body is already collected here (SigV4 payload-hash verification needs
+        // it); spool it to disk and hand the streaming store a seekable file. The
+        // remaining memory win — streaming the body BEFORE hash-verify — needs
+        // SigV4 streaming-payload support and is tracked as Phase 4.1.
+        let result = if data.len() as u64 > engine.spool_store_threshold()
+            && engine.is_delta_eligible_key(&input.key)
+        {
+            let spool = engine
+                .spool_acquire(data.len() as u64)
+                .await
+                .map_err(engine_error_to_s3s)?;
+            tokio::fs::write(spool.path(), &data).await.map_err(|e| {
+                engine_error_to_s3s(crate::deltaglider::EngineError::Storage(
+                    crate::storage::StorageError::from(e),
+                ))
+            })?;
+            engine
+                .store_spooled_delta(
+                    &input.bucket,
+                    &input.key,
+                    &spool,
+                    data.len() as u64,
+                    content_type,
+                    user_metadata,
+                    None,
+                )
+                .await
+                .map_err(engine_error_to_s3s)?
+        } else {
+            engine
+                .store(
+                    &input.bucket,
+                    &input.key,
+                    &data,
+                    content_type,
+                    user_metadata,
+                )
+                .await
+                .map_err(engine_error_to_s3s)?
+        };
         self.emit_object_event(
             crate::event_outbox::EventKind::ObjectCreated,
             &input.bucket,

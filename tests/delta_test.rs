@@ -163,6 +163,79 @@ async fn test_delta_range_via_spooled_seek() {
     );
 }
 
+/// Force delta-eligible PUTs through the Phase-4 streaming spool store
+/// (`DGP_SPOOL_THRESHOLD_BYTES=1`): a similar variant must store as delta and
+/// round-trip byte-exact; a dissimilar object must fall back to passthrough. Both
+/// with bounded memory (the encode runs from a spool file, not RAM).
+#[tokio::test]
+async fn test_streaming_spool_store_put() {
+    let server = TestServer::builder()
+        .env("DGP_SPOOL_THRESHOLD_BYTES", "1")
+        .build()
+        .await;
+    let http = reqwest::Client::new();
+
+    // base → first member (passthrough or reference)
+    let base = generate_binary(250_000, 23);
+    put_object(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/base.zip",
+        base.clone(),
+        "application/zip",
+    )
+    .await;
+
+    // similar variant → should store as DELTA via the streaming store, byte-exact
+    let variant = mutate_binary(&base, 0.01);
+    let st = put_and_get_storage_type(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/v1.zip",
+        variant.clone(),
+        "application/zip",
+    )
+    .await;
+    assert_eq!(
+        st, "delta",
+        "similar variant should store as delta (streaming)"
+    );
+    let got = get_bytes(&http, &server.endpoint(), server.bucket(), "rel/v1.zip").await;
+    assert_eq!(
+        got, variant,
+        "streaming-stored delta must round-trip byte-exact"
+    );
+
+    // dissimilar object in the SAME deltaspace → ratio loses → passthrough
+    let unrelated = generate_binary(250_000, 999);
+    let st2 = put_and_get_storage_type(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/unrelated.zip",
+        unrelated.clone(),
+        "application/zip",
+    )
+    .await;
+    assert_eq!(
+        st2, "passthrough",
+        "dissimilar object should fall back to passthrough (ratio cap)"
+    );
+    let got2 = get_bytes(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/unrelated.zip",
+    )
+    .await;
+    assert_eq!(
+        got2, unrelated,
+        "passthrough fallback must round-trip byte-exact"
+    );
+}
+
 #[tokio::test]
 async fn test_three_versions_all_retrievable() {
     let server = TestServer::filesystem().await;
