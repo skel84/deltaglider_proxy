@@ -532,7 +532,7 @@ async fn run_phases(
             let mut deleted_this_sweep = 0u32;
             for (key, _) in page.objects.iter().filter(|(k, _)| !k.ends_with('/')) {
                 match engine.delete(&cleanup_key, key).await {
-                    Ok(()) => deleted_this_sweep += 1,
+                    Ok(_) => deleted_this_sweep += 1,
                     Err(e) => {
                         delete_failures += 1;
                         record_failure(db, job.id, key, &format!("source delete failed: {e}"))

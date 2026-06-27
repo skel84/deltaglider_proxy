@@ -47,8 +47,11 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         content_type: Option<String>,
         user_metadata: std::collections::HashMap<String, String>,
     ) -> Result<StoreResult, EngineError> {
-        self.store_inner(bucket, key, data, content_type, user_metadata, None)
-            .await
+        let result = self
+            .store_inner(bucket, key, data, content_type, user_metadata, None)
+            .await?;
+        self.record_store(bucket, &result);
+        Ok(result)
     }
 
     /// Multipart-aware variant of [`Self::store`]. The `multipart_etag` is
@@ -65,15 +68,18 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         user_metadata: std::collections::HashMap<String, String>,
         multipart_etag: String,
     ) -> Result<StoreResult, EngineError> {
-        self.store_inner(
-            bucket,
-            key,
-            data,
-            content_type,
-            user_metadata,
-            Some(multipart_etag),
-        )
-        .await
+        let result = self
+            .store_inner(
+                bucket,
+                key,
+                data,
+                content_type,
+                user_metadata,
+                Some(multipart_etag),
+            )
+            .await?;
+        self.record_store(bucket, &result);
+        Ok(result)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -227,6 +233,8 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         };
         self.metadata_cache
             .insert(bucket, key, result.metadata.clone());
+        // NB: recorded in the public delegators (store / store_with_multipart_etag),
+        // not here — store_inner is shared, recording here would double-count.
         Ok(result)
     }
 
@@ -445,16 +453,19 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         content_type: Option<String>,
         user_metadata: HashMap<String, String>,
     ) -> Result<StoreResult, EngineError> {
-        self.store_passthrough_chunked_inner(
-            bucket,
-            key,
-            chunks,
-            total_size,
-            content_type,
-            user_metadata,
-            None,
-        )
-        .await
+        let result = self
+            .store_passthrough_chunked_inner(
+                bucket,
+                key,
+                chunks,
+                total_size,
+                content_type,
+                user_metadata,
+                None,
+            )
+            .await?;
+        self.record_store(bucket, &result);
+        Ok(result)
     }
 
     /// Multipart-aware variant of [`Self::store_passthrough_chunked`]. The
@@ -472,16 +483,19 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         user_metadata: HashMap<String, String>,
         multipart_etag: String,
     ) -> Result<StoreResult, EngineError> {
-        self.store_passthrough_chunked_inner(
-            bucket,
-            key,
-            chunks,
-            total_size,
-            content_type,
-            user_metadata,
-            Some(multipart_etag),
-        )
-        .await
+        let result = self
+            .store_passthrough_chunked_inner(
+                bucket,
+                key,
+                chunks,
+                total_size,
+                content_type,
+                user_metadata,
+                Some(multipart_etag),
+            )
+            .await?;
+        self.record_store(bucket, &result);
+        Ok(result)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -558,6 +572,7 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         };
         self.metadata_cache
             .insert(bucket, key, result.metadata.clone());
+        // NB: recorded in the public delegators, not here (shared inner).
         Ok(result)
     }
 
@@ -648,6 +663,7 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         };
         self.metadata_cache
             .insert(bucket, key, result.metadata.clone());
+        self.record_store(bucket, &result);
         Ok(result)
     }
 
@@ -736,6 +752,7 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         };
         self.metadata_cache
             .insert(bucket, key, result.metadata.clone());
+        self.record_store(bucket, &result);
         Ok(result)
     }
 

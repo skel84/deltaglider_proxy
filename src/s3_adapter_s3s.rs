@@ -665,7 +665,7 @@ impl s3s::S3 for DeltaGliderS3Service {
         {
             // Only a REAL delete (Ok) emits an event — a NotFound deleted
             // nothing, so there's nothing for replication to mirror.
-            Ok(()) => {
+            Ok(_) => {
                 self.emit_object_event(
                     crate::event_outbox::EventKind::ObjectDeleted,
                     &input.bucket,
@@ -698,7 +698,7 @@ impl s3s::S3 for DeltaGliderS3Service {
         for obj in input.delete.objects {
             let key = obj.key.trim_start_matches('/').to_string();
             match self.state.engine.load().delete(&input.bucket, &key).await {
-                Ok(()) => {
+                Ok(_) => {
                     if crate::replication::event_consumer::is_user_object_key(&key) {
                         delete_events.push(crate::event_outbox::NewEvent::new(
                             crate::event_outbox::EventKind::ObjectDeleted,
@@ -1400,7 +1400,7 @@ async fn recursive_delete_prefix_s3s(
                 }
             }
             match engine.delete(bucket, obj_key).await {
-                Ok(()) | Err(crate::deltaglider::EngineError::NotFound(_)) => {
+                Ok(_) | Err(crate::deltaglider::EngineError::NotFound(_)) => {
                     deleted = deleted.saturating_add(1);
                 }
                 Err(e) => return Err(engine_error_to_s3s(e)),

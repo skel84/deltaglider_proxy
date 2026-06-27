@@ -270,6 +270,9 @@ pub struct DeltaGliderEngine<S: StorageBackend> {
     metadata_cache: MetadataCache,
     /// Per-bucket compression policy overrides.
     bucket_policies: crate::bucket_policy::BucketPolicyRegistry,
+    /// Per-instance running usage counter (None in tests / when unavailable).
+    /// Updated best-effort after each successful store/delete.
+    bucket_usage: Option<Arc<crate::bucket_usage::BucketUsage>>,
 }
 
 /// Type alias for engine with dynamic backend dispatch
@@ -696,6 +699,41 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
                 config.buckets.clone(),
                 config.max_delta_ratio,
             ),
+            bucket_usage: None,
+        }
+    }
+
+    /// Attach the per-instance usage counter (builder; called once at startup
+    /// after the usage DB is opened). The handle survives engine rebuilds by
+    /// being re-attached.
+    pub fn with_bucket_usage(
+        mut self,
+        usage: Option<Arc<crate::bucket_usage::BucketUsage>>,
+    ) -> Self {
+        self.bucket_usage = usage;
+        self
+    }
+
+    /// Best-effort: fold a stored object into the bucket counter (+1). Never
+    /// fails the S3 path.
+    fn record_store(&self, bucket: &str, result: &StoreResult) {
+        crate::bucket_usage::record_object(&self.bucket_usage, bucket, &result.metadata, 1);
+    }
+
+    /// Best-effort: fold a deleted object out of the bucket counter (-1), plus
+    /// any reclaimed reference bytes (stored-only) so stored_bytes stays exact.
+    fn record_delete(&self, bucket: &str, meta: &FileMetadata, reclaimed_ref_bytes: u64) {
+        crate::bucket_usage::record_object(&self.bucket_usage, bucket, meta, -1);
+        if reclaimed_ref_bytes > 0 {
+            if let Some(u) = &self.bucket_usage {
+                if let Err(e) = u.apply_delta(bucket, 0, 0, -(reclaimed_ref_bytes as i64)) {
+                    tracing::warn!(
+                        "bucket_usage: failed to subtract reclaimed reference bytes for {}: {}",
+                        bucket,
+                        e
+                    );
+                }
+            }
         }
     }
 
@@ -1415,7 +1453,7 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
 
     /// Delete an object
     #[instrument(skip(self))]
-    pub async fn delete(&self, bucket: &str, key: &str) -> Result<(), EngineError> {
+    pub async fn delete(&self, bucket: &str, key: &str) -> Result<FileMetadata, EngineError> {
         let (obj_key, deltaspace_id) = Self::validated_key(bucket, key)?;
 
         info!("Deleting {}/{}", bucket, key);
@@ -1457,7 +1495,15 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         let has_objects = remaining
             .iter()
             .any(|m| !matches!(m.storage_info, StorageInfo::Reference { .. }));
+        // Bytes of a reclaimed reference.bin (stored-only) — subtracted from the
+        // counter so stored_bytes stays exact when the last delta is removed.
+        let mut reclaimed_ref_bytes = 0u64;
         if !has_objects && self.storage.has_reference(bucket, &deltaspace_id).await {
+            reclaimed_ref_bytes = remaining
+                .iter()
+                .find(|m| matches!(m.storage_info, StorageInfo::Reference { .. }))
+                .map(|m| m.file_size)
+                .unwrap_or(0);
             // Delete storage BEFORE invalidating cache — prevents stale cache entries
             // from a concurrent GET loading between invalidation and deletion.
             self.storage
@@ -1474,8 +1520,11 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         drop(_guard);
         self.cleanup_prefix_locks();
 
+        // Best-effort counter update: -1 object + reclaimed reference bytes.
+        self.record_delete(bucket, &metadata, reclaimed_ref_bytes);
+
         debug!("Deleted {}/{}", bucket, key);
-        Ok(())
+        Ok(metadata)
     }
 
     /// Get reference with caching. Returns `Bytes` for zero-copy sharing.

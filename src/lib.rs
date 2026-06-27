@@ -9,6 +9,7 @@ pub mod api;
 pub mod audit;
 pub(crate) mod background;
 pub mod bucket_policy;
+pub mod bucket_usage;
 pub mod cli;
 pub mod config;
 pub mod config_apply;

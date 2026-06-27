@@ -877,7 +877,7 @@ async fn run_delete_pass(
                     if matches!(s3_err, crate::api::S3Error::NoSuchKey(_)) {
                         // Source missing → replicate the deletion.
                         match engine.delete(&rule.destination.bucket, dest_key).await {
-                            Ok(()) => {
+                            Ok(_) => {
                                 totals.objects_deleted += 1;
                             }
                             Err(de) => {

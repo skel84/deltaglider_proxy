@@ -423,7 +423,7 @@ pub async fn move_objects(
                 continue;
             }
             match engine.delete(&req.source_bucket, &it.source_key).await {
-                Ok(()) => deleted += 1,
+                Ok(_) => deleted += 1,
                 Err(e) => {
                     warn!(
                         "bulk move: delete source {}/{} failed: {}",
@@ -510,7 +510,7 @@ pub async fn bulk_delete(
             break;
         }
         match engine.delete(&req.bucket, key).await {
-            Ok(()) => deleted += 1,
+            Ok(_) => deleted += 1,
             Err(e) => {
                 // Not-found is treated as deleted (idempotent).
                 let s3_err: crate::api::S3Error = e.into();

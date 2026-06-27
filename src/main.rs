@@ -462,8 +462,29 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // --- Metrics ---
     let metrics = init_metrics(&config);
 
+    // --- Per-instance bucket usage counter (O(1) sizes) ---
+    // Lives in its OWN unsynced DB file beside the config DB — never goes
+    // through config_db_sync (whole-file CAS can't compose increments). Plain
+    // SQLite, no secrets; a failure to open degrades to None (scans still work).
+    let bucket_usage: Option<Arc<deltaglider_proxy::bucket_usage::BucketUsage>> = {
+        let path = deltaglider_proxy::bucket_usage::bucket_usage_db_path();
+        match deltaglider_proxy::bucket_usage::BucketUsage::open(&path) {
+            Ok(u) => Some(Arc::new(u)),
+            Err(e) => {
+                tracing::warn!(
+                    "bucket usage counter disabled (could not open {}): {}",
+                    path.display(),
+                    e
+                );
+                None
+            }
+        }
+    };
+
     // --- Engine ---
-    let engine = DynEngine::new(&config, Some(metrics.clone())).await?;
+    let engine = DynEngine::new(&config, Some(metrics.clone()))
+        .await?
+        .with_bucket_usage(bucket_usage.clone());
     if engine.is_cli_available() {
         info!("  xdelta3 CLI: available (legacy delta interop enabled)");
     } else {
@@ -600,6 +621,7 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         multipart,
         metrics: metrics.clone(),
         usage_scanner: usage_scanner.clone(),
+        bucket_usage: bucket_usage.clone(),
         config_db: config_db.clone(),
         form_post_replay: Arc::new(dashmap::DashMap::new()),
         maintenance_gate: maintenance_gate.clone(),

@@ -52,6 +52,7 @@ export const qk = {
   health: () => ['health'] as const,
   prefixUsage: (bucket: string, prefix: string) =>
     ['prefix-usage', bucket, prefix] as const,
+  bucketUsage: (bucket: string) => ['bucket-usage', bucket] as const,
 
   // ── Jobs (replication / lifecycle / reencrypt / migrate) ────────
   jobs: {

@@ -587,7 +587,7 @@ async fn run_or_preview_retain_newest(
 
         let meta = metas.get(&c.key);
         match engine.delete(&rule.bucket, &c.key).await {
-            Ok(()) => {
+            Ok(_) => {
                 out.objects_affected += 1;
                 out.bytes_affected += c.size as i64;
                 if let Some(meta) = meta {

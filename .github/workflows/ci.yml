@@ -435,6 +435,7 @@ jobs:
             --test large_object_e2e_test \
             --test parity_test \
             --test savings_test \
+            --test bucket_usage_test \
             --test admission_test \
             --test aws_chunked_upload_test \
             --test iam_list_scope_test \

@@ -86,7 +86,10 @@ pub use objects::{
     move_objects,
 };
 pub use savings::{get_savings, SavingsCache};
-pub use scanner::{get_usage, migrate_legacy, scan_usage, ScanUsageRequest, UsageQuery};
+pub use scanner::{
+    get_bucket_usage, get_usage, migrate_legacy, refresh_bucket_usage, scan_usage,
+    ScanUsageRequest, UsageQuery,
+};
 pub use users::{
     clone_user, create_user, delete_user, get_canned_policies, iam_version, list_users,
     rotate_user_keys, update_user, CloneUserRequest, CreateUserRequest, RotateKeysRequest,

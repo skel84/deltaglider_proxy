@@ -5,6 +5,7 @@ import { MenuOutlined, SearchOutlined, CloseOutlined, ReloadOutlined, QuestionCi
 import { metaKeyLabel } from '../platform';
 import Breadcrumb from './Breadcrumb';
 import DeltaSavingsChip from './DeltaSavingsChip';
+import BucketUsageChip from './BucketUsageChip';
 import type { DeltaSummary } from '../deltaSummary';
 import { useColors } from '../ThemeContext';
 
@@ -131,6 +132,7 @@ export default function TopBar({ bucket, prefix, onNavigate, isMobile, onMenuCli
           ) : (
             <>
               <Breadcrumb bucket={bucket} prefix={prefix} onNavigate={onNavigate} canAdmin={canAdmin} />
+              {bucket && <BucketUsageChip bucket={bucket} canAdmin={canAdmin} />}
               <DeltaSavingsChip summary={deltaSummary} />
             </>
           )

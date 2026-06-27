@@ -219,6 +219,14 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         // Usage scanner
         .route("/_/api/admin/usage/scan", post(admin::scan_usage))
         .route("/_/api/admin/usage", get(admin::get_usage))
+        .route(
+            "/_/api/admin/usage/bucket/:bucket",
+            get(admin::get_bucket_usage),
+        )
+        .route(
+            "/_/api/admin/usage/refresh",
+            post(admin::refresh_bucket_usage),
+        )
         // Per-prefix delta savings (reference-aware). Powers the SPA's
         // compression chip; backed by `src/api/admin/savings.rs` with a
         // 30s in-memory cache so casual click-throughs of a tree don't

@@ -33,7 +33,9 @@ pub struct StatsResponse {
     pub total_original_size: u64,
     pub total_stored_size: u64,
     pub savings_percentage: f64,
-    /// True if the scan was truncated at the limit (more objects exist).
+    /// Retained for wire compatibility — always false now that stats read the
+    /// O(1) per-bucket counter (no scan, no cap). A bucket whose counter has
+    /// never been refreshed simply reports its inline-maintained running total.
     pub truncated: bool,
 }
 
@@ -69,79 +71,56 @@ async fn compute_stats(
     state: &AppState,
     bucket_filter: Option<&str>,
 ) -> Result<StatsResponse, S3Error> {
-    let buckets_to_scan: Vec<String> = if let Some(bucket) = bucket_filter {
-        vec![bucket.to_string()]
-    } else {
-        state
-            .engine
-            .load()
-            .list_buckets()
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Stats: failed to list buckets: {}", e);
-                Vec::new()
-            })
+    // O(1): read the per-bucket running counter instead of scanning. The 1000-
+    // object cap (and its `truncated` best-effort contract) is gone — the
+    // counter is maintained inline on every PUT/DELETE and reconciled by the
+    // explicit Refresh endpoint. savings% is derived from the SAME logical-vs-
+    // stored math the scan uses (see `SavingsTotals`), just pre-aggregated.
+    let Some(usage) = state.bucket_usage.as_ref() else {
+        // Open-mode dev with no usage DB: report zeros rather than fall back to
+        // an unbounded scan. (Counters are the one size system now.)
+        return Ok(StatsResponse {
+            total_objects: 0,
+            total_original_size: 0,
+            total_stored_size: 0,
+            savings_percentage: 0.0,
+            truncated: false,
+        });
     };
 
-    const SCAN_LIMIT: u64 = 1000;
-
-    // Single source of truth for the savings math — same accumulator
-    // the admin dashboard, CLI `stats`, and the SPA chip use. The
-    // legacy /_/stats endpoint must NOT inline its own formula or
-    // ignore reference.bin bytes (the original pre-centralisation
-    // bug here: deltas reported their tiny `delta_size` but the
-    // shared 18 MB reference behind them was never counted, so the
-    // headline read up to "100% saved" on busy ROR buckets).
-    let mut totals = crate::deltaglider::SavingsTotals::default();
-    let mut truncated = false;
-
-    // SCAN_LIMIT is a *cumulative* cap across all buckets, not per-bucket:
-    // `totals` accumulates over the whole loop, so the scan stops as soon as
-    // the running user-visible count reaches the limit — even if that happens
-    // mid-way through the first bucket. Buckets later in `buckets_to_scan`
-    // (and the trailing reference.bin fold for the bucket that tripped the
-    // cap) are therefore NOT counted when `truncated` is true. This is the
-    // intended best-effort contract for a dashboard stats endpoint: bounded
-    // latency over exhaustive accuracy. Callers that need a complete tally
-    // must scope the query to a single bucket (`?bucket=NAME`), which scans
-    // that bucket up to the same cap. Do not relax the cap into "scan every
-    // bucket" — that reintroduces the unbounded-latency problem the cache and
-    // this limit exist to prevent.
-    'outer: for bucket in &buckets_to_scan {
-        let engine = state.engine.load();
-        let page = engine
-            .list_objects(bucket, "", None, SCAN_LIMIT as u32, None, true)
-            .await?;
-        for (_key, meta) in &page.objects {
-            totals.accumulate(meta);
-            if totals.user_visible_count() >= SCAN_LIMIT {
-                truncated = true;
-                break 'outer;
-            }
+    let (object_count, logical, stored) = if let Some(bucket) = bucket_filter {
+        match usage
+            .read(bucket)
+            .map_err(|e| S3Error::InternalError(format!("bucket usage read failed: {}", e)))?
+        {
+            Some(r) => (r.object_count, r.logical_bytes, r.stored_bytes),
+            None => (0, 0, 0),
         }
-        // Fold this bucket's references into stored_bytes — they're
-        // hidden from list_objects but they cost real disk. Failures
-        // for individual deltaspaces are warn-logged inside the helper
-        // and don't poison the scan.
-        //
-        // limit=None: /_/stats is the legacy headline that surfaces
-        // bucket totals. The cap exists for chip-style latency-
-        // sensitive paths, not here.
-        let scan = engine
-            .list_deltaspace_references(bucket, "", None)
-            .await
-            .unwrap_or_default();
-        for meta in &scan.references {
-            totals.accumulate(meta);
-        }
-    }
+    } else {
+        let rows = usage
+            .read_all()
+            .map_err(|e| S3Error::InternalError(format!("bucket usage read failed: {}", e)))?;
+        rows.iter().fold((0u64, 0u64, 0u64), |(c, l, s), (_b, r)| {
+            (
+                c + r.object_count,
+                l.saturating_add(r.logical_bytes),
+                s.saturating_add(r.stored_bytes),
+            )
+        })
+    };
+
+    let savings_percentage = if logical > 0 {
+        ((1.0 - (stored as f64 / logical as f64)) * 100.0).clamp(0.0, 99.99)
+    } else {
+        0.0
+    };
 
     Ok(StatsResponse {
-        total_objects: totals.user_visible_count(),
-        total_original_size: totals.original_bytes,
-        total_stored_size: totals.stored_bytes,
-        savings_percentage: totals.savings_percentage().unwrap_or(0.0),
-        truncated,
+        total_objects: object_count,
+        total_original_size: logical,
+        total_stored_size: stored,
+        savings_percentage,
+        truncated: false,
     })
 }
 
