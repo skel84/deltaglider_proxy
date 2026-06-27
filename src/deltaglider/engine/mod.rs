@@ -810,15 +810,24 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
     }
 
     /// Acquire a spool file from the engine's quota'd spool dir (for the adapter
-    /// to stage a large PUT body before `store_spooled_delta`).
+    /// to stage a large PUT/POST body before `store_spooled_delta`).
+    ///
+    /// Bounded wait — same as the GET-side reconstruct (fbe67de): under budget
+    /// contention this fails with SlowDown rather than parking the request (and
+    /// its budget) indefinitely. PUT and POST share this accessor, so both ingest
+    /// paths get the timeout (review B1.1).
     pub async fn spool_acquire(
         &self,
         bytes: u64,
     ) -> Result<crate::deltaglider::spool::Spool, EngineError> {
-        self.spool
-            .acquire(bytes)
-            .await
-            .map_err(|e| EngineError::Storage(StorageError::from(e)))
+        let secs = crate::config::env_parse_with_default("DGP_SPOOL_ACQUIRE_TIMEOUT_SECS", 120u64);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(secs),
+            self.spool.acquire(bytes),
+        )
+        .await
+        .map_err(|_| EngineError::Overloaded("spool budget exhausted; retry shortly".to_string()))?
+        .map_err(|e| EngineError::Storage(StorageError::from(e)))
     }
 
     /// Whether the codec passes `-a` (armor disabled) to xdelta3 (3.1+ only).

@@ -46,15 +46,24 @@ pub struct Spool {
 }
 
 impl SpoolDir {
-    /// Build from env: `DGP_SPOOL_DIR` (default system temp) + `DGP_SPOOL_MAX_BYTES`
-    /// (default 16 GiB). The directory is created if missing.
+    /// Build from env: `DGP_SPOOL_DIR` + `DGP_SPOOL_MAX_BYTES` (default 16 GiB).
+    ///
+    /// Default dir is a DEDICATED `dgp-spool` subdir of the system temp — NOT the
+    /// shared temp root (review M3.4: sweeping or filling the shared root is
+    /// dangerous; a dedicated subdir we own is safe to sweep). The directory is
+    /// created if missing and SWEPT of orphans at startup (review M1.8: a hard
+    /// crash leaves spool files behind since `NamedTempFile`'s Drop never ran;
+    /// any file present at boot is from a previous process and is safe to delete
+    /// — every live spool is held by a `NamedTempFile` in THIS process).
     pub fn from_env() -> std::io::Result<Self> {
         let dir = std::env::var("DGP_SPOOL_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir());
+            .unwrap_or_else(|_| std::env::temp_dir().join("dgp-spool"));
         let max_bytes: u64 =
             crate::config::env_parse_with_default("DGP_SPOOL_MAX_BYTES", 16 * 1024 * 1024 * 1024);
-        Self::new(dir, max_bytes)
+        let pool = Self::new(dir, max_bytes)?;
+        pool.sweep_orphans();
+        Ok(pool)
     }
 
     pub fn new(dir: PathBuf, max_bytes: u64) -> std::io::Result<Self> {
@@ -71,6 +80,44 @@ impl SpoolDir {
 
     pub fn max_bytes(&self) -> u64 {
         self.max_bytes
+    }
+
+    /// Delete STALE spool files orphaned by a hard crash before `NamedTempFile`'s
+    /// Drop could run. AGE-based (older than `STALE`), not delete-everything: the
+    /// spool dir may be shared by another live DGP instance (or parallel tests),
+    /// whose ACTIVE spools are always freshly-touched — only files untouched for
+    /// `STALE` are safe to reclaim. Best-effort; logs and continues on errors.
+    fn sweep_orphans(&self) {
+        // 1h: comfortably longer than any single reconstruction, short enough to
+        // reclaim crash debris promptly.
+        self.sweep_older_than(std::time::Duration::from_secs(3600));
+    }
+
+    /// Sweep files whose mtime is at least `max_age` old. Split out for testing.
+    fn sweep_older_than(&self, max_age: std::time::Duration) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut removed = 0u64;
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .ok()
+                .filter(|m| m.is_file())
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .map(|age| age >= max_age)
+                .unwrap_or(false);
+            if stale && std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            tracing::info!(
+                "Swept {removed} stale spool file(s) from {} at startup",
+                self.dir.display()
+            );
+        }
     }
 
     /// Reserve `bytes` of budget as a single weighted permit (clamped to the full
@@ -212,6 +259,31 @@ mod tests {
         let pool = SpoolDir::new(tmp.path().to_path_buf(), 4 * 1024 * 1024).unwrap();
         let spool = pool.acquire(64 * 1024 * 1024).await.unwrap(); // > budget
         assert!(spool.path().exists());
+    }
+
+    #[test]
+    fn sweep_keeps_fresh_files() {
+        // A just-written file is younger than any positive threshold → kept.
+        // (This is the safety property: a live instance's active spools survive.)
+        let tmp = tempfile::tempdir().unwrap();
+        let fresh = tmp.path().join("fresh");
+        std::fs::write(&fresh, b"y").unwrap();
+        let pool = SpoolDir::new(tmp.path().to_path_buf(), 64 * 1024 * 1024).unwrap();
+        pool.sweep_older_than(std::time::Duration::from_secs(3600));
+        assert!(fresh.exists(), "a fresh (live) spool must NOT be swept");
+    }
+
+    #[test]
+    fn sweep_removes_stale_files() {
+        // max_age=0 → every file is "at least 0s old" → all swept (proves the
+        // delete path; a real run uses 1h so only crash debris qualifies).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("orphan1"), b"x").unwrap();
+        std::fs::write(tmp.path().join("orphan2"), b"x").unwrap();
+        let pool = SpoolDir::new(tmp.path().to_path_buf(), 64 * 1024 * 1024).unwrap();
+        pool.sweep_older_than(std::time::Duration::from_secs(0));
+        let left = std::fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(left, 0, "stale orphans should be swept");
     }
 
     #[tokio::test]
