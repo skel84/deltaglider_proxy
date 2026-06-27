@@ -327,6 +327,10 @@ where
         });
 
         // Writer: stream the input into xdelta3 stdin in chunks (bounded).
+        // Tick progress here too: a large-input/sparse-output encode (an
+        // incompressible target → tiny delta) can read GBs of stdin while
+        // emitting almost no stdout, which would otherwise look like a stall and
+        // get the healthy encode SIGKILLed (x-ray finding).
         let writer = s.spawn(move || {
             let mut stdin = child_stdin;
             let mut buf = vec![0u8; PUMP_CHUNK];
@@ -336,6 +340,7 @@ where
                     break;
                 }
                 stdin.write_all(&buf[..n])?;
+                progress.tick();
             }
             stdin.flush()?;
             drop(stdin); // EOF → child finishes
