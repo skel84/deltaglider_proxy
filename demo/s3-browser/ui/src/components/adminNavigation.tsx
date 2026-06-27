@@ -56,14 +56,15 @@ export interface SidebarEntry {
 }
 
 /**
- * The 8-group / 15-leaf IA — one group per control domain (see
- * docs/plan/admin-ui-taxonomy.md): Overview, Diagnostics, Logs, Access,
- * Storage, Jobs, Integrations, System. No parent/overview pages: every
- * entry is a destination.
+ * The 5-group / 15-leaf IA — merged from 8 to drop single/double-leaf header
+ * tax (see docs/plan/admin-ui-taxonomy.md): Observability (overview +
+ * diagnostics + logs), Access, Storage (incl. Jobs), Integrations, System.
+ * No parent/overview pages: every entry is a destination. Leaf paths are
+ * unchanged across the merge, so routing/remap are untouched.
  */
 export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
   {
-    group: 'Overview',
+    group: 'Observability',
     entries: [
       {
         path: 'dashboard',
@@ -71,11 +72,6 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
         icon: <DashboardOutlined />,
         description: 'Health, metrics, and savings at a glance.',
       },
-    ],
-  },
-  {
-    group: 'Diagnostics',
-    entries: [
       {
         path: 'diagnostics/trace',
         label: 'Trace',
@@ -89,11 +85,6 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
         icon: <ThunderboltOutlined />,
         description: 'Find prefixes where the delta baseline is underperforming.',
       },
-    ],
-  },
-  {
-    group: 'Logs',
-    entries: [
       {
         path: 'diagnostics/audit',
         label: 'Audit log',
@@ -178,11 +169,6 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
         saveModel: 'review',
         description: 'Per-bucket settings: routing, public access, quotas, compression.',
       },
-    ],
-  },
-  {
-    group: 'Jobs',
-    entries: [
       {
         path: 'jobs',
         label: 'Jobs',
