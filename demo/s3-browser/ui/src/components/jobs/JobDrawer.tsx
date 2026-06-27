@@ -5,12 +5,15 @@
 import { useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Alert, Drawer, Empty, Table, Tabs, Tag, Typography } from 'antd';
+import { ClockCircleOutlined } from '@ant-design/icons';
+import { useColors } from '../../ThemeContext';
 import type { LifecycleConfig, ReplicationConfig } from '../../adminApi';
 import type { JobRow } from '../../jobsView';
 import { isActiveJobStatus, jobStatusLabel, jobStatusTone, kindLabel, parseJobId } from '../../jobsView';
 import { qk } from '../../queries/keys';
 import { useJobFailures, useJobRuns } from '../../queries/jobs';
 import TimeAgo from '../TimeAgo';
+import RunProgressBar from './RunProgressBar';
 import ReplicationRuleFields from '../ReplicationRuleFields';
 import LifecycleRuleFields from '../LifecycleRuleFields';
 import VerifyTab from './VerifyTab';
@@ -47,6 +50,7 @@ export default function JobDrawer({
   inputRadius,
   onClose,
 }: Props) {
+  const c = useColors();
   const parsed = jobId ? parseJobId(jobId) : null;
   const serverRow = rows.find((r) => r.id === jobId) ?? null;
   // Runs/failures only exist for jobs the SERVER knows (not drafts).
@@ -183,30 +187,38 @@ export default function JobDrawer({
       locale={{ emptyText: 'No runs yet' }}
       columns={[
         { title: 'Started', render: (_: unknown, r) => <TimeAgo ts={r.started_at} /> },
-        { title: 'By', dataIndex: 'triggered_by', width: 90 },
+        {
+          title: <span title="What triggered this run">By</span>,
+          dataIndex: 'triggered_by',
+          width: 48,
+          align: 'center' as const,
+          render: (by: string) =>
+            by === 'scheduler' ? (
+              <ClockCircleOutlined title="scheduler" style={{ color: c.TEXT_MUTED }} />
+            ) : (
+              <span title={by} style={{ fontSize: 12 }}>
+                {by}
+              </span>
+            ),
+        },
         {
           title: 'Status',
-          width: 110,
+          width: 100,
           render: (_: unknown, r) => (
             <Tag color={jobStatusTone({ status: r.status })}>{r.status}</Tag>
           ),
         },
         {
-          title: <span title="Objects listed from the source bucket">Scanned</span>,
-          dataIndex: 'objects_scanned',
-          width: 80,
+          title: <span title="green = copied · red = errors · blank = skipped (already in sync). Number = copied.">Progress</span>,
+          render: (_: unknown, r) => (
+            <RunProgressBar
+              scanned={r.objects_scanned}
+              copied={r.objects_processed}
+              errors={r.errors}
+              skipped={r.objects_skipped}
+            />
+          ),
         },
-        {
-          title: <span title="Objects copied to the destination">Copied</span>,
-          dataIndex: 'objects_processed',
-          width: 80,
-        },
-        {
-          title: <span title="Already in sync — present on destination, nothing to copy">Skipped</span>,
-          dataIndex: 'objects_skipped',
-          width: 80,
-        },
-        { title: 'Errors', dataIndex: 'errors', width: 70 },
       ]}
     />
   );
