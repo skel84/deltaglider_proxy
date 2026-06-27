@@ -7,6 +7,7 @@ import { useState } from 'react';
 import ThemeProvider from './ThemeProvider';
 import { useColors } from './ThemeContext';
 import { ParityResult } from './components/jobs/VerifyTab';
+import RunProgressBar from './components/jobs/RunProgressBar';
 import type {
   ActionableSummary,
   ParityOutcome,
@@ -240,9 +241,54 @@ function Storyboard() {
           c={c}
         />
       </div>
+
+      <h2 style={{ margin: '40px 0 4px' }}>Runs — progress bar</h2>
+      <p style={{ color: c.TEXT_SECONDARY, marginTop: 0, fontSize: 13 }}>
+        The Jobs → Runs table bar. Scaled to work DONE (copied+errors): green =
+        copied, red = errors, blank = skipped (already in sync). Number = copied;
+        full breakdown on hover.
+      </p>
+      <table style={{ borderCollapse: 'collapse', maxWidth: 560 }}>
+        <thead>
+          <tr style={{ textAlign: 'left', color: c.TEXT_MUTED, fontSize: 12 }}>
+            <th style={{ padding: '6px 0' }}>Case</th>
+            <th style={{ width: 220 }}>Progress</th>
+          </tr>
+        </thead>
+        <tbody>
+          {RUN_BAR_CASES.map((r) => (
+            <tr key={r.label} style={{ borderTop: `1px solid ${c.BORDER}` }}>
+              <td style={{ padding: '10px 16px 10px 0', fontSize: 13 }}>
+                {r.label}
+                <div style={{ color: c.TEXT_MUTED, fontSize: 11 }}>
+                  scanned {r.scanned} · copied {r.copied} · err {r.errors} · skip {r.skipped}
+                </div>
+              </td>
+              <td style={{ width: 220 }}>
+                <RunProgressBar
+                  scanned={r.scanned}
+                  copied={r.copied}
+                  errors={r.errors}
+                  skipped={r.skipped}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
+
+/** RunProgressBar fixtures — real-shaped cases (incremental mirror, failures,
+ *  a balanced copy) so the work-done scaling is visibly legible. */
+const RUN_BAR_CASES = [
+  { label: 'Incremental run (all in sync)', scanned: 3400, copied: 7, errors: 0, skipped: 3393 },
+  { label: 'One transient error', scanned: 4100, copied: 10, errors: 1, skipped: 4089 },
+  { label: 'Nothing copied, one error', scanned: 100, copied: 0, errors: 1, skipped: 99 },
+  { label: 'Large incremental', scanned: 12300, copied: 70, errors: 1, skipped: 12229 },
+  { label: 'Balanced copy (60/40)', scanned: 200, copied: 120, errors: 80, skipped: 0 },
+];
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
