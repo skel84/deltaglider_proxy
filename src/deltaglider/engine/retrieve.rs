@@ -145,6 +145,13 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
                     cache_hit: None,
                 })
             }
+            StorageInfo::Delta { .. } if metadata.file_size > self.spool_threshold() => {
+                // Large delta: reconstruct to a spool file (bounded memory) and
+                // stream the file to the client. Integrity is verified BEFORE the
+                // first byte ships (see retrieve_delta_spooled).
+                self.retrieve_delta_spooled(bucket, deltaspace_id, obj_key, metadata)
+                    .await
+            }
             StorageInfo::Reference { .. } | StorageInfo::Delta { .. } => {
                 let (data, cache_hit) = self
                     .retrieve_buffered(bucket, deltaspace_id, obj_key, &metadata)
@@ -161,6 +168,215 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
                 })
             }
         }
+    }
+
+    /// Bytes above which a delta GET reconstructs to a spool file + streams it,
+    /// instead of buffering the whole reconstruction in RAM. Below this, the
+    /// buffered path is cheaper and well-tested. Tied to `max_object_size` (the
+    /// "buffer-in-RAM below here" line); `DGP_SPOOL_THRESHOLD_BYTES` overrides.
+    fn spool_threshold(&self) -> u64 {
+        crate::config::env_parse_with_default("DGP_SPOOL_THRESHOLD_BYTES", self.max_object_size)
+    }
+
+    /// Reconstruct a large delta object to a quota'd spool file, verify its
+    /// SHA-256 BEFORE returning, then stream the spool file to the client.
+    ///
+    /// Memory is bounded by the codec pump (Spike A: 73MB on a 2.5GB decode), not
+    /// the object size. The integrity gate (blocker 2) is preserved: we hash the
+    /// reconstruction as the codec writes it and compare to `metadata.file_sha256`
+    /// before the first response byte — a mismatch returns a clean S3 error, never
+    /// a truncated 200. The codec permit is released at decode-done (blocker 5),
+    /// so a slow client draining the spool never pins a codec slot.
+    async fn retrieve_delta_spooled(
+        &self,
+        bucket: &str,
+        deltaspace_id: &str,
+        obj_key: &super::ObjectKey,
+        metadata: FileMetadata,
+    ) -> Result<RetrieveResponse, EngineError> {
+        let out_spool = self
+            .reconstruct_delta_to_spool(bucket, deltaspace_id, obj_key, &metadata)
+            .await?;
+
+        // Stream the verified spool file whole. `out_spool` is moved into the
+        // stream so the file (and its budget) lives until the last byte is read,
+        // then drops (deleting the file + releasing the budget).
+        let file = tokio::fs::File::open(out_spool.path())
+            .await
+            .map_err(StorageError::from)?;
+        let reader = tokio_util::io::ReaderStream::new(file);
+        let stream =
+            futures::stream::unfold((reader, out_spool), |(mut reader, spool)| async move {
+                use futures::StreamExt;
+                match reader.next().await {
+                    Some(Ok(b)) => Some((Ok(b), (reader, spool))),
+                    Some(Err(e)) => Some((Err(StorageError::from(e)), (reader, spool))),
+                    None => None, // spool dropped here → file deleted, budget freed
+                }
+            });
+
+        debug!(
+            "Retrieved (spooled) {} bytes for {}",
+            metadata.file_size,
+            obj_key.full_key()
+        );
+        Ok(RetrieveResponse::Streamed {
+            stream: Box::pin(stream),
+            metadata,
+            cache_hit: None,
+        })
+    }
+
+    /// Reconstruct a delta object to a quota'd spool file and verify its SHA-256
+    /// BEFORE returning. Shared by the full-GET (`retrieve_delta_spooled`) and the
+    /// range path. Returns the verified `Spool` (its `Drop` deletes the file +
+    /// releases the budget). Bounded memory (codec pump); the codec permit is
+    /// released here, at decode-done — never held across the client download.
+    async fn reconstruct_delta_to_spool(
+        &self,
+        bucket: &str,
+        deltaspace_id: &str,
+        obj_key: &super::ObjectKey,
+        metadata: &FileMetadata,
+    ) -> Result<crate::deltaglider::spool::Spool, EngineError> {
+        use std::io::Write;
+
+        let ref_spool = self
+            .spool
+            .acquire(metadata.file_size)
+            .await
+            .map_err(StorageError::from)?;
+        let out_spool = self
+            .spool
+            .acquire(metadata.file_size)
+            .await
+            .map_err(StorageError::from)?;
+
+        // Materialise the reference as a seekable file WITHOUT heap-loading it
+        // (Phase 2: filesystem hardlink / S3 stream-to-file).
+        self.storage
+            .get_reference_to_file(bucket, deltaspace_id, ref_spool.path())
+            .await?;
+
+        // Fetch the delta (small — it's a delta).
+        let delta = self
+            .storage
+            .get_delta(bucket, deltaspace_id, &obj_key.filename)
+            .await?;
+
+        let _permit = self
+            .acquire_codec_timeout(std::time::Duration::from_secs(60))
+            .await?;
+        let codec = self.codec.clone();
+        let ref_path = ref_spool.path().to_path_buf();
+        let out_path = out_spool.path().to_path_buf();
+        let decode_start = Instant::now();
+        let expected_sha = metadata.file_sha256.clone();
+        let key_for_err = obj_key.full_key();
+
+        // A Write sink that tees to the spool file AND a running SHA-256.
+        let actual_sha = tokio::task::spawn_blocking(move || -> Result<String, EngineError> {
+            struct HashingWriter<W: Write> {
+                inner: W,
+                hasher: Sha256,
+            }
+            impl<W: Write> Write for HashingWriter<W> {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    self.hasher.update(buf);
+                    self.inner.write_all(buf)?;
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    self.inner.flush()
+                }
+            }
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&out_path)
+                .map_err(|e| EngineError::Storage(StorageError::from(e)))?;
+            let mut sink = HashingWriter {
+                inner: std::io::BufWriter::new(file),
+                hasher: Sha256::new(),
+            };
+            codec
+                .decode_to_writer(&ref_path, &delta[..], &mut sink)
+                .map_err(EngineError::Codec)?;
+            sink.flush()
+                .map_err(|e| EngineError::Storage(StorageError::from(e)))?;
+            Ok(hex::encode(sink.hasher.finalize()))
+        })
+        .await
+        .map_err(|e| {
+            EngineError::Storage(StorageError::Other(format!("decode task panicked: {e}")))
+        })??;
+
+        let decode_secs = decode_start.elapsed().as_secs_f64();
+        drop(_permit); // release codec slot at decode-done, NOT download-done
+        self.with_metrics(|m| m.delta_decode_duration_seconds.observe(decode_secs));
+
+        // PRE-FLIGHT INTEGRITY GATE — before any byte ships.
+        if actual_sha != expected_sha {
+            let cache_key = Self::cache_key(bucket, deltaspace_id);
+            self.cache.invalidate(&cache_key);
+            warn!(
+                "Checksum mismatch (spooled) for {}: expected {}, got {}",
+                key_for_err, expected_sha, actual_sha
+            );
+            return Err(EngineError::ChecksumMismatch {
+                key: key_for_err,
+                expected: expected_sha,
+                actual: actual_sha,
+            });
+        }
+
+        // ref_spool drops here — reference file no longer needed.
+        Ok(out_spool)
+    }
+
+    /// Serve a byte range of a large delta object from a reconstructed spool file
+    /// (blocker 6). Reconstructs once (verified), then seeks to `start` and
+    /// streams `end-start+1` bytes — no full-object re-buffer. Returns
+    /// `(stream, content_length)`.
+    async fn retrieve_delta_range_spooled(
+        &self,
+        bucket: &str,
+        deltaspace_id: &str,
+        obj_key: &super::ObjectKey,
+        metadata: &FileMetadata,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<(BoxStream<'static, Result<Bytes, StorageError>>, u64), EngineError> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let out_spool = self
+            .reconstruct_delta_to_spool(bucket, deltaspace_id, obj_key, metadata)
+            .await?;
+
+        // Clamp the range to the object size; compute the content length.
+        let size = metadata.file_size;
+        let start = start.min(size);
+        let end_excl = end_inclusive.saturating_add(1).min(size);
+        let content_length = end_excl.saturating_sub(start);
+
+        let mut file = tokio::fs::File::open(out_spool.path())
+            .await
+            .map_err(StorageError::from)?;
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(StorageError::from)?;
+        // `take` bounds the read to exactly the range length.
+        let reader = file.take(content_length);
+        let inner = tokio_util::io::ReaderStream::new(reader);
+        let stream = futures::stream::unfold((inner, out_spool), |(mut inner, spool)| async move {
+            use futures::StreamExt;
+            match inner.next().await {
+                Some(Ok(b)) => Some((Ok(b), (inner, spool))),
+                Some(Err(e)) => Some((Err(StorageError::from(e)), (inner, spool))),
+                None => None,
+            }
+        });
+        Ok((Box::pin(stream), content_length))
     }
 
     /// Retrieve a byte range of a passthrough object with streaming support.
@@ -279,9 +495,25 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
                 );
                 Ok(Some((stream, content_length, metadata)))
             }
+            StorageInfo::Delta { .. } if metadata.file_size > self.spool_threshold() => {
+                // Large delta range: reconstruct once to a spool file (verified),
+                // then seek + stream just the requested bytes (blocker 6) — no
+                // full-object re-buffer.
+                let (stream, content_length) = self
+                    .retrieve_delta_range_spooled(
+                        bucket,
+                        &deltaspace_id,
+                        &obj_key,
+                        &metadata,
+                        start,
+                        end,
+                    )
+                    .await?;
+                Ok(Some((stream, content_length, metadata)))
+            }
             StorageInfo::Reference { .. } | StorageInfo::Delta { .. } => {
-                // Delta/reference objects need full reconstruction — signal
-                // caller to use the buffered path.
+                // Small delta/reference: signal caller to use the buffered slice
+                // path (cheap — the whole object fits comfortably in RAM).
                 Ok(None)
             }
         }

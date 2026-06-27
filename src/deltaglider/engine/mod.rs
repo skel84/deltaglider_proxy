@@ -273,6 +273,10 @@ pub struct DeltaGliderEngine<S: StorageBackend> {
     /// Per-instance running usage counter (None in tests / when unavailable).
     /// Updated best-effort after each successful store/delete.
     bucket_usage: Option<Arc<crate::bucket_usage::BucketUsage>>,
+    /// Quota'd temp space for streaming delta reconstruction (Phase 3). Large
+    /// delta GETs decode to a spool file here, then stream the file to the
+    /// client — bounded memory regardless of object size.
+    spool: Arc<crate::deltaglider::spool::SpoolDir>,
 }
 
 /// Type alias for engine with dynamic backend dispatch
@@ -700,6 +704,10 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
                 config.max_delta_ratio,
             ),
             bucket_usage: None,
+            spool: Arc::new(
+                crate::deltaglider::spool::SpoolDir::from_env()
+                    .unwrap_or_else(|e| panic!("failed to init spool dir: {e}")),
+            ),
         }
     }
 

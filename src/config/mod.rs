@@ -371,6 +371,12 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Delta Engine",
     },
     EnvVarEntry {
+        name: "DGP_SPOOL_THRESHOLD_BYTES",
+        description: "Delta GETs larger than this reconstruct to a spool file + stream (default: max_object_size)",
+        example: "104857600",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
         name: "DGP_RATE_LIMIT_MAX_ATTEMPTS",
         description: "Max failed auth attempts before IP lockout (default: 100)",
         example: "100",
@@ -2681,6 +2687,7 @@ mod tests {
             "DGP_CODEC_ABSOLUTE_SECS",               // deltaglider::codec::codec_absolute_ceiling()
             "DGP_SPOOL_DIR",                         // deltaglider::spool::SpoolDir::from_env()
             "DGP_SPOOL_MAX_BYTES",                   // deltaglider::spool::SpoolDir::from_env()
+            "DGP_SPOOL_THRESHOLD_BYTES",             // engine::retrieve::spool_threshold()
             "DGP_RATE_LIMIT_MAX_ATTEMPTS",           // rate_limiter::default_auth()
             "DGP_RATE_LIMIT_WINDOW_SECS",            // rate_limiter::default_auth()
             "DGP_RATE_LIMIT_LOCKOUT_SECS",           // rate_limiter::default_auth()

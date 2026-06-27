@@ -48,6 +48,121 @@ async fn test_similar_files_stored_as_delta() {
     assert_eq!(st2, "delta", "Similar file should be stored as delta");
 }
 
+/// Force EVERY delta GET through the Phase-3 spooled-reconstruction path
+/// (`DGP_SPOOL_THRESHOLD_BYTES=1`) and assert byte-exact reconstruction through
+/// the real S3 API. Exercises decode_to_writer → spool file → SHA-256 pre-flight
+/// gate → ReaderStream to the client, with bounded memory.
+#[tokio::test]
+async fn test_delta_get_via_spooled_path_is_byte_exact() {
+    let server = TestServer::builder()
+        .env("DGP_SPOOL_THRESHOLD_BYTES", "1") // every delta GET spools
+        .build()
+        .await;
+    let http = reqwest::Client::new();
+
+    let base = generate_binary(200_000, 7);
+    let variant = mutate_binary(&base, 0.02);
+
+    put_object(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "releases/base.zip",
+        base.clone(),
+        "application/zip",
+    )
+    .await;
+    let st = put_and_get_storage_type(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "releases/v1.zip",
+        variant.clone(),
+        "application/zip",
+    )
+    .await;
+    assert_eq!(st, "delta", "variant should store as delta");
+
+    // GET the delta object — goes through the spooled reconstruction path.
+    let got = get_bytes(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "releases/v1.zip",
+    )
+    .await;
+    assert_eq!(
+        got, variant,
+        "spooled delta reconstruction must be byte-exact"
+    );
+
+    // And the reference object round-trips too.
+    let got_base = get_bytes(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "releases/base.zip",
+    )
+    .await;
+    assert_eq!(got_base, base, "reference object must round-trip");
+}
+
+/// A Range request on a large delta object must reconstruct once to a spool and
+/// serve the exact requested bytes via seek (Phase 3, blocker 6) — not re-buffer
+/// the whole object. Forced via `DGP_SPOOL_THRESHOLD_BYTES=1`.
+#[tokio::test]
+async fn test_delta_range_via_spooled_seek() {
+    let server = TestServer::builder()
+        .env("DGP_SPOOL_THRESHOLD_BYTES", "1")
+        .build()
+        .await;
+    let http = reqwest::Client::new();
+
+    let base = generate_binary(300_000, 11);
+    let variant = mutate_binary(&base, 0.02);
+    put_object(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/base.zip",
+        base,
+        "application/zip",
+    )
+    .await;
+    put_object(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/v1.zip",
+        variant.clone(),
+        "application/zip",
+    )
+    .await;
+
+    // Range near the END of the object (the pathological case the spool fixes).
+    let len = variant.len() as u64;
+    let start = len - 50_000;
+    let end = len - 1; // inclusive
+    let url = format!("{}/{}/rel/v1.zip", server.endpoint(), server.bucket());
+    let resp = http
+        .get(&url)
+        .header("Range", format!("bytes={start}-{end}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        206,
+        "ranged GET should return 206 Partial Content"
+    );
+    let got = resp.bytes().await.unwrap();
+    assert_eq!(
+        &got[..],
+        &variant[start as usize..=end as usize],
+        "spooled range must return the exact requested bytes"
+    );
+}
+
 #[tokio::test]
 async fn test_three_versions_all_retrievable() {
     let server = TestServer::filesystem().await;
