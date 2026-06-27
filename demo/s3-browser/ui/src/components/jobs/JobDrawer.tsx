@@ -10,6 +10,7 @@ import type { JobRow } from '../../jobsView';
 import { isActiveJobStatus, jobStatusLabel, jobStatusTone, kindLabel, parseJobId } from '../../jobsView';
 import { qk } from '../../queries/keys';
 import { useJobFailures, useJobRuns } from '../../queries/jobs';
+import TimeAgo from '../TimeAgo';
 import ReplicationRuleFields from '../ReplicationRuleFields';
 import LifecycleRuleFields from '../LifecycleRuleFields';
 import VerifyTab from './VerifyTab';
@@ -180,7 +181,7 @@ export default function JobDrawer({
       pagination={false}
       locale={{ emptyText: 'No runs yet' }}
       columns={[
-        { title: 'Started', render: (_: unknown, r) => fmt(r.started_at) },
+        { title: 'Started', render: (_: unknown, r) => <TimeAgo ts={r.started_at} /> },
         { title: 'By', dataIndex: 'triggered_by', width: 90 },
         {
           title: 'Status',
@@ -204,7 +205,7 @@ export default function JobDrawer({
       pagination={false}
       locale={{ emptyText: 'No recorded failures' }}
       columns={[
-        { title: 'When', width: 160, render: (_: unknown, f) => fmt(f.occurred_at) },
+        { title: 'When', width: 160, render: (_: unknown, f) => <TimeAgo ts={f.occurred_at} /> },
         {
           title: 'Object',
           render: (_: unknown, f) => (

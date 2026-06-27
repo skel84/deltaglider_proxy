@@ -39,6 +39,7 @@ import {
 } from '../../jobsView';
 import { qk } from '../../queries/keys';
 import { useJobs } from '../../queries/jobs';
+import TimeAgo from '../TimeAgo';
 import { useSectionEditor } from '../../useSectionEditor';
 import { useApplyHandler } from '../../useDirtySection';
 import { useCardStyles } from '../shared-styles';
@@ -214,7 +215,11 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       } else {
         messageApi.success(ACTION_META[action].done ?? `${ACTION_META[action].label} OK`);
       }
+      // Refresh the list AND this job's runs/failures tables — a resume/run-now
+      // starts a new run that the open drawer's Runs/Failures tabs must show.
       qc.invalidateQueries({ queryKey: qk.jobs.list() });
+      qc.invalidateQueries({ queryKey: qk.jobs.runs(row.id) });
+      qc.invalidateQueries({ queryKey: qk.jobs.failures(row.id) });
     } catch (e) {
       messageApi.error(e instanceof Error ? e.message : `${action} failed`);
     } finally {
@@ -325,9 +330,8 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       render: (_: unknown, d: JobDisplayRow) => {
         const ts = d.row.last_run_at ?? d.row.finished_at ?? d.row.started_at;
         return (
-          // wordBreak normal: wrap at the date/time boundary, never mid-digit
-          <Text type="secondary" style={{ fontSize: 12, wordBreak: 'normal' }}>
-            {ts ? new Date(ts * 1000).toLocaleString() : '—'}
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            <TimeAgo ts={ts} />
           </Text>
         );
       },
