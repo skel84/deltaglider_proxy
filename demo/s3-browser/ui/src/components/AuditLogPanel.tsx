@@ -31,6 +31,7 @@ import {
 } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import { fetchAudit, type AuditEntry } from '../adminApi';
+import { relativeTime } from '../utils';
 
 const { Text } = Typography;
 
@@ -58,21 +59,6 @@ function actionColour(action: string): string {
   if (action.startsWith('update') || action.startsWith('put')) return 'geekblue';
   if (action.startsWith('public_read')) return 'cyan';
   return 'default';
-}
-
-/**
- * Compact time-ago in the same row as the absolute timestamp.
- * Example: "2m ago". English-only; if/when we ship localisation,
- * this helper is the obvious swap point.
- */
-function relativeTime(iso: string, now: Date): string {
-  const t = new Date(iso).getTime();
-  const deltaSec = Math.floor((now.getTime() - t) / 1000);
-  if (deltaSec < 0) return 'just now';
-  if (deltaSec < 60) return `${deltaSec}s ago`;
-  if (deltaSec < 3600) return `${Math.floor(deltaSec / 60)}m ago`;
-  if (deltaSec < 86400) return `${Math.floor(deltaSec / 3600)}h ago`;
-  return `${Math.floor(deltaSec / 86400)}d ago`;
 }
 
 export default function AuditLogPanel({ onSessionExpired }: Props) {

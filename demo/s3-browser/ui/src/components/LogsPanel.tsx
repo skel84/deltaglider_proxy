@@ -20,6 +20,7 @@ import { Typography, Input, Button, Tag, Select, Space, Switch } from 'antd';
 import { ReloadOutlined, SearchOutlined, FileTextOutlined } from '@ant-design/icons';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useColors } from '../ThemeContext';
+import { relativeTime } from '../utils';
 import { fetchLogs, streamLogs, type LogEntry, type LogFilters } from '../adminApi';
 
 const { Text } = Typography;
@@ -44,16 +45,6 @@ function levelColour(level: string): string {
     default:
       return 'default';
   }
-}
-
-function relativeTime(iso: string, now: Date): string {
-  const t = new Date(iso).getTime();
-  const d = Math.floor((now.getTime() - t) / 1000);
-  if (d < 0) return 'just now';
-  if (d < 60) return `${d}s`;
-  if (d < 3600) return `${Math.floor(d / 60)}m`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h`;
-  return `${Math.floor(d / 86400)}d`;
 }
 
 export default function LogsPanel({ onSessionExpired }: Props) {

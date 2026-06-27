@@ -89,18 +89,8 @@ pub fn recent_logs(limit: usize) -> Vec<LogEntry> {
 
 /// Parse the capture floor from `DGP_LOG_RING_LEVEL` (default INFO).
 fn ring_min_level() -> Level {
-    match std::env::var("DGP_LOG_RING_LEVEL")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "error" => Level::ERROR,
-        "warn" => Level::WARN,
-        "debug" => Level::DEBUG,
-        "trace" => Level::TRACE,
-        // default + any unrecognised value → INFO
-        _ => Level::INFO,
-    }
+    // Default + any unrecognised value → INFO.
+    level_from_str(&std::env::var("DGP_LOG_RING_LEVEL").unwrap_or_default()).unwrap_or(Level::INFO)
 }
 
 /// A `tracing` Layer that captures events (at/above its floor) into the ring +
