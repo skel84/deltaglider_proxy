@@ -241,16 +241,21 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
     ) -> Result<crate::deltaglider::spool::Spool, EngineError> {
         use std::io::Write;
 
-        let ref_spool = self
-            .spool
-            .acquire(metadata.file_size)
-            .await
-            .map_err(StorageError::from)?;
-        let out_spool = self
-            .spool
-            .acquire(metadata.file_size)
-            .await
-            .map_err(StorageError::from)?;
+        // ONE combined reservation for both spools (ref + out) — a single permit
+        // can't half-acquire and self-deadlock, and two concurrent large GETs
+        // never hold one spool while waiting for the other (x-ray blocker).
+        // Bounded wait: if the budget is saturated, fail with SlowDown rather than
+        // parking the request (and its budget) indefinitely under contention.
+        let acquire_secs =
+            crate::config::env_parse_with_default("DGP_SPOOL_ACQUIRE_TIMEOUT_SECS", 120u64);
+        let (ref_spool, out_spool) = tokio::time::timeout(
+            std::time::Duration::from_secs(acquire_secs),
+            self.spool
+                .acquire_pair(metadata.file_size, metadata.file_size),
+        )
+        .await
+        .map_err(|_| EngineError::Overloaded("spool budget exhausted; retry shortly".to_string()))?
+        .map_err(StorageError::from)?;
 
         // Materialise the reference as a seekable file WITHOUT heap-loading it
         // (Phase 2: filesystem hardlink / S3 stream-to-file).
@@ -273,15 +278,30 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         let decode_start = Instant::now();
         let expected_sha = metadata.file_sha256.clone();
         let key_for_err = obj_key.full_key();
+        // Decompression-bomb cap: a correct reconstruction is EXACTLY file_size
+        // bytes. Abort the write the moment output exceeds it — a crafted delta
+        // can otherwise inflate to fill the spool dir (ENOSPC) past the reserved
+        // budget, BEFORE the SHA gate runs (x-ray blocker — the buffered path's
+        // max_stdout guard was missing on the streaming path).
+        let output_cap = metadata.file_size;
 
-        // A Write sink that tees to the spool file AND a running SHA-256.
+        // A Write sink that tees to the spool file AND a running SHA-256, capped.
         let actual_sha = tokio::task::spawn_blocking(move || -> Result<String, EngineError> {
             struct HashingWriter<W: Write> {
                 inner: W,
                 hasher: Sha256,
+                written: u64,
+                cap: u64,
             }
             impl<W: Write> Write for HashingWriter<W> {
                 fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    self.written = self.written.saturating_add(buf.len() as u64);
+                    if self.written > self.cap {
+                        return Err(std::io::Error::other(format!(
+                            "delta reconstruction exceeded expected size ({} > {} bytes)",
+                            self.written, self.cap
+                        )));
+                    }
                     self.hasher.update(buf);
                     self.inner.write_all(buf)?;
                     Ok(buf.len())
@@ -298,6 +318,8 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
             let mut sink = HashingWriter {
                 inner: std::io::BufWriter::new(file),
                 hasher: Sha256::new(),
+                written: 0,
+                cap: output_cap,
             };
             codec
                 .decode_to_writer(&ref_path, &delta[..], &mut sink)

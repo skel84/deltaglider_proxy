@@ -377,6 +377,12 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Delta Engine",
     },
     EnvVarEntry {
+        name: "DGP_SPOOL_ACQUIRE_TIMEOUT_SECS",
+        description: "Max wait for spool budget before a spooled GET fails with SlowDown (default: 120)",
+        example: "120",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
         name: "DGP_RATE_LIMIT_MAX_ATTEMPTS",
         description: "Max failed auth attempts before IP lockout (default: 100)",
         example: "100",
@@ -2688,19 +2694,20 @@ mod tests {
             "DGP_SPOOL_DIR",                         // deltaglider::spool::SpoolDir::from_env()
             "DGP_SPOOL_MAX_BYTES",                   // deltaglider::spool::SpoolDir::from_env()
             "DGP_SPOOL_THRESHOLD_BYTES",             // engine::retrieve::spool_threshold()
-            "DGP_RATE_LIMIT_MAX_ATTEMPTS",           // rate_limiter::default_auth()
-            "DGP_RATE_LIMIT_WINDOW_SECS",            // rate_limiter::default_auth()
-            "DGP_RATE_LIMIT_LOCKOUT_SECS",           // rate_limiter::default_auth()
-            "DGP_REPLAY_WINDOW_SECS",                // api::auth replay detection
-            "DGP_SECURE_COOKIES",                    // api::admin::auth::secure_cookies()
-            "DGP_STREAM_COPY_THRESHOLD",             // transfer_plan::stream_copy_threshold()
-            "DGP_MULTIPART_PART_SIZE",               // transfer_plan::multipart_part_size()
-            "DGP_UPLOAD_CONCURRENCY",                // transfer_plan::upload_concurrency()
-            "DGP_REPLICATION_TRANSFERS",             // transfer_plan::transfers()
-            "DGP_S3_READ_TIMEOUT_SECS",              // storage::s3::build_client()
-            "DGP_S3_CONNECT_TIMEOUT_SECS",           // storage::s3::build_client()
+            "DGP_SPOOL_ACQUIRE_TIMEOUT_SECS", // engine::retrieve::reconstruct_delta_to_spool()
+            "DGP_RATE_LIMIT_MAX_ATTEMPTS",    // rate_limiter::default_auth()
+            "DGP_RATE_LIMIT_WINDOW_SECS",     // rate_limiter::default_auth()
+            "DGP_RATE_LIMIT_LOCKOUT_SECS",    // rate_limiter::default_auth()
+            "DGP_REPLAY_WINDOW_SECS",         // api::auth replay detection
+            "DGP_SECURE_COOKIES",             // api::admin::auth::secure_cookies()
+            "DGP_STREAM_COPY_THRESHOLD",      // transfer_plan::stream_copy_threshold()
+            "DGP_MULTIPART_PART_SIZE",        // transfer_plan::multipart_part_size()
+            "DGP_UPLOAD_CONCURRENCY",         // transfer_plan::upload_concurrency()
+            "DGP_REPLICATION_TRANSFERS",      // transfer_plan::transfers()
+            "DGP_S3_READ_TIMEOUT_SECS",       // storage::s3::build_client()
+            "DGP_S3_CONNECT_TIMEOUT_SECS",    // storage::s3::build_client()
             "DGP_S3_OPERATION_ATTEMPT_TIMEOUT_SECS", // storage::s3::build_client()
-            "DGP_S3_STALL_GRACE_SECS",               // storage::s3::build_client()
+            "DGP_S3_STALL_GRACE_SECS",        // storage::s3::build_client()
         ];
         for name in &registry_names {
             if used_outside_from_env.contains(name) {

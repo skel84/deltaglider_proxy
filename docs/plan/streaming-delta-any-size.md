@@ -112,6 +112,15 @@ reference = seekable temp file; delta output is small + capped).
   `DGP_REFERENCE_INLINE_MAX`; small refs stay in RAM (common case).
 
 ### Phase 3 — GET: decode-to-spool + streaming response (blocks 2,5,6) — ✅ DONE (commit c8d18f2)
+
+**Post-Phase-3 adversarial x-ray (6 agents) — fixes applied:**
+- ✅ BLOCKER spool double-acquire deadlock (single-object >½budget self-deadlock + two-GET cross-deadlock): fixed — `SpoolDir::acquire_pair` takes ONE combined clamped reservation; both files share it. Regression-tested (acquire_pair_does_not_self_deadlock / shares_one_reservation).
+- ✅ BLOCKER lost decompression-bomb cap (streaming decode could ENOSPC the spool past budget before the SHA gate): fixed — HashingWriter caps output at `file_size`, aborts on overflow.
+- ✅ MAJOR unbounded spool acquire (parked acquire pins budget forever): fixed — `DGP_SPOOL_ACQUIRE_TIMEOUT_SECS` (default 120s) → SlowDown instead of hang.
+- ⏳ MAJOR `retrieve()` re-buffers large spooled deltas for COPY/REPLICATION (transfer.rs:213, s3_adapter CopyObject): DEFERRED to Phase 4 — the store side is still buffered, so this is inseparable from `store_streaming`; transfer.rs switches to retrieve_stream→store_streaming when Phase 4 lands. Tracked.
+- ⏳ MAJOR encrypting backend buffers full reference in RAM on the spooled path (AES-GCM is whole-buffer): tracked limitation; streaming decryption is a separate future optimisation.
+- ⏳ Phase-4 NOTE: the streaming pump's stall-watchdog ticks only on stdout; a large-input/sparse-output ENCODE could false-stall — Phase 4 must tick on stdin progress too. Also: sink blocked on a stuck spool fs (NFS/FUSE) can't be SIGKILL-unblocked — Phase 4/hardening should use a bounded-channel pump so the watchdog can abandon the reader.
+
 - New `retrieve_delta_spooled` + `RetrieveResponse::SpooledFile { spool, metadata, cache_hit }`.
 - Flow: acquire permit+spool → get_reference_to_file → spawn_blocking
   `decode_to_writer(ref, delta, tee(spool, sha256))` → **compare hash to

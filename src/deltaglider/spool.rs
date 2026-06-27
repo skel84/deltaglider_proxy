@@ -29,10 +29,20 @@ pub struct SpoolDir {
     max_bytes: u64,
 }
 
-/// A reserved spool file. Holds `reserved` bytes of budget until dropped.
+/// A spool's budget permit: either solely owned (single `acquire`) or shared
+/// across a pair (`acquire_pair`, so two files draw on ONE reservation). The
+/// budget is released when the last holder drops. The inner permits are RAII
+/// guards — never read, held purely so their Drop frees the semaphore.
+#[allow(dead_code)]
+enum SharedOrOwned {
+    Owned(OwnedSemaphorePermit),
+    Shared(std::sync::Arc<OwnedSemaphorePermit>),
+}
+
+/// A reserved spool file. Holds its share of the budget until dropped.
 pub struct Spool {
     file: NamedTempFile,
-    _permit: OwnedSemaphorePermit,
+    _permit: SharedOrOwned,
 }
 
 impl SpoolDir {
@@ -63,23 +73,55 @@ impl SpoolDir {
         self.max_bytes
     }
 
+    /// Reserve `bytes` of budget as a single weighted permit (clamped to the full
+    /// budget). Awaits on back-pressure.
+    async fn reserve(&self, bytes: u64) -> std::io::Result<OwnedSemaphorePermit> {
+        let max_mib = mib_ceil(self.max_bytes).max(1) as u32;
+        let want_mib = (mib_ceil(bytes).max(1) as u32).min(max_mib);
+        self.budget
+            .clone()
+            .acquire_many_owned(want_mib)
+            .await
+            .map_err(|_| std::io::Error::other("spool budget semaphore closed"))
+    }
+
     /// Reserve `bytes` of spool budget and create a temp file for it. Awaits if
     /// the budget is currently exhausted (back-pressure). A single request larger
     /// than the whole budget is clamped to the full budget (it runs alone).
     pub async fn acquire(&self, bytes: u64) -> std::io::Result<Spool> {
-        let max_mib = mib_ceil(self.max_bytes).max(1) as u32;
-        let want_mib = (mib_ceil(bytes).max(1) as u32).min(max_mib);
-        let permit = self
-            .budget
-            .clone()
-            .acquire_many_owned(want_mib)
-            .await
-            .map_err(|_| std::io::Error::other("spool budget semaphore closed"))?;
+        let permit = self.reserve(bytes).await?;
         let file = NamedTempFile::new_in(&self.dir)?;
         Ok(Spool {
             file,
-            _permit: permit,
+            _permit: SharedOrOwned::Owned(permit),
         })
+    }
+
+    /// Reserve budget for TWO spool files in ONE permit (sum clamped to the
+    /// budget), returning both. This is the deadlock-safe primitive for an op
+    /// that needs two spools at once (delta reconstruction needs ref + out): a
+    /// single reservation can't half-acquire and self-deadlock, and two
+    /// concurrent ops never hold one spool while waiting for the other (each
+    /// op's whole reservation is atomic). The shared permit drops when BOTH
+    /// returned `Spool`s drop.
+    pub async fn acquire_pair(
+        &self,
+        a_bytes: u64,
+        b_bytes: u64,
+    ) -> std::io::Result<(Spool, Spool)> {
+        let permit = std::sync::Arc::new(self.reserve(a_bytes.saturating_add(b_bytes)).await?);
+        let a = NamedTempFile::new_in(&self.dir)?;
+        let b = NamedTempFile::new_in(&self.dir)?;
+        Ok((
+            Spool {
+                file: a,
+                _permit: SharedOrOwned::Shared(permit.clone()),
+            },
+            Spool {
+                file: b,
+                _permit: SharedOrOwned::Shared(permit),
+            },
+        ))
     }
 }
 
@@ -170,5 +212,56 @@ mod tests {
         let pool = SpoolDir::new(tmp.path().to_path_buf(), 4 * 1024 * 1024).unwrap();
         let spool = pool.acquire(64 * 1024 * 1024).await.unwrap(); // > budget
         assert!(spool.path().exists());
+    }
+
+    #[tokio::test]
+    async fn acquire_pair_does_not_self_deadlock_on_large_object() {
+        // The x-ray blocker: two SEQUENTIAL acquire(file_size) of an object whose
+        // 2×size exceeds the budget self-deadlocked (first took the budget, second
+        // waited on budget the same task held). acquire_pair takes ONE combined
+        // (clamped) reservation, so it must complete for ANY size — here each half
+        // alone exceeds the 4 MiB budget.
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SpoolDir::new(tmp.path().to_path_buf(), 4 * 1024 * 1024).unwrap();
+        let fut = pool.acquire_pair(64 * 1024 * 1024, 64 * 1024 * 1024);
+        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(2), fut)
+            .await
+            .expect("acquire_pair must not deadlock on a large object")
+            .unwrap();
+        assert!(a.path().exists() && b.path().exists());
+        assert_ne!(a.path(), b.path(), "pair gets two distinct files");
+    }
+
+    #[tokio::test]
+    async fn acquire_pair_shares_one_reservation() {
+        // Both files of a pair draw on ONE permit; a second pair must wait until
+        // the first fully drops (budget = exactly one pair's worth).
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SpoolDir::new(tmp.path().to_path_buf(), 8 * 1024 * 1024).unwrap();
+        let (a, b) = pool
+            .acquire_pair(4 * 1024 * 1024, 4 * 1024 * 1024)
+            .await
+            .unwrap();
+
+        let pool2 = pool.clone();
+        let waiter = tokio::spawn(async move { pool2.acquire(8 * 1024 * 1024).await.map(|_| ()) });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !waiter.is_finished(),
+            "second op blocks until pair frees budget"
+        );
+
+        drop(a); // ONE of the pair drops — budget still held by the other
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !waiter.is_finished(),
+            "dropping one of the pair must NOT release the shared budget"
+        );
+        drop(b); // now the shared permit drops → budget freed
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter proceeds once the whole pair drops")
+            .unwrap()
+            .unwrap();
     }
 }
