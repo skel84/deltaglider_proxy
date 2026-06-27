@@ -92,7 +92,7 @@ reference = seekable temp file; delta output is small + capped).
   BEFORE writing the next chunk to xdelta3 (the spike overshot by one chunk
   because the cap check trailed the reader thread).
 
-### Phase 1 — Codec foundation (keystone; blocks 1,3,4,7)
+### Phase 1 — Codec foundation (keystone; blocks 1,3,4,7) — ✅ DONE (commit e959c7c)
 - 1a Stall-based watchdog: `DGP_CODEC_STALL_SECS` (~30s); pump bumps
   `AtomicU64 last_progress_nanos`; kill only on no-progress, never elapsed.
 - 1b Bounded pump replacing read_to_end: fixed-chunk reads on a dedicated OS
@@ -104,7 +104,7 @@ reference = seekable temp file; delta output is small + capped).
   reference temp + decode spool both draw from it (no ENOSPC). Gauges
   `spool_bytes_resident`/`_peak`.
 
-### Phase 2 — Storage: reference-to-file (blocks 10, enables 7)
+### Phase 2 — Storage: reference-to-file (blocks 10, enables 7) — ✅ DONE (commit b718284)
 - New trait method `get_reference_to_file(bucket, prefix, dest) -> u64` on
   StorageBackend (traits.rs:123). Default = get_reference + write. Filesystem
   override = hardlink/reflink (near-zero, the reference is already local!). S3
