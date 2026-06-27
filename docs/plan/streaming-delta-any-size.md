@@ -80,10 +80,17 @@ reference = seekable temp file; delta output is small + capped).
   forever while trickling output) — stall-timeout AND a generous hard cap.
   In the spool design xdelta3 writes to local disk (never the slow client), so
   it only stalls on a true hang or a full disk — both of which SHOULD kill.
-- **Spike C — streaming-encode ratio decision** (riskiest encode unknown). The
-  ratio gate needs the delta size, known only after xdelta3 finishes. Confirm
-  the "tee to passthrough spool" fallback works without buffering the target in
-  RAM. Resolve before Phase 4.
+- **Spike C — streaming-encode ratio decision. ✅ DONE — PASS** (riskiest encode
+  unknown). A Rust harness streamed a 1.5GB target chunk-by-chunk, tee'd to
+  (a) xdelta3 stdin (delta→capped spool) and (b) a passthrough spool, against a
+  1GB reference file. Results: SIMILAR target → 537MB delta under the 805MB cap →
+  **DELTA WINS**; DISSIMILAR target → delta hit the cap → `over_cap` detected →
+  **abort feed + fall to PASSTHROUGH from the spool**. **Peak RSS = 2MB in BOTH
+  cases** (bounded by chunk buffer, NOT the 1.5GB object). The "tee to passthrough
+  spool + cap-and-abort" design is validated — encode blockers 8/9/10/11 are
+  solvable with bounded memory. REFINEMENT for Phase 4: check the delta cap
+  BEFORE writing the next chunk to xdelta3 (the spike overshot by one chunk
+  because the cap check trailed the reader thread).
 
 ### Phase 1 — Codec foundation (keystone; blocks 1,3,4,7)
 - 1a Stall-based watchdog: `DGP_CODEC_STALL_SECS` (~30s); pump bumps
@@ -160,15 +167,20 @@ PARALLEL (retrieve.rs vs store.rs)}. Phase 5a anytime after P1; 5b last (after
   GET/PUT keeps decode-resident gauge bounded; assert `spool_bytes_peak > 0` AND
   `decode_resident_peak < bound` (the `>0` guard so it can't pass vacuously at 0).
 
-## Riskiest unknowns (gate on Phase 0)
-1. xdelta3 >2GB source window (Spike A) — may force a custom large-size-T build.
-2. Streaming-encode ratio decision (Spike C) — "tee to passthrough spool" doubles
-   transient disk for delta-eligible PUTs that lose the ratio gamble; fallback is
-   "always passthrough-spool first, encode from the seekable spool" (reads upload
-   twice, simpler). Decide via spike.
-3. Decode-to-spool TTFB (Spike B) — we trade true streaming TTFB for
-   decode-to-disk-then-stream. Sub-second TTFB on a 3GB delta GET is impossible
-   while keeping the pre-flight integrity gate.
+## Riskiest unknowns (gate on Phase 0) — ALL RESOLVED ✅
+1. xdelta3 >2GB source window (Spike A) — **RESOLVED: PASS.** Stock 3.0.11
+   byte-exact at 2.5GB, mmaps (73MB RSS). No custom build. Scope shrank.
+2. Streaming-encode ratio decision (Spike C) — **RESOLVED: PASS.** tee-to-
+   passthrough-spool + cap-and-abort validated; 2MB peak RSS on a 1.5GB target.
+   (The "passthrough-spool then encode" fallback is no longer needed — the
+   simultaneous tee works.)
+3. Decode-to-spool TTFB (Spike B) — **CHARACTERISED.** Decode throughput is high
+   (1.6GB/1.29s); stall-watchdog cleanly separable (13ms normal gap). We trade
+   true streaming TTFB for decode-to-disk-then-stream — sub-second TTFB on a
+   multi-GB delta GET is impossible while keeping the pre-flight integrity gate.
+   Accepted by design.
+
+**Phase 0 is COMPLETE — all three spikes green. Phase 1 can begin.**
 
 ## What genuinely CANNOT be fully solved (honest scope)
 - **True zero-latency streaming decode** — incompatible with pre-flight integrity
