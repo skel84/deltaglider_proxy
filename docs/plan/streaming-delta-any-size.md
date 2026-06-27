@@ -69,9 +69,17 @@ reference = seekable temp file; delta output is small + capped).
   **mmaps the source**, so source-as-seekable-file = bounded memory (validates
   the keystone). **NO custom XD3_USE_LARGESIZET build needed** — this sub-task
   and the `probe_largesize` are DELETED from scope. Stay on pinned 3.0.11.
-- **Spike B — decode-to-spool throughput + stall semantics.** Confirm a stalled
-  write (full disk) is distinguishable from normal slow progress (data the
-  stall-watchdog needs).
+- **Spike B — decode-to-spool throughput + stall semantics. ✅ DONE — PASS.**
+  Stock 3.0.11 decoding 1.6GB: 6,144 chunks / 1.29s, **largest normal
+  inter-chunk gap = 12.8ms** → a stall-timeout of even 1s has ~78× margin. A
+  blocked sink (full pipe) makes xdelta3 **block on write with ZERO stdout
+  progress** for the full stall window — cleanly distinguishable from normal
+  progress. The stall-watchdog (kill on no-stdout-progress for N seconds,
+  N >> 13ms) separates legit slow decode from a real hang. NOTE for Phase 1a:
+  keep an ABSOLUTE ceiling too (a crafted delta could make xdelta3 spin
+  forever while trickling output) — stall-timeout AND a generous hard cap.
+  In the spool design xdelta3 writes to local disk (never the slow client), so
+  it only stalls on a true hang or a full disk — both of which SHOULD kill.
 - **Spike C — streaming-encode ratio decision** (riskiest encode unknown). The
   ratio gate needs the delta size, known only after xdelta3 finishes. Confirm
   the "tee to passthrough spool" fallback works without buffering the target in
