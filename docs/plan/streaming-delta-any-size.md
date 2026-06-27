@@ -61,11 +61,14 @@ reference = seekable temp file; delta output is small + capped).
 ## Phases
 
 ### Phase 0 — Spikes (must land before any commitment)
-- **Spike A — xdelta3 >2GB source window.** Stock xdelta3 caps `-B` ~2GB without
-  `XD3_USE_LARGESIZET=1`. Prod = 3.0.11. Test a >2GB reference; if it
-  errors/corrupts, build a custom large-size-T xdelta3 (codec stays a
-  subprocess — only the binary build changes). Add a `probe_largesize` to the
-  boot probe (codec.rs:225/245) so the engine knows the source-window ceiling.
+- **Spike A — xdelta3 >2GB source window. ✅ DONE — PASS.** Tested stock
+  xdelta3 3.0.11 (prod's exact binary, in debian:bookworm) against a 2.5GB
+  source with a diff at byte 2.2GB (past the 2GB mark): encode rc=0, delta=9.3KB,
+  decode reconstructed 2.68GB **byte-exact** (SHA-256 match), zero window
+  warnings. Memory: decode peaked at **73MB RSS vs a 2.5GB source** — xdelta3
+  **mmaps the source**, so source-as-seekable-file = bounded memory (validates
+  the keystone). **NO custom XD3_USE_LARGESIZET build needed** — this sub-task
+  and the `probe_largesize` are DELETED from scope. Stay on pinned 3.0.11.
 - **Spike B — decode-to-spool throughput + stall semantics.** Confirm a stalled
   write (full disk) is distinguishable from normal slow progress (data the
   stall-watchdog needs).
