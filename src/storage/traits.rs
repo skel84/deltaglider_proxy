@@ -151,6 +151,22 @@ pub trait StorageBackend: Send + Sync {
         metadata: &FileMetadata,
     ) -> Result<(), StorageError>;
 
+    /// Store a reference whose data is on a local file, WITHOUT heap-loading it
+    /// (review M1.4: the streaming baseline path must not read a multi-GB first
+    /// member into RAM). Default reads the file then delegates to `put_reference`
+    /// (correct for any backend); the filesystem backend hardlinks and S3 streams
+    /// the upload from the file — mirrors `get_reference_to_file`.
+    async fn put_reference_from_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        source_path: &std::path::Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        let data = tokio::fs::read(source_path).await?;
+        self.put_reference(bucket, prefix, &data, metadata).await
+    }
+
     /// Store/update reference metadata without rewriting reference data.
     async fn put_reference_metadata(
         &self,

@@ -390,38 +390,40 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         let _guard = self.acquire_prefix_lock(&deltaspace_id).await;
         let has_existing_reference = self.storage.has_reference(bucket, &deltaspace_id).await;
 
-        // No reference yet → this object becomes the deltaspace baseline. Creating
-        // the baseline reads the object once into RAM (put_reference takes &[u8]);
-        // a streaming put_reference_from_file is a Phase-4.1 refinement. The
-        // object is then stored AS the reference (the reconstruction of the first
-        // member is the reference itself).
+        // No reference yet → this object becomes the deltaspace baseline. Stream
+        // the reference into place from the spool (put_reference_from_file: no
+        // heap-load — M1.4 fix). Then FALL THROUGH to the encode-against-reference
+        // path below: the first member self-deltas (tiny) against its own fresh
+        // reference, exactly like the buffered baseline branch.
         if !has_existing_reference {
-            let data = tokio::fs::read(body.path())
-                .await
-                .map_err(StorageError::from)?;
-            let ctx = StoreContext {
-                bucket,
-                obj_key: &obj_key,
-                deltaspace_id: &deltaspace_id,
-                data: &data,
-                sha256: sha256.clone(),
-                md5: md5.clone(),
-                content_type: content_type.clone(),
-                user_metadata: user_metadata.clone(),
-                multipart_etag: multipart_etag.clone(),
-            };
-            let ref_meta = self.set_reference_baseline(&ctx).await?;
-            // Store this first member as a (self) delta against the fresh
-            // reference — the buffered path's baseline branch does the same via
-            // encode_and_store; here the delta of identical bytes is tiny.
-            let result = self.encode_and_store(ctx, &ref_meta, false).await?;
-            drop(_guard);
-            self.metadata_cache
-                .insert(bucket, key, result.metadata.clone());
-            return Ok(result.with_accounting(prior_for_counter, 0));
+            let ref_meta = FileMetadata::new_reference(
+                Self::INTERNAL_REFERENCE_NAME.to_string(),
+                obj_key.full_key(),
+                sha256.clone(),
+                md5.clone(),
+                size,
+                content_type.clone(),
+            );
+            self.storage
+                .put_reference_from_file(bucket, &deltaspace_id, body.path(), &ref_meta)
+                .await?;
+            self.with_metrics(|m| {
+                m.delta_decisions_total
+                    .with_label_values(&["reference"])
+                    .inc()
+            });
+            // The streaming path doesn't pre-cache the reference bytes; next GET
+            // loads fresh.
+            self.cache
+                .invalidate(&Self::cache_key(bucket, &deltaspace_id));
+            // Fall through — the encode block below now sees has_existing_reference
+            // effectively true (the reference is on disk).
         }
 
-        // (3) Encode from the body spool against the reference, capped.
+        // (3) Encode from the body spool against the reference, capped. Reaches
+        // here both for an existing reference AND a freshly-created baseline
+        // (the first member self-deltas against its own reference).
+        let ratio_loss_keeps_reference = has_existing_reference;
         let ref_spool = self.spool.acquire(size).await.map_err(StorageError::from)?;
         self.storage
             .get_reference_to_file(bucket, &deltaspace_id, ref_spool.path())
@@ -498,10 +500,10 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
 
         match encode_res {
             None => {
-                // Ratio lost → passthrough from the body spool. Keep the existing
-                // reference (other objects in this deltaspace need it).
-                drop((ref_spool, delta_spool));
-                drop(_guard);
+                // Ratio lost → passthrough from the body spool.
+                // Drop the prefix lock FIRST — store_passthrough_file re-acquires
+                // it internally, so holding it here would re-entrant-deadlock.
+                drop((ref_spool, delta_spool, _guard));
                 let result = self
                     .store_passthrough_file_with_multipart_etag(
                         bucket,
@@ -513,6 +515,17 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
                         etag.clone(),
                     )
                     .await?;
+                // If WE just minted the reference for this PUT (fresh baseline)
+                // and the ratio lost, tear it down — no sibling delta needs it
+                // (parity with the buffered commit_delta_or_passthrough case 1).
+                // delete_reference is its own op; it doesn't need the prefix lock.
+                if !ratio_loss_keeps_reference {
+                    self.cache
+                        .invalidate(&Self::cache_key(bucket, &deltaspace_id));
+                    if let Err(e) = self.storage.delete_reference(bucket, &deltaspace_id).await {
+                        warn!("Failed to clean up fresh reference after ratio loss: {e}");
+                    }
+                }
                 self.metadata_cache
                     .insert(bucket, key, result.metadata.clone());
                 Ok(result.with_accounting(prior_for_counter, 0))

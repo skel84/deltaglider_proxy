@@ -1269,6 +1269,21 @@ impl StorageBackend for S3Backend {
         Ok(())
     }
 
+    async fn put_reference_from_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        source_path: &std::path::Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        // Stream the file body to S3 (ByteStream::from_path) — never heap-load it.
+        let key = self.reference_key(prefix);
+        self.put_object_file_with_metadata(bucket, &key, source_path, metadata)
+            .await?;
+        debug!("Stored reference from file for {}/{}", bucket, prefix);
+        Ok(())
+    }
+
     #[instrument(skip(self, metadata))]
     async fn put_reference_metadata(
         &self,

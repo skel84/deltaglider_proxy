@@ -417,6 +417,23 @@ impl StorageBackend for RoutingBackend {
         route_existing!(self, bucket, put_reference, prefix, data, metadata)
     }
 
+    async fn put_reference_from_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        source_path: &std::path::Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        route_existing!(
+            self,
+            bucket,
+            put_reference_from_file,
+            prefix,
+            source_path,
+            metadata
+        )
+    }
+
     async fn put_reference_metadata(
         &self,
         bucket: &str,

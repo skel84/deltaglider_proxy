@@ -833,6 +833,30 @@ impl StorageBackend for FilesystemBackend {
     }
 
     #[instrument(skip(self, metadata))]
+    async fn put_reference_from_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        source_path: &Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        self.require_bucket_exists(bucket).await?;
+        let dest = self.reference_path(bucket, prefix);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        // Hardlink the source into place (O(1), no heap load); copy across fs
+        // boundaries. dest must not pre-exist for hard_link.
+        let _ = fs::remove_file(&dest).await;
+        match fs::hard_link(source_path, &dest).await {
+            Ok(()) => {}
+            Err(_) => {
+                fs::copy(source_path, &dest).await?;
+            }
+        }
+        xattr_meta::write_metadata(&dest, metadata).await
+    }
+
     async fn put_reference_metadata(
         &self,
         bucket: &str,
