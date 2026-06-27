@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.5.4 — 2026-06-27
+
 ### Changed
 
 - **Jobs UI polish.** Run/failure tables now show relative times ("3h ago")
