@@ -69,9 +69,10 @@ HTTP request (axum Router; cross-cutting layers: TraceLayer, body limit, timeout
       status.rs              /_/health, /_/stats
   → deltaglider/engine/      Orchestration split into submodules:
       mod.rs                 Core engine: route, compress, cache, metadata resolution, RetrieveResponse, validated_key
-      store.rs               PUT pipeline: delta encoding, migration, reference management
-      retrieve.rs            GET pipeline: delta reconstruction, streaming, range requests
-  → storage/traits.rs       StorageBackend trait (async_trait, object-safe)
+      store.rs               PUT pipeline: delta encoding, migration, reference management; `store_spooled_delta` (streaming PUT for objects > spool threshold)
+      retrieve.rs            GET pipeline: delta reconstruction, streaming, range requests; `reconstruct_delta_to_spool` (streaming GET)
+  → deltaglider/spool.rs    Quota'd temp space for streaming codec ops (SpoolDir byte-budget semaphore; `acquire_pair` for the deadlock-safe ref+out reservation; age-based startup orphan sweep). DGP_SPOOL_DIR/`_MAX_BYTES`/`_THRESHOLD_BYTES`/`_ACQUIRE_TIMEOUT_SECS`.
+  → storage/traits.rs       StorageBackend trait (async_trait, object-safe). `get_reference_to_file`/`put_reference_from_file` materialise the reference to/from a local file WITHOUT heap-loading it (filesystem hardlinks, S3 streams) — the bounded-memory backbone of the streaming-delta paths.
   → storage/filesystem.rs   Local filesystem impl (xattr metadata via xattr_meta.rs, list_objects_delegated)
   → storage/s3.rs           AWS S3/MinIO impl (S3 user metadata headers, S3Op enum, `classify_s3_error` + `classify_get_error` pure fns with unit-test coverage)
   → storage/encrypting.rs   At-rest encryption wrapper backend (per-backend AES key, dg-encryption-key-id metadata)
@@ -251,3 +252,7 @@ Anti-patterns we've fought recently — don't reintroduce them:
 ## Architecture Decisions (DO NOT CHANGE)
 
 - **xdelta3 CLI subprocess**: The codec shells out to `xdelta3` via `std::process::Command`. This is intentional and non-negotiable. Do NOT replace with FFI bindings, Rust crates, or in-process libraries. The CLI approach ensures exact compatibility with deltas created by the original DeltaGlider Python toolchain, avoids linking C code into the binary, and keeps the codec trivially debuggable (`xdelta3` can be run standalone on any delta file). The subprocess overhead is acceptable for our workload.
+
+- **Streaming codec (bounded memory for any object size)**: alongside the buffered `encode`/`decode` (`&[u8] → Vec<u8>`, small-object path), the codec has streaming entry points `encode_from_reader` / `decode_to_writer` (source = caller-owned seekable file, input streamed via stdin, output to a `Write` sink). Driven by `pipe_streaming` (bounded 256KiB chunks, not `read_to_end`) with a STALL-based watchdog (`ProgressClock` — kill on no-progress for `DGP_CODEC_STALL_SECS`, plus an absolute ceiling), NOT the buffered path's wall-clock timeout. Large delta GETs decode to a spool file then stream it (integrity verified BEFORE the first byte); large PUTs encode from a spool with cap-and-abort ratio decision. Memory is bounded by the pump (xdelta3 mmaps the source — measured 73MB RSS on a 2.5GB decode), never the object size. See `docs/plan/streaming-delta-any-size.md`.
+
+  **Streaming-subprocess review checklist** (these are the failure modes an adversarial x-ray of this code found — check them on any change here): (1) STALL watchdog must tick on BOTH stdin writes and stdout reads (a sparse-output encode false-stalls otherwise); (2) spool reservations that need two files at once use `acquire_pair` (two sequential `acquire`s deadlock when 2×size > budget); (3) any path that holds the per-deltaspace prefix lock must DROP it before calling another `store_*` method that re-acquires it (re-entrant deadlock); (4) streaming output must be CAPPED at the expected size (the buffered path's decompression-bomb guard); (5) the SHA-256 integrity gate must run BEFORE the first response byte ships (decode-to-spool, not pipe-to-client); (6) every `?`/early-return must release the spool budget + codec permit (RAII `Spool`/permit drop covers this — keep it).
