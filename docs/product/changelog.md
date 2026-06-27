@@ -8,7 +8,28 @@ Every released version of DeltaGlider Proxy, newest first. Versions
 follow [semantic versioning](https://semver.org/); the Docker image
 `beshultd/deltaglider_proxy:<version>` is published for each tag.
 
-_Last updated: 2026-06-26_
+_Last updated: 2026-06-27_
+
+## v1.5.4 — 2026-06-27
+
+### Changed
+
+- **Jobs UI polish.** Run/failure tables now show relative times ("3h ago")
+  with the full timestamp on hover. The Runs table replaces the
+  scanned/copied/skipped/errors number columns with a single proportional
+  progress bar (green = copied, red = errors, blank = skipped/already-in-sync;
+  the copied count is overlaid, full breakdown on hover) and a clock icon for
+  scheduler-triggered runs — freeing horizontal space. Resuming or running a
+  rule now immediately refreshes its runs + failures tables so the new run
+  shows without reopening the drawer.
+
+### Fixed
+
+- **Clearer "scanned vs processed" reporting.** A run showing `scanned=600,
+  processed=0` previously hid the skipped count, making it look stalled when in
+  fact all 600 objects were already in sync (nothing to copy). The skipped
+  count is now surfaced (in the progress bar + on hover), so an incremental
+  run's "nothing to do" outcome is transparent.
 
 ## v1.5.3 — 2026-06-26
 
