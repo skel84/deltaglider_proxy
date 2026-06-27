@@ -851,17 +851,43 @@ pub async fn handle_form_post_upload(
     // expiration window (hours to days).
     enforce_form_post_replay(state, &parsed)?;
     check_quota(state, bucket, parsed.file_data.len() as u64)?;
-    let result = state
-        .engine
-        .load()
-        .store(
-            bucket,
-            &parsed.resolved_key,
-            &parsed.file_data,
-            parsed.content_type.clone(),
-            parsed.user_metadata.clone(),
-        )
-        .await?;
+    let engine = state.engine.load();
+    let size = parsed.file_data.len() as u64;
+    // Large delta-eligible POST uploads: route through the streaming spool store
+    // (Phase 4) so the delta encode runs with bounded memory — same path the s3s
+    // PUT uses. (Like PUT, the body is already collected here for parsing; full
+    // streaming intake is Phase 4.1.)
+    let result = if size > engine.spool_store_threshold()
+        && engine.is_delta_eligible_key(&parsed.resolved_key)
+    {
+        let spool = engine.spool_acquire(size).await?;
+        tokio::fs::write(spool.path(), &parsed.file_data)
+            .await
+            .map_err(|e| {
+                crate::deltaglider::EngineError::Storage(crate::storage::StorageError::from(e))
+            })?;
+        engine
+            .store_spooled_delta(
+                bucket,
+                &parsed.resolved_key,
+                &spool,
+                size,
+                parsed.content_type.clone(),
+                parsed.user_metadata.clone(),
+                None,
+            )
+            .await?
+    } else {
+        engine
+            .store(
+                bucket,
+                &parsed.resolved_key,
+                &parsed.file_data,
+                parsed.content_type.clone(),
+                parsed.user_metadata.clone(),
+            )
+            .await?
+    };
     let storage_type = result.metadata.storage_info.label();
     enqueue_object_event(
         state,

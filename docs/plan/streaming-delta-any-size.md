@@ -140,15 +140,19 @@ from the body spool. First member creates the baseline. Wired into the s3s
 adapter PUT for delta-eligible objects > spool threshold. Tested through the S3
 API (test_streaming_spool_store_put: delta + passthrough-fallback, byte-exact).
 
-**Phase 4.1 (tracked, not yet done):** the body is still COLLECTED in the adapter
-(SigV4 payload-hash verification needs it) then spooled — so ingest isn't yet
-bounded-memory end-to-end. Closing it needs SigV4 streaming-payload support
-(stream body → spool while hashing, before verify). Also: baseline creation
-reads the first member into RAM (put_reference takes &[u8]) — needs a
-put_reference_from_file; and transfer.rs/CopyObject still use buffering
-retrieve() (now unblocked — can switch to retrieve_stream → store_spooled_delta).
-Encode-side stall-tick (watchdog ticks only on stdout; big-input/sparse-output
-encode could false-stall) — still TODO.
+**Phase 4.1 — ALL INGEST PATHS routed (partial done):**
+- ✅ s3s PUT (put_object) → store_spooled_delta for delta-eligible > threshold.
+- ✅ POST form-data upload (form_post.rs) → same routing (separate ingest path —
+  the user flagged it). Tested: test_form_post_upload_routes_through_spool_store.
+- ✅ COPY / REPLICATION (transfer.rs spooled_copy): large sources stream via
+  retrieve_stream → spool → store_spooled_delta, closing the x-ray retrieve()→
+  store() re-buffer OOM. Replication + streaming-copy suites green.
+- ⏳ STILL the last mile: PUT/POST bodies are COLLECTED for SigV4 payload-hash
+  verification, THEN spooled — so intake isn't bounded-memory end-to-end yet.
+  Needs SigV4 streaming-payload support (stream → spool while hashing, before
+  verify). Baseline creation still reads the first member to RAM (needs
+  put_reference_from_file). Encode-side stall-tick (watchdog ticks only on
+  stdout) — TODO.
 
 #### Original Phase 4 design notes
 - 4a `store_streaming(bucket, key, body: Stream<Bytes>, declared_len, …)`:

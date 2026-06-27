@@ -2362,6 +2362,83 @@ async fn test_form_post_upload_succeeds_with_presigned_policy() {
     assert_eq!(body.as_ref(), b"hello-form-post");
 }
 
+/// A delta-eligible POST (form-data) upload routed through the Phase-4.1 streaming
+/// spool store (`DGP_SPOOL_THRESHOLD_BYTES=1`) must store + round-trip byte-exact.
+/// POST is a separate ingest path from the s3s PUT — this guards that the spool
+/// store is wired there too.
+#[tokio::test]
+async fn test_form_post_upload_routes_through_spool_store() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .env("DGP_SPOOL_THRESHOLD_BYTES", "1")
+        .build()
+        .await;
+    let client = reqwest::Client::new();
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+    let key = "post/rel/app.zip";
+    let amz_date = "20260507T120000Z";
+    let credential = "POSTACCESSKEY/20260507/us-east-1/s3/aws4_request";
+    let policy = serde_json::json!({
+        "expiration": "2099-01-01T00:00:00.000Z",
+        "conditions": [
+            { "bucket": bucket },
+            ["starts-with", "$key", "post/rel/"],
+            { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+            { "x-amz-credential": credential },
+            { "x-amz-date": amz_date },
+            ["content-length-range", 1, 10485760]
+        ]
+    });
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy.to_string());
+    let signing_key = derive_post_signing_key("POSTSECRETKEY123", "20260507", "us-east-1");
+    let signature = hex::encode(hmac_sha256(&signing_key, policy_b64.as_bytes()));
+
+    // A delta-eligible .zip body (>1 byte threshold → spool store path).
+    let payload: Vec<u8> = (0..120_000u32).flat_map(|n| n.to_le_bytes()).collect();
+    let form = reqwest::multipart::Form::new()
+        .text("key", key)
+        .text("policy", policy_b64)
+        .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+        .text("x-amz-credential", credential)
+        .text("x-amz-date", amz_date)
+        .text("x-amz-signature", signature)
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(payload.clone())
+                .file_name("app.zip")
+                .mime_str("application/zip")
+                .unwrap(),
+        );
+    let resp = client
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "spooled POST upload should return 204, got {}",
+        resp.status()
+    );
+
+    let s3 = server.s3_client().await;
+    let got = s3
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .expect("GET uploaded object");
+    let body = got.body.collect().await.expect("collect body").into_bytes();
+    assert_eq!(
+        body.as_ref(),
+        &payload[..],
+        "spooled POST upload must round-trip byte-exact"
+    );
+}
+
 #[tokio::test]
 async fn test_form_post_upload_rejects_invalid_signature() {
     let server = TestServer::builder()

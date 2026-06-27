@@ -209,6 +209,17 @@ async fn copy_object_once(
         }
     }
 
+    // Large objects: stream the source reconstruction to a spool file and store
+    // from the spool — bounded memory end-to-end (no full-object Vec for copy/
+    // replication). The x-ray flagged retrieve()→store() as a hidden OOM for big
+    // deltas; this closes it now that the store side streams (Phase 4).
+    let source_size = source_head.file_size;
+    if source_size > engine.spool_store_threshold() {
+        if let Some(outcome) = spooled_copy(engine, &request, &source_head, source_size).await? {
+            return Ok(outcome);
+        }
+    }
+
     let (data, meta) = engine
         .retrieve(request.source_bucket, request.source_key)
         .await
@@ -917,6 +928,83 @@ async fn delta_passthrough_copy(
         source_storage_label: "delta",
         source_file_size: source_head.file_size,
         bytes_egress_saved,
+    }))
+}
+
+/// Bounded-memory copy for large objects (Phase 4.1): stream the source
+/// reconstruction to a spool file, then store from the spool via
+/// `store_spooled_delta`. Closes the retrieve()→store() full-RAM re-buffer the
+/// x-ray flagged for copy/replication of big deltas. Returns `None` to fall back
+/// to the buffered path when the source can't be streamed to a spool here.
+async fn spooled_copy(
+    engine: &Arc<DynEngine>,
+    request: &ObjectTransferRequest<'_>,
+    source_head: &crate::types::FileMetadata,
+    source_size: u64,
+) -> Result<Option<ObjectTransferOutcome>, Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::AsyncWriteExt;
+
+    // Stream the (reconstructed) source to a spool file — bounded memory.
+    let resp = engine
+        .retrieve_stream(request.source_bucket, request.source_key)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("source retrieve_stream failed: {e}").into()
+        })?;
+    let (mut stream, meta) = match resp {
+        crate::deltaglider::RetrieveResponse::Streamed {
+            stream, metadata, ..
+        } => (stream, metadata),
+        // Buffered (small) source — let the caller's buffered path handle it.
+        crate::deltaglider::RetrieveResponse::Buffered { .. } => return Ok(None),
+    };
+
+    let spool = engine.spool_acquire(source_size).await?;
+    {
+        let mut file = tokio::fs::File::create(spool.path()).await?;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("source stream error: {e}").into()
+            })?;
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+    }
+
+    let content_type = meta.content_type.clone();
+    let mut user_metadata = meta.user_metadata.clone();
+    if let Some(provenance) = request.provenance {
+        user_metadata.insert(
+            provenance.metadata_key.to_string(),
+            provenance.metadata_value.to_string(),
+        );
+    }
+    for key in request.strip_user_metadata_keys {
+        user_metadata.remove(*key);
+    }
+
+    engine
+        .store_spooled_delta(
+            request.destination_bucket,
+            request.destination_key,
+            &spool,
+            source_size,
+            content_type,
+            user_metadata,
+            meta.multipart_etag.clone(),
+        )
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("destination spooled store failed: {e}").into()
+        })?;
+
+    let label = source_head.storage_info.label();
+    Ok(Some(ObjectTransferOutcome {
+        bytes_copied: source_size as usize,
+        strategy: CopyStrategy::Reconstructed,
+        source_storage_label: label,
+        source_file_size: source_size,
+        bytes_egress_saved: 0,
     }))
 }
 
