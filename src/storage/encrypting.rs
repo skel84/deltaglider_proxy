@@ -1196,6 +1196,13 @@ impl<B: StorageBackend + Send + Sync> StorageBackend for EncryptingBackend<B> {
         self.decrypt_if_needed(data, &meta)
     }
 
+    // NOTE: get_reference_to_file deliberately uses the trait DEFAULT (get_reference
+    // + write) here. AES-GCM decryption is a whole-buffer operation in the current
+    // design, so a streaming hardlink/stream-to-file would hand xdelta3 ciphertext.
+    // The default decrypts to RAM then writes plaintext to the spool — correct, but
+    // bounded by reference size for encrypted backends. Streaming decryption is a
+    // separate future optimisation (chunked GCM / per-block nonce).
+
     async fn get_delta(
         &self,
         bucket: &str,

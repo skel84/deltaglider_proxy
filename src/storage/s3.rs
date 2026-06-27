@@ -1306,6 +1306,41 @@ impl StorageBackend for S3Backend {
         self.get_object(bucket, &key).await
     }
 
+    async fn get_reference_to_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        dest: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        use tokio::io::AsyncWriteExt;
+        let key = self.reference_key(prefix);
+        // Stream the GET body straight to the dest file — never collect the
+        // (possibly multi-GB) reference into a Vec (blocker 10).
+        let response = self
+            .client
+            .get_object()
+            .bucket(bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|e| Self::classify_get_error(bucket, &key, &e))?;
+
+        let mut stream = Self::s3_body_to_stream(response.body);
+        let mut file = tokio::fs::File::create(dest).await?;
+        let mut written: u64 = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk).await?;
+            written += chunk.len() as u64;
+        }
+        file.flush().await?;
+        debug!(
+            "S3 GET reference→file {}/{} ({} bytes)",
+            bucket, key, written
+        );
+        Ok(written)
+    }
+
     #[instrument(skip(self))]
     async fn get_reference_metadata(
         &self,

@@ -396,6 +396,17 @@ impl StorageBackend for RoutingBackend {
         route_existing!(self, bucket, get_reference, prefix)
     }
 
+    async fn get_reference_to_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        dest: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        // Delegate to the routed backend's streaming impl (filesystem hardlink /
+        // S3 stream-to-file) rather than the buffering default.
+        route_existing!(self, bucket, get_reference_to_file, prefix, dest)
+    }
+
     async fn put_reference(
         &self,
         bucket: &str,

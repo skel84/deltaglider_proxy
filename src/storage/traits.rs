@@ -122,6 +122,26 @@ pub trait StorageBackend: Send + Sync {
     /// Get the reference file for a deltaspace
     async fn get_reference(&self, bucket: &str, prefix: &str) -> Result<Vec<u8>, StorageError>;
 
+    /// Materialise the reference file at `dest` as a seekable local file, WITHOUT
+    /// heap-loading it — the streaming codec (`encode_from_reader` /
+    /// `decode_to_writer`) needs the reference as a file xdelta3 can mmap, and a
+    /// multi-GB reference must never be buffered in RAM (adversarial blocker 10).
+    ///
+    /// Returns the number of bytes written. The default impl falls back to
+    /// `get_reference` + write (fine for small references / backends that don't
+    /// override); the filesystem backend hardlinks (near-zero) and the S3 backend
+    /// streams the GET body to the file.
+    async fn get_reference_to_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        dest: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        let data = self.get_reference(bucket, prefix).await?;
+        tokio::fs::write(dest, &data).await?;
+        Ok(data.len() as u64)
+    }
+
     /// Store a reference file with its metadata
     async fn put_reference(
         &self,
