@@ -2134,6 +2134,62 @@ mod tests {
     }
 
     #[test]
+    fn parse_copy_range_truth_table() {
+        use s3s::S3ErrorCode::{InvalidArgument, InvalidRange};
+        // Valid inclusive ranges.
+        assert_eq!(parse_copy_range("bytes=0-9", 10).unwrap(), (0, 9));
+        assert_eq!(parse_copy_range("bytes=0-0", 10).unwrap(), (0, 0)); // single byte
+        assert_eq!(parse_copy_range("bytes=3-7", 10).unwrap(), (3, 7));
+        assert_eq!(parse_copy_range("bytes=9-9", 10).unwrap(), (9, 9)); // last byte
+                                                                        // Out-of-bounds → InvalidRange.
+        assert_eq!(
+            parse_copy_range("bytes=5-3", 10).unwrap_err().code(),
+            &InvalidRange // start > end
+        );
+        assert_eq!(
+            parse_copy_range("bytes=0-10", 10).unwrap_err().code(),
+            &InvalidRange // end == len (end >= len)
+        );
+        assert_eq!(
+            parse_copy_range("bytes=0-0", 0).unwrap_err().code(),
+            &InvalidRange // empty object: end >= len for any range
+        );
+        // Malformed → InvalidArgument.
+        for bad in [
+            "0-9",
+            "bytes=",
+            "bytes=5",
+            "bytes=a-9",
+            "bytes=0-b",
+            "bytes=-",
+        ] {
+            assert_eq!(
+                parse_copy_range(bad, 10).unwrap_err().code(),
+                &InvalidArgument,
+                "expected InvalidArgument for {bad:?}"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn parse_copy_range_accepts_iff_in_bounds(
+            start in 0usize..200, end in 0usize..200, len in 0usize..200,
+        ) {
+            let header = format!("bytes={start}-{end}");
+            let r = parse_copy_range(&header, len);
+            if start <= end && end < len {
+                proptest::prop_assert_eq!(r.unwrap(), (start, end));
+            } else {
+                // start > end OR end >= len → always InvalidRange (never Ok).
+                let is_range_err =
+                    matches!(r.as_ref().map_err(|e| e.code()), Err(&s3s::S3ErrorCode::InvalidRange));
+                proptest::prop_assert!(is_range_err, "expected InvalidRange, got {:?}", r);
+            }
+        }
+    }
+
+    #[test]
     fn signed_payload_hash_validation_detects_mismatch() {
         use sha2::Digest as _;
         let good = hex::encode(sha2::Sha256::digest(b"abc"));
