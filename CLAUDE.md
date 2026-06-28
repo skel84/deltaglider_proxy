@@ -187,6 +187,48 @@ IAM users have ABAC permissions: `{ actions: ["read", "write", "delete", "list",
 
 Key files: `src/iam/` (types, permissions, middleware, keygen, declarative reconciler, `external_auth/` OAuth/OIDC; `bump_iam_version`/`current_iam_version` + `GET /_/api/admin/iam/version` power the deterministic rebuild barrier used by tests), `src/config_db/` (SQLCipher CRUD split into users/groups/auth_providers/declarative + `classify_sqlite_error` in mod.rs), `src/config_db_sync.rs` (S3 sync + `reopen_and_rebuild_iam`), `src/api/admin/` (auth, users CRUD, config, groups, external_auth, backup, scanner, audit, plus replication / lifecycle / event_outbox / backends / savings panels; `with_config_db()` in `mod.rs` wraps the "lock DB → run closure → log-and-500" boilerplate; `external_auth.rs` hosts `validate_mapping_rule` + the `EXT_AUTH_VERSION` counter), `src/api/admin/config/{document_level,field_level,section_level,password,trace}.rs` (section-level uses RFC 7396 merge-patch; `mod.rs` hosts `POST /api/admin/config/sync-now` — operator affordance for forcing an immediate pull from the sync bucket).
 
+## Multi-instance / HA contract (READ before deploying behind a load balancer)
+
+DGP is **single-instance production-ready**. Behind a load balancer it is
+**multi-instance for SOME planes only** — do NOT assume true round-robin HA. Run
+N instances behind a **sticky-session** LB, not naive round-robin, until the
+single-instance planes below are addressed.
+
+**Shared across instances (genuinely HA):**
+- IAM / OAuth providers / mapping rules — the encrypted SQLCipher DB synced via
+  `DGP_CONFIG_SYNC_BUCKET` (ETag-poll every 5 min → eventually consistent, ≤5min lag).
+- Background-job leadership — replication/lifecycle/maintenance/parity leases via
+  `config_db/job_store.rs` (so jobs don't double-run **once the lease row is
+  visible**; note the same 5-min sync lag applies to lease visibility).
+
+**Instance-LOCAL (NOT shared — break or degrade under non-sticky round-robin):**
+- **Admin/browser sessions** (`session.rs`, in-memory) — a cookie minted on node A
+  is invalid on B (intermittent 401s). Sticky sessions required for the admin GUI.
+- **Multipart uploads** (`multipart.rs`, in-memory) — UploadPart/Complete must hit
+  the SAME node as CreateMultipartUpload (else `NoSuchUpload`; the error message
+  now says so). Sticky-route multipart.
+- **Metadata cache** (`metadata_cache.rs`, 10-min TTL, local invalidate) — a
+  DELETE/PUT on A leaves B serving stale existence/size for up to 10 min.
+- **Rate limiter** (`rate_limiter.rs`, per-instance) — effective limit is N× the
+  configured cap across N nodes.
+- **Maintenance write-gate busy-set**, **delta-reference RMW lock**
+  (`engine/mod.rs` `prefix_locks`, in-process) — concurrent same-prefix PUTs on
+  two nodes can corrupt `reference.bin`. Single-writer per deltaspace assumed.
+
+**Hard prerequisites for any multi-instance deployment:**
+- **All instances MUST share the same `DGP_BOOTSTRAP_PASSWORD_HASH`** — it
+  encrypts the synced SQLCipher DB; a mismatch makes the synced DB unreadable on
+  the other node (`config_db_mismatch` then locks the S3 API + blocks sync).
+- The **filesystem** storage backend is per-node local disk — NOT shareable across
+  instances. Multi-instance needs a shared backend (S3/MinIO) or per-node buckets.
+- Config-apply on one instance does NOT propagate to others except via the IAM/DB
+  sync; YAML config itself is per-instance.
+
+See `docs/plan/architecture-ha-audit-2026-06-28.md` for the full analysis and the
+roadmap (audit Tiers A→C) toward true round-robin HA. `/_/health` is liveness-only
+(fast, no I/O); `/_/ready` does a real backend + config-DB probe (503 when not
+ready) — point LB readiness checks at `/_/ready`.
+
 ## Frontend (demo/s3-browser/ui)
 
 React 18 + TypeScript + Ant Design 6 + Recharts. Path-based routing (`/_/browse`, `/_/upload`, `/_/metrics`, `/_/docs/configuration`, `/_/admin/users`). Custom `usePathRouter` hook (no react-router dependency). `NavigationContext` provides `navigate()` and `subPath` to child components. Embedded in the Rust binary via `rust-embed` and served under `/_/` on the same port as the S3 API (e.g., `http://localhost:9000/_/`). The `/_/` prefix is safe because `_` is not a valid S3 bucket name character. Single-port architecture: no separate UI port.
