@@ -720,7 +720,8 @@ const MAX_FORM_POST_REPLAY_TTL_SECS: u64 = 24 * 60 * 60;
 #[derive(Clone, Copy, Debug)]
 pub struct ReplayEntry {
     pub expiry: std::time::Instant,
-    pub fingerprint: u64,
+    // The file fingerprint is encoded in the cache KEY (`{sig}:{fp}`), not stored
+    // here — the entry only needs its expiry for TTL eviction.
 }
 
 /// Stable fingerprint of the (resolved key, body) a form-POST writes.
@@ -824,14 +825,7 @@ fn enforce_form_post_replay(state: &Arc<AppState>, parsed: &ParsedFormPost) -> R
     let ttl = form_post_replay_ttl(policy_b64, now);
     let new_expiry = now_instant + ttl;
     let fingerprint = form_post_fingerprint(&parsed.resolved_key, &parsed.file_data);
-
-    if !form_post_replay_check(cache, &key, fingerprint, new_expiry, now_instant) {
-        tracing::warn!(
-            "SECURITY | event=form_post_replay_blocked | sig_prefix={}",
-            &key[..key.len().min(8)]
-        );
-        return Err(S3Error::SignatureDoesNotMatch);
-    }
+    form_post_replay_record(cache, &key, fingerprint, new_expiry);
     Ok(())
 }
 
@@ -842,41 +836,33 @@ fn form_post_replay_cache_key(sig: &str, fingerprint: u64) -> String {
     format!("{sig}:{fingerprint:016x}")
 }
 
-/// Record a form-POST attempt and decide whether it may proceed. Always returns
-/// `true` (allow) — the cache is now an idempotency/observability ledger, not a
-/// gate. Factored out + kept for the unit tests that pin the behaviour.
+/// Record a form-POST attempt in the idempotency/observability ledger. There is
+/// no reject path: the ledger is keyed on `(signature, fingerprint)`, so a true
+/// replay (same sig + same body) just refreshes its entry, and a different file
+/// under the same signature (the AWS-intended `starts-with $key` batch pattern —
+/// the ROR CI uploads .zip/.sha512/.sha1 under one signature) is a distinct
+/// entry, NOT a rejection.
 ///
-/// History: the guard used to key ONLY on the signature and block any reuse of a
-/// live signature with a DIFFERENT `(key, body)` fingerprint, on the theory that
-/// a captured signature rewriting a different object is an attack. But presigned
-/// POST policies with `starts-with $key` are explicitly designed for BATCH
-/// uploads under one signature (the ROR CI signs once, then uploads the zip, the
-/// sha512, and the sha1), so that "different fingerprint" was the LEGITIMATE
-/// case — and the guard 403'd it (SignatureDoesNotMatch) intermittently when two
-/// files landed in the same signing second. The policy's own conditions
-/// (`starts-with $key`, `content-length-range`, `expiration`) are the real bound
-/// on what a captured signature can write; the replay guard cannot add to that
-/// without breaking the AWS-intended batch pattern. We now key on
-/// `(sig, fingerprint)` so each distinct upload gets its own ledger entry: an
-/// EXACT resend (same sig, same key, same body) is an idempotent overwrite with
-/// identical bytes (harmless), and a different body is a different,
-/// policy-conforming object.
-fn form_post_replay_check(
+/// History: the guard used to key ONLY on the signature and 403 any reuse with a
+/// DIFFERENT `(key, body)` fingerprint, on the theory that a captured signature
+/// rewriting a different object is an attack. But two files of the SAME SIZE
+/// (every `.sha1` is 41 bytes, every `.sha512` is 129) signed in the same second
+/// get a byte-identical signature, so that "different fingerprint" was the
+/// LEGITIMATE batch case — and it 403'd intermittently. The policy's own
+/// conditions (`starts-with $key`, `content-length-range`, `expiration`) are
+/// re-validated on every request and are the real bound on a captured signature;
+/// the replay guard couldn't add to that without breaking the batch pattern.
+fn form_post_replay_record(
     cache: &dashmap::DashMap<String, ReplayEntry>,
     key: &str,
     fingerprint: u64,
     new_expiry: std::time::Instant,
-    _now_instant: std::time::Instant,
-) -> bool {
+) {
     let cache_key = form_post_replay_cache_key(key, fingerprint);
     cache
         .entry(cache_key)
         .and_modify(|existing| existing.expiry = new_expiry)
-        .or_insert(ReplayEntry {
-            expiry: new_expiry,
-            fingerprint,
-        });
-    true
+        .or_insert(ReplayEntry { expiry: new_expiry });
 }
 
 /// Run the full presigned-form-POST pipeline.
@@ -1158,7 +1144,6 @@ mod tests {
             key.clone(),
             ReplayEntry {
                 expiry: now + std::time::Duration::from_secs(600),
-                fingerprint: 1,
             },
         );
         // A freshly-inserted entry within its TTL must read as live (the
@@ -1183,34 +1168,30 @@ mod tests {
         let now = Instant::now();
         let exp = now + Duration::from_secs(3600);
 
-        let fp_zip = form_post_fingerprint("ror/builds/1.71/x.zip", b"ZIPBYTES");
-        let fp_512 = form_post_fingerprint("ror/builds/1.71/x.zip.sha512", b"sha512hash\n");
-        let fp_1 = form_post_fingerprint("ror/builds/1.71/x.zip.sha1", b"sha1hash\n");
+        // Two SAME-SIZE files (e.g. two .sha1, both 41 bytes) under one signing
+        // second get a byte-identical signature `sig` — the exact 403 trigger.
+        // Different bodies → different fingerprints → distinct ledger keys.
+        let fp_a = form_post_fingerprint("ror/builds/1.71/a.zip.sha1", b"aaaaaaaa\n");
+        let fp_b = form_post_fingerprint("ror/builds/1.71/b.zip.sha1", b"bbbbbbbb\n");
+        let fp_c = form_post_fingerprint("ror/builds/1.71/x.zip.sha512", b"sha512hash\n");
 
-        // A batch of 3 distinct files under ONE signature — all allowed (was the
-        // 403 bug: the 2nd/3rd file tripped "different fingerprint → block").
-        assert!(
-            form_post_replay_check(&cache, sig, fp_zip, exp, now),
-            ".zip"
-        );
-        assert!(
-            form_post_replay_check(&cache, sig, fp_512, exp, now),
-            ".sha512 under same sig must be allowed (batch)"
-        );
-        assert!(
-            form_post_replay_check(&cache, sig, fp_1, exp, now),
-            ".sha1 under same sig must be allowed (batch)"
-        );
+        // A batch of 3 distinct files under ONE signature — the ledger records
+        // each without rejecting (the old guard 403'd the 2nd/3rd).
+        form_post_replay_record(&cache, sig, fp_a, exp);
+        form_post_replay_record(&cache, sig, fp_b, exp);
+        form_post_replay_record(&cache, sig, fp_c, exp);
+        // Exact resend (CI retry) refreshes its entry, does not add one.
+        form_post_replay_record(&cache, sig, fp_c, exp);
 
-        // Exact resend of any one of them (CI retry / workflow re-run) stays
-        // allowed — idempotent overwrite with identical bytes.
-        assert!(
-            form_post_replay_check(&cache, sig, fp_512, exp, now),
-            "idempotent resend of the same object must be allowed"
-        );
-
-        // Each distinct (sig, body) is its own entry — three files = three keys.
+        // Each distinct (sig, body) is its own entry — three files = three keys
+        // (NOT one key with rejections). This is the property that fixes the 403.
         assert_eq!(cache.len(), 3, "one ledger entry per distinct (sig, body)");
+        assert!(
+            cache.contains_key(&form_post_replay_cache_key(sig, fp_a))
+                && cache.contains_key(&form_post_replay_cache_key(sig, fp_b))
+                && cache.contains_key(&form_post_replay_cache_key(sig, fp_c)),
+            "same-signature, different-body files must each get a distinct key"
+        );
     }
 
     /// Fingerprint distinguishes (key, body) tuples and is stable for
@@ -1251,7 +1232,6 @@ mod tests {
                 expiry: now
                     .checked_sub(std::time::Duration::from_secs(60))
                     .unwrap_or(now),
-                fingerprint: 0,
             },
         );
         // Prune: same `retain` shape the enforcer uses.
