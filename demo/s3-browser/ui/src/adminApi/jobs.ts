@@ -146,7 +146,7 @@ export async function getJobs(): Promise<JobsOverview> {
  * `getVerifyStatus` for progress + the final verdict.
  */
 export interface ParityStatus {
-  status: 'idle' | 'running' | 'done' | 'failed';
+  status: 'idle' | 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled';
   progress_scanned: number;
   scanned_at?: number;
   outcome?: ParityOutcome;
