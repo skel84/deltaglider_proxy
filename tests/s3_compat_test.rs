@@ -2362,6 +2362,102 @@ async fn test_form_post_upload_succeeds_with_presigned_policy() {
     assert_eq!(body.as_ref(), b"hello-form-post");
 }
 
+/// THE CI-403 REGRESSION: one presigned policy/signature uploads a BATCH of
+/// distinct files (the AWS-intended `starts-with $key` pattern the ROR CI uses
+/// for .zip/.sha512/.sha1). The replay guard used to 403 the 2nd file under a
+/// live signature ("different fingerprint → block"). All must now succeed.
+#[tokio::test]
+async fn test_form_post_batch_under_one_signature_all_succeed() {
+    let server = TestServer::builder()
+        .auth("POSTACCESSKEY", "POSTSECRETKEY123")
+        .build()
+        .await;
+    let client = reqwest::Client::new();
+    let bucket = server.bucket();
+    let endpoint = server.endpoint();
+    let amz_date = "20260507T120000Z";
+    let credential = "POSTACCESSKEY/20260507/us-east-1/s3/aws4_request";
+    // One policy with starts-with $key → covers every file in the batch.
+    let policy = serde_json::json!({
+        "expiration": "2099-01-01T00:00:00.000Z",
+        "conditions": [
+            { "bucket": bucket },
+            ["starts-with", "$key", "ror/builds/1.71/"],
+            { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+            { "x-amz-credential": credential },
+            { "x-amz-date": amz_date },
+            ["content-length-range", 1, 10485760]
+        ]
+    });
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy.to_string());
+    // ONE signature, reused for the whole batch — exactly what the CI does.
+    let signing_key = derive_post_signing_key("POSTSECRETKEY123", "20260507", "us-east-1");
+    let signature = hex::encode(hmac_sha256(&signing_key, policy_b64.as_bytes()));
+
+    // Three DISTINCT files (different keys + bodies) under the SAME signature.
+    let files: [(&str, &[u8]); 3] = [
+        ("ror/builds/1.71/app.zip", b"ZIP-CONTENT-BYTES"),
+        ("ror/builds/1.71/app.zip.sha512", b"sha512-digest\n"),
+        ("ror/builds/1.71/app.zip.sha1", b"sha1-digest\n"),
+    ];
+    for (key, content) in files {
+        let form = reqwest::multipart::Form::new()
+            .text("key", key)
+            .text("policy", policy_b64.clone())
+            .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .text("x-amz-credential", credential)
+            .text("x-amz-date", amz_date)
+            .text("x-amz-signature", signature.clone())
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(content.to_vec())
+                    .file_name("f")
+                    .mime_str("application/octet-stream")
+                    .unwrap(),
+            );
+        let resp = client
+            .post(format!("{}/{}", endpoint, bucket))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            204,
+            "batch file {key} under shared signature must succeed (was the CI 403), got {}",
+            resp.status()
+        );
+    }
+
+    // And an EXACT resend of one file (CI retry) is still idempotently allowed.
+    let (rkey, rcontent) = files[0];
+    let form = reqwest::multipart::Form::new()
+        .text("key", rkey)
+        .text("policy", policy_b64.clone())
+        .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+        .text("x-amz-credential", credential)
+        .text("x-amz-date", amz_date)
+        .text("x-amz-signature", signature.clone())
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(rcontent.to_vec())
+                .file_name("f")
+                .mime_str("application/octet-stream")
+                .unwrap(),
+        );
+    let resp = client
+        .post(format!("{}/{}", endpoint, bucket))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "idempotent resend of an identical file must still succeed"
+    );
+}
+
 /// A delta-eligible POST (form-data) upload routed through the Phase-4.1 streaming
 /// spool store (`DGP_SPOOL_THRESHOLD_BYTES=1`) must store + round-trip byte-exact.
 /// POST is a separate ingest path from the s3s PUT — this guards that the spool

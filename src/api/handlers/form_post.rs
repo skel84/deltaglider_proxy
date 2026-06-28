@@ -785,42 +785,48 @@ fn enforce_form_post_replay(state: &Arc<AppState>, parsed: &ParsedFormPost) -> R
     Ok(())
 }
 
-/// Decide whether a form-POST may proceed, given its signature `key`, the
-/// `(key, body)` `fingerprint`, the entry's `new_expiry`, and `now`.
-/// Mutates the cache to record the accepted attempt. Returns `true` to
-/// allow, `false` to block as a replay. Factored out of
-/// [`enforce_form_post_replay`] so the three-way decision is unit-testable
-/// against a bare `DashMap` without an `AppState`. The decision:
+/// Cache key for the replay guard: the request signature COMBINED with the
+/// `(key, body)` fingerprint. Keying on the pair is what distinguishes a true
+/// replay from a legitimate batch upload — see [`form_post_replay_check`].
+fn form_post_replay_cache_key(sig: &str, fingerprint: u64) -> String {
+    format!("{sig}:{fingerprint:016x}")
+}
+
+/// Record a form-POST attempt and decide whether it may proceed. Always returns
+/// `true` (allow) — the cache is now an idempotency/observability ledger, not a
+/// gate. Factored out + kept for the unit tests that pin the behaviour.
 ///
-/// No live entry → first use: insert and allow. Live entry with the SAME
-/// fingerprint → idempotent re-send of the same object (a CI retry or
-/// workflow re-run): refresh the expiry and allow, since the store is an
-/// overwrite with identical bytes. Live entry with a DIFFERENT fingerprint
-/// → the captured signature is being reused to write a different key/body:
-/// block it.
+/// History: the guard used to key ONLY on the signature and block any reuse of a
+/// live signature with a DIFFERENT `(key, body)` fingerprint, on the theory that
+/// a captured signature rewriting a different object is an attack. But presigned
+/// POST policies with `starts-with $key` are explicitly designed for BATCH
+/// uploads under one signature (the ROR CI signs once, then uploads the zip, the
+/// sha512, and the sha1), so that "different fingerprint" was the LEGITIMATE
+/// case — and the guard 403'd it (SignatureDoesNotMatch) intermittently when two
+/// files landed in the same signing second. The policy's own conditions
+/// (`starts-with $key`, `content-length-range`, `expiration`) are the real bound
+/// on what a captured signature can write; the replay guard cannot add to that
+/// without breaking the AWS-intended batch pattern. We now key on
+/// `(sig, fingerprint)` so each distinct upload gets its own ledger entry: an
+/// EXACT resend (same sig, same key, same body) is an idempotent overwrite with
+/// identical bytes (harmless), and a different body is a different,
+/// policy-conforming object.
 fn form_post_replay_check(
     cache: &dashmap::DashMap<String, ReplayEntry>,
     key: &str,
     fingerprint: u64,
     new_expiry: std::time::Instant,
-    now_instant: std::time::Instant,
+    _now_instant: std::time::Instant,
 ) -> bool {
-    let mut rejected = false;
+    let cache_key = form_post_replay_cache_key(key, fingerprint);
     cache
-        .entry(key.to_string())
-        .and_modify(|existing| {
-            if existing.expiry > now_instant && existing.fingerprint != fingerprint {
-                rejected = true;
-            } else {
-                existing.expiry = new_expiry;
-                existing.fingerprint = fingerprint;
-            }
-        })
+        .entry(cache_key)
+        .and_modify(|existing| existing.expiry = new_expiry)
         .or_insert(ReplayEntry {
             expiry: new_expiry,
             fingerprint,
         });
-    !rejected
+    true
 }
 
 /// Run the full presigned-form-POST pipeline.
@@ -1105,51 +1111,56 @@ mod tests {
                 fingerprint: 1,
             },
         );
-        // Replay attempt: the slot is live → reject path is taken.
+        // A freshly-inserted entry within its TTL must read as live (the
+        // expiry-window mechanic the replay ledger relies on).
         let live = cache
             .get(&key)
             .map(|v| v.expiry > std::time::Instant::now())
             .unwrap_or(false);
-        assert!(live, "cache must report the signature as still live");
+        assert!(live, "a within-TTL entry must report as still live");
     }
 
-    /// The fix's core invariant: a live signature re-sent for the SAME
-    /// (key, body) is ALLOWED (idempotent CI retry), while the same
-    /// signature reused for a DIFFERENT object is BLOCKED.
+    /// The fix's core invariant: ONE presigned signature may upload a BATCH of
+    /// distinct files (the AWS-intended `starts-with $key` pattern, used by the
+    /// ROR CI for `.zip`/`.sha512`/`.sha1`). Previously the guard 403'd the 2nd+
+    /// distinct file under a live signature; now every (sig, body) pair gets its
+    /// own ledger entry, and an exact resend stays idempotent.
     #[test]
-    fn form_post_replay_idempotent_resend_allowed_but_swap_blocked() {
+    fn form_post_replay_allows_batch_under_one_signature() {
         use std::time::{Duration, Instant};
         let cache: dashmap::DashMap<String, ReplayEntry> = dashmap::DashMap::new();
         let sig = "deadbeefcafef00d";
         let now = Instant::now();
         let exp = now + Duration::from_secs(3600);
-        let fp_a = form_post_fingerprint("ror/builds/1.70.2/universal/x.sha1", b"hash-a\n");
 
-        // First use of the signature: allowed.
+        let fp_zip = form_post_fingerprint("ror/builds/1.71/x.zip", b"ZIPBYTES");
+        let fp_512 = form_post_fingerprint("ror/builds/1.71/x.zip.sha512", b"sha512hash\n");
+        let fp_1 = form_post_fingerprint("ror/builds/1.71/x.zip.sha1", b"sha1hash\n");
+
+        // A batch of 3 distinct files under ONE signature — all allowed (was the
+        // 403 bug: the 2nd/3rd file tripped "different fingerprint → block").
         assert!(
-            form_post_replay_check(&cache, sig, fp_a, exp, now),
-            "first use of a fresh signature must be allowed"
+            form_post_replay_check(&cache, sig, fp_zip, exp, now),
+            ".zip"
         );
-        // Same signature, SAME object (identical key+body) — the CI
-        // retry / workflow re-run case. MUST be allowed now (regression
-        // fix; previously 403'd).
         assert!(
-            form_post_replay_check(&cache, sig, fp_a, exp, now),
-            "idempotent re-send of the same object must be allowed"
+            form_post_replay_check(&cache, sig, fp_512, exp, now),
+            ".sha512 under same sig must be allowed (batch)"
         );
-        // Same live signature, DIFFERENT object — a captured-signature
-        // replay to write somewhere/something else. MUST be blocked.
-        let fp_b = form_post_fingerprint("attacker/evil.sh", b"#!/bin/sh\n");
         assert!(
-            !form_post_replay_check(&cache, sig, fp_b, exp, now),
-            "reusing a signature for a different key/body must be blocked"
+            form_post_replay_check(&cache, sig, fp_1, exp, now),
+            ".sha1 under same sig must be allowed (batch)"
         );
-        // And the legit object can still be re-sent after the blocked
-        // swap attempt (the block didn't overwrite the stored fingerprint).
+
+        // Exact resend of any one of them (CI retry / workflow re-run) stays
+        // allowed — idempotent overwrite with identical bytes.
         assert!(
-            form_post_replay_check(&cache, sig, fp_a, exp, now),
-            "the original object must remain idempotently re-sendable"
+            form_post_replay_check(&cache, sig, fp_512, exp, now),
+            "idempotent resend of the same object must be allowed"
         );
+
+        // Each distinct (sig, body) is its own entry — three files = three keys.
+        assert_eq!(cache.len(), 3, "one ledger entry per distinct (sig, body)");
     }
 
     /// Fingerprint distinguishes (key, body) tuples and is stable for
