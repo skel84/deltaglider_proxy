@@ -25,7 +25,7 @@ pub struct ConfigDb {
 }
 
 /// Schema version — bump when adding migrations.
-const SCHEMA_VERSION: i32 = 17;
+const SCHEMA_VERSION: i32 = 18;
 
 pub(crate) mod auth_providers;
 mod declarative;
@@ -668,6 +668,33 @@ impl ConfigDb {
             }
             info!(
                 "Migrated config DB schema from v{} to v17 (delta-passthrough run stats)",
+                version
+            );
+        }
+
+        if version < 18 {
+            // v18: per-object parity logical-metadata cache, so a re-verify is
+            // HEAD-free. Stores logical (sha256, size, etag) keyed by
+            // (rule, side, dest_key) — `side` keeps source/dest rows distinct
+            // even for a whole-bucket mirror. `stored_etag` is the cheap
+            // content-version token: a hit is trusted only while the stored blob
+            // is unchanged, so an in-place overwrite re-reads instead of
+            // reporting a stale "in sync".
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS replication_parity_objects (
+                    rule_name   TEXT NOT NULL,
+                    side        TEXT NOT NULL,
+                    dest_key    TEXT NOT NULL,
+                    sha256      TEXT,
+                    size        INTEGER NOT NULL,
+                    etag        TEXT,
+                    stored_etag TEXT,
+                    updated_at  INTEGER NOT NULL,
+                    PRIMARY KEY (rule_name, side, dest_key)
+                );",
+            )?;
+            info!(
+                "Migrated config DB schema from v{} to v18 (replication parity cache)",
                 version
             );
         }

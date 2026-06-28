@@ -142,6 +142,9 @@ impl ConfigDb {
                     "DELETE FROM replication_state WHERE rule_name = ?",
                     params![existing],
                 )?;
+                // Drop the rule's parity cache too — otherwise its per-object
+                // rows are orphaned forever (it's keyed by rule_name).
+                self.parity_cache_clear(&existing)?;
                 removed += n;
             }
         }
@@ -631,6 +634,182 @@ impl ConfigDb {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    // ── Parity per-object logical-metadata cache (v18) ────────────────────────
+    // The expensive part of a parity audit is recovering each DELTA object's
+    // LOGICAL (sha256, size, etag) — only a per-object HEAD gives it, since the
+    // lite LIST carries the delta-blob size/etag. This cache stores that logical
+    // metadata keyed by the DEST-namespace key so a re-verify (and the first
+    // verify of anything the replication worker copied) is HEAD-free.
+
+    /// Bulk-lookup cached logical metadata for `dest_keys` under a rule.
+    /// Returns only the keys present in the cache (a miss → HEAD needed).
+    pub fn parity_cache_get_many(
+        &self,
+        rule: &str,
+        side: ParitySide,
+        dest_keys: &[&str],
+    ) -> Result<std::collections::HashMap<String, ParityCacheEntry>, ConfigDbError> {
+        let mut out = std::collections::HashMap::new();
+        if dest_keys.is_empty() {
+            return Ok(out);
+        }
+        let side = side.as_str();
+        for chunk in dest_keys.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT dest_key, sha256, size, etag, stored_etag
+                 FROM replication_parity_objects
+                 WHERE rule_name = ? AND side = ? AND dest_key IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 2);
+            binds.push(&rule);
+            binds.push(&side);
+            for k in chunk {
+                binds.push(k);
+            }
+            let rows = stmt.query_map(binds.as_slice(), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    ParityCacheEntry {
+                        sha256: r.get(1)?,
+                        size: r.get::<_, i64>(2)? as u64,
+                        etag: r.get(3)?,
+                        stored_etag: r.get(4)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (k, v) = row?;
+                out.insert(k, v);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Batch-upsert logical metadata for objects on ONE side of a rule (one
+    /// transaction). Source and dest are SEPARATE rows (the `side` discriminator)
+    /// — they must never share a cache row even when keys coincide (whole-bucket
+    /// mirror where source.prefix == dest.prefix), or a source read would get the
+    /// dest's metadata and vice versa (a structural false "in sync").
+    pub fn parity_cache_put_many(
+        &mut self,
+        rule: &str,
+        side: ParitySide,
+        entries: &[(String, ParityCacheEntry)],
+        now: i64,
+    ) -> Result<(), ConfigDbError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let side = side.as_str();
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO replication_parity_objects
+                    (rule_name, side, dest_key, sha256, size, etag, stored_etag, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(rule_name, side, dest_key) DO UPDATE SET
+                    sha256 = excluded.sha256,
+                    size = excluded.size,
+                    etag = excluded.etag,
+                    stored_etag = excluded.stored_etag,
+                    updated_at = excluded.updated_at",
+            )?;
+            for (key, e) in entries {
+                stmt.execute(rusqlite::params![
+                    rule,
+                    side,
+                    key,
+                    e.sha256,
+                    e.size as i64,
+                    e.etag,
+                    e.stored_etag,
+                    now
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drop the entire parity cache for a rule (both sides). Called on rule
+    /// removal (orphan cleanup).
+    pub fn parity_cache_clear(&self, rule: &str) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "DELETE FROM replication_parity_objects WHERE rule_name = ?",
+            [rule],
+        )?;
+        Ok(())
+    }
+
+    /// Prune cache rows for a rule whose `dest_key` was NOT seen in the last
+    /// (complete) scan — bounds growth to the live object set and evicts
+    /// stale rows for deleted objects. Called only after a NON-truncated scan
+    /// (a truncated scan didn't see every key, so it can't safely prune).
+    /// `ponytail`: local diagnostic cache — keep it bounded; a future move to a
+    /// separate local-only DB would also keep it out of the HA config-sync blob.
+    pub fn parity_cache_retain(
+        &mut self,
+        rule: &str,
+        side: ParitySide,
+        live_dest_keys: &[String],
+    ) -> Result<usize, ConfigDbError> {
+        let side = side.as_str();
+        // Build a temp set of live keys, delete everything else for (rule, side).
+        let tx = self.conn.transaction()?;
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS _parity_live (k TEXT PRIMARY KEY);
+             DELETE FROM _parity_live;",
+        )?;
+        {
+            let mut ins = tx.prepare("INSERT OR IGNORE INTO _parity_live (k) VALUES (?)")?;
+            for k in live_dest_keys {
+                ins.execute([k])?;
+            }
+        }
+        let removed = tx.execute(
+            "DELETE FROM replication_parity_objects
+             WHERE rule_name = ? AND side = ?
+               AND dest_key NOT IN (SELECT k FROM _parity_live)",
+            rusqlite::params![rule, side],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
+}
+
+/// Which side of a replication rule a cached parity entry describes. Source and
+/// dest rows are kept distinct so a whole-bucket mirror (source.prefix ==
+/// dest.prefix) can't collide them into one row → false "in sync".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParitySide {
+    Source,
+    Dest,
+}
+
+impl ParitySide {
+    fn as_str(self) -> &'static str {
+        match self {
+            ParitySide::Source => "src",
+            ParitySide::Dest => "dst",
+        }
+    }
+}
+
+/// Cached logical metadata for one object (what a parity compare needs), plus
+/// `stored_etag` — the etag/md5 of the STORED blob as the lite LIST reports it
+/// (delta-blob etag for a delta object; the real etag for passthrough). It is
+/// the cheap CONTENT-VERSION token: a cache hit is only trusted when the current
+/// lite `stored_etag` still matches, so an in-place overwrite (new bytes → new
+/// stored etag) misses the cache and is re-read instead of reporting stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityCacheEntry {
+    pub sha256: Option<String>,
+    pub size: u64,
+    pub etag: Option<String>,
+    pub stored_etag: Option<String>,
 }
 
 #[cfg(test)]
@@ -934,5 +1113,161 @@ mod tests {
         let db = db();
         let got = db.replication_object_failures_for_keys("r", &[]).unwrap();
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn parity_cache_round_trips_and_isolates_by_rule() {
+        let mut db = db();
+        let e = |sha: Option<&str>, size: u64, etag: Option<&str>| ParityCacheEntry {
+            sha256: sha.map(str::to_string),
+            size,
+            etag: etag.map(str::to_string),
+            stored_etag: Some("blob-etag".to_string()),
+        };
+        let src = ParitySide::Source;
+        db.parity_cache_put_many(
+            "r1",
+            src,
+            &[
+                ("a/x.zip".into(), e(Some("sha-a"), 100, Some("etag-a"))),
+                ("a/y.zip".into(), e(None, 50, Some("etag-y-2"))),
+            ],
+            1000,
+        )
+        .unwrap();
+        // Different rule must not see r1's entries.
+        db.parity_cache_put_many(
+            "r2",
+            src,
+            &[("a/x.zip".into(), e(Some("other"), 9, None))],
+            1000,
+        )
+        .unwrap();
+
+        let got = db
+            .parity_cache_get_many("r1", src, &["a/x.zip", "a/y.zip", "missing"])
+            .unwrap();
+        assert_eq!(got.len(), 2, "only the two present keys, not the miss");
+        assert_eq!(got["a/x.zip"], e(Some("sha-a"), 100, Some("etag-a")));
+        assert_eq!(
+            got["a/x.zip"].stored_etag.as_deref(),
+            Some("blob-etag"),
+            "the content-version token round-trips"
+        );
+        assert_eq!(got["a/y.zip"].size, 50);
+        assert_eq!(
+            db.parity_cache_get_many("r2", src, &["a/x.zip"]).unwrap()["a/x.zip"].size,
+            9
+        );
+    }
+
+    #[test]
+    fn parity_cache_source_and_dest_never_collide() {
+        // The structural false-"in-sync" guard: same rule + same key on both
+        // sides (a whole-bucket mirror) must keep SEPARATE rows. If source read
+        // dest's logical metadata they'd always "match".
+        let mut db = db();
+        let mk = |sha: &str| ParityCacheEntry {
+            sha256: Some(sha.into()),
+            size: 1,
+            etag: None,
+            stored_etag: Some("blob".into()),
+        };
+        db.parity_cache_put_many("r", ParitySide::Source, &[("k".into(), mk("SRC"))], 1)
+            .unwrap();
+        db.parity_cache_put_many("r", ParitySide::Dest, &[("k".into(), mk("DST"))], 1)
+            .unwrap();
+        assert_eq!(
+            db.parity_cache_get_many("r", ParitySide::Source, &["k"])
+                .unwrap()["k"]
+                .sha256
+                .as_deref(),
+            Some("SRC")
+        );
+        assert_eq!(
+            db.parity_cache_get_many("r", ParitySide::Dest, &["k"])
+                .unwrap()["k"]
+                .sha256
+                .as_deref(),
+            Some("DST"),
+            "dest row must be distinct from the source row"
+        );
+    }
+
+    #[test]
+    fn parity_cache_retain_prunes_deleted_and_respects_side() {
+        let mut db = db();
+        let mk = ParityCacheEntry {
+            sha256: None,
+            size: 1,
+            etag: None,
+            stored_etag: None,
+        };
+        let s = ParitySide::Source;
+        db.parity_cache_put_many(
+            "r",
+            s,
+            &[("keep".into(), mk.clone()), ("gone".into(), mk.clone())],
+            1,
+        )
+        .unwrap();
+        // Dest side has its own "gone" — must NOT be pruned by a source retain.
+        db.parity_cache_put_many("r", ParitySide::Dest, &[("gone".into(), mk.clone())], 1)
+            .unwrap();
+
+        let removed = db
+            .parity_cache_retain("r", s, &["keep".to_string()])
+            .unwrap();
+        assert_eq!(removed, 1, "only the source 'gone' row is pruned");
+        assert!(db
+            .parity_cache_get_many("r", s, &["gone"])
+            .unwrap()
+            .is_empty());
+        assert!(!db
+            .parity_cache_get_many("r", s, &["keep"])
+            .unwrap()
+            .is_empty());
+        assert!(
+            !db.parity_cache_get_many("r", ParitySide::Dest, &["gone"])
+                .unwrap()
+                .is_empty(),
+            "dest side untouched by a source-side retain"
+        );
+    }
+
+    #[test]
+    fn parity_cache_upsert_overwrites_logical_metadata() {
+        let mut db = db();
+        let mk = |size| ParityCacheEntry {
+            sha256: Some("h".into()),
+            size,
+            etag: None,
+            stored_etag: None,
+        };
+        let s = ParitySide::Source;
+        db.parity_cache_put_many("r", s, &[("k".into(), mk(10))], 1)
+            .unwrap();
+        db.parity_cache_put_many("r", s, &[("k".into(), mk(20))], 2)
+            .unwrap();
+        let got = db.parity_cache_get_many("r", s, &["k"]).unwrap();
+        assert_eq!(got["k"].size, 20, "second write wins");
+    }
+
+    #[test]
+    fn parity_cache_clear_and_empty_get() {
+        let mut db = db();
+        let e = ParityCacheEntry {
+            sha256: None,
+            size: 1,
+            etag: None,
+            stored_etag: None,
+        };
+        let s = ParitySide::Source;
+        db.parity_cache_put_many("r", s, &[("k".into(), e)], 1)
+            .unwrap();
+        db.parity_cache_clear("r").unwrap();
+        assert!(db.parity_cache_get_many("r", s, &["k"]).unwrap().is_empty());
+        // Empty key list short-circuits without a query.
+        assert!(db.parity_cache_get_many("r", s, &[]).unwrap().is_empty());
     }
 }
