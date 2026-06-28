@@ -943,17 +943,25 @@ impl ConfigDb {
         Ok(())
     }
 
-    /// Boot reconcile: clear stale parity leases + mark any 'running' row failed
-    /// (a previous process died mid-audit). Returns rows reconciled.
+    /// Boot reconcile: mark any 'running' row failed (a previous process died
+    /// mid-audit) AND clear its lease UNCONDITIONALLY. A process restart means
+    /// the holding process is gone, so the lease is dead even if it hasn't
+    /// expired yet — leaving a non-expired lease in place would block re-verify
+    /// for up to the full TTL. Returns rows reconciled.
     pub fn parity_reconcile_on_boot(&self) -> Result<usize, ConfigDbError> {
         let now = current_unix_seconds();
-        job_store::clear_stale_leases(&self.conn, "replication_parity", now)?;
         let n = self.conn.execute(
             "UPDATE replication_parity
-             SET status = 'failed', last_error = 'proxy restarted mid-audit', updated_at = ?
+             SET status = 'failed',
+                 last_error = 'proxy restarted mid-audit',
+                 leader_instance_id = NULL,
+                 leader_expires_at = NULL,
+                 updated_at = ?
              WHERE status = 'running'",
             params![now],
         )?;
+        // Also clear any other stale (expired) leases on non-running rows.
+        job_store::clear_stale_leases(&self.conn, "replication_parity", now)?;
         Ok(n)
     }
 }

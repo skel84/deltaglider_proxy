@@ -316,9 +316,14 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         )
         .route("/_/api/admin/jobs/:id/runs", get(admin::jobs_runs))
         .route("/_/api/admin/jobs/:id/failures", get(admin::jobs_failures))
+        // `verify` is a LITERAL segment handling BOTH GET (poll status) and POST
+        // (kick off the background audit). It must carry the POST too: a literal
+        // path segment shadows the `:action` param at this position, so routing
+        // POST through `:action` here would 405. pause/resume/run-now still go
+        // via `:action`.
         .route(
             "/_/api/admin/jobs/:id/verify",
-            get(admin::jobs_verify_status),
+            get(admin::jobs_verify_status).post(admin::jobs_verify_start),
         )
         .route("/_/api/admin/jobs/:id/:action", post(admin::jobs_action))
         // Server-side bulk object operations. Replaces what the

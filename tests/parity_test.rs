@@ -47,16 +47,34 @@ lifecycle:
       expire_after: \"30d\"
 ";
 
+/// Kick off the background parity audit (POST → 202) then poll the status
+/// (GET) until it reaches a terminal state, returning the `outcome` object so
+/// the existing assertions (out["in_sync"], out["matched"], …) keep working.
 async fn verify(admin: &reqwest::Client, endpoint: &str) -> Value {
-    let resp = admin
-        .post(format!(
-            "{endpoint}/_/api/admin/jobs/replication:parity-a-to-b/verify"
-        ))
-        .send()
-        .await
-        .expect("verify request");
-    assert_eq!(resp.status().as_u16(), 200, "verify should be 200");
-    resp.json().await.unwrap()
+    let url = format!("{endpoint}/_/api/admin/jobs/replication:parity-a-to-b/verify");
+    let resp = admin.post(&url).send().await.expect("verify POST");
+    let code = resp.status().as_u16();
+    assert!(
+        code == 202 || code == 200,
+        "verify POST should be 202 (background) or 200 (no-DB), got {code}"
+    );
+    // Poll GET until done/failed (≤ ~10s).
+    for _ in 0..100 {
+        let s: Value = admin
+            .get(&url)
+            .send()
+            .await
+            .expect("verify GET")
+            .json()
+            .await
+            .unwrap();
+        match s.get("status").and_then(|v| v.as_str()) {
+            Some("done") => return s.get("outcome").cloned().expect("done has outcome"),
+            Some("failed") => panic!("parity audit failed: {:?}", s.get("error")),
+            _ => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+        }
+    }
+    panic!("parity audit did not complete in time");
 }
 
 #[tokio::test]
@@ -170,7 +188,8 @@ async fn test_parity_audit_lifecycle() {
     );
     assert_eq!(out["in_sync"].as_bool(), Some(false), "{out}");
 
-    // 5. Verify on a lifecycle job id → 400 (unsupported action).
+    // 5. Verify on a lifecycle job id → 404 (parity verify is replication-only;
+    //    the literal verify route rejects non-replication subsystems).
     let lc = admin
         .post(format!(
             "{}/_/api/admin/jobs/lifecycle:lc-expire/verify",
@@ -181,7 +200,7 @@ async fn test_parity_audit_lifecycle() {
         .expect("lifecycle verify request");
     assert_eq!(
         lc.status().as_u16(),
-        400,
-        "verify must be unsupported for lifecycle jobs"
+        404,
+        "parity verify is replication-only — lifecycle jobs have no verify"
     );
 }
