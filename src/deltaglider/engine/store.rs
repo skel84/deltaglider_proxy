@@ -424,11 +424,13 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         // here both for an existing reference AND a freshly-created baseline
         // (the first member self-deltas against its own reference).
         let ratio_loss_keeps_reference = has_existing_reference;
-        let ref_spool = self.spool.acquire(size).await.map_err(StorageError::from)?;
+        // ONE timed, combined reservation for both spools (ref + delta) — two raw
+        // sequential acquire()s self-deadlock when 2×size > budget, the exact
+        // class the GET path uses acquire_pair to prevent (mega-review finding).
+        let (ref_spool, delta_spool) = self.spool_acquire_pair(size, size).await?;
         self.storage
             .get_reference_to_file(bucket, &deltaspace_id, ref_spool.path())
             .await?;
-        let delta_spool = self.spool.acquire(size).await.map_err(StorageError::from)?;
 
         let effective_ratio = self.bucket_policies.max_delta_ratio(bucket);
         let cap = ((size as f64) * (effective_ratio as f64)).ceil() as u64;
