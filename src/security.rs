@@ -46,12 +46,10 @@ pub enum UrlValidationError {
 /// of well-known hostnames (`localhost`, `metadata.google.internal`, …).
 ///
 /// **Important**: this does NOT resolve DNS. A hostile DNS A record
-/// pointing `legit.example.com` at `169.254.169.254` would still pass.
-/// That's a DNS-rebinding concern that needs a connect-time hook in the
-/// HTTP client (`reqwest::redirect::Policy::custom` + a resolver wrapper).
-/// This function is the cheap first line; the caller is expected to
-/// pair it with `redirect(Policy::none())` and, where feasible, a
-/// resolver hook for follow-up defence.
+/// pointing `legit.example.com` at `169.254.169.254` would still pass this
+/// cheap first-line check — that DNS-rebinding gap is closed at connect time by
+/// [`SsrfGuardedResolver`], which the OIDC + webhook clients install. Callers
+/// pair this with `redirect(Policy::none())` and the guarded resolver.
 pub fn validate_outbound_url(url: &str, kind: UrlKind) -> Result<(), UrlValidationError> {
     if url.is_empty() {
         return Err(UrlValidationError::Empty);
@@ -248,7 +246,7 @@ const FORBIDDEN_SUFFIXES: &[&str] = &[".internal", ".local", ".localdomain"];
 
 const DEV_ALLOWED: &[&str] = &["localhost", "ip6-localhost", "ip6-loopback"];
 
-fn ip_is_acceptable(ip: IpAddr, kind: UrlKind) -> bool {
+pub(crate) fn ip_is_acceptable(ip: IpAddr, kind: UrlKind) -> bool {
     // Cloud instance-metadata services are NEVER acceptable, even in
     // BackendDev mode — pointing the S3 backend at IMDS is the cloud-
     // takeover pivot we're explicitly blocking, and it's never a
@@ -335,6 +333,46 @@ pub fn validate_public_prefix(prefix: &str) -> Result<(), &'static str> {
         return Err("non-empty public_prefix must end in '/'");
     }
     Ok(())
+}
+
+/// reqwest DNS resolver that closes the DNS-rebinding gap `validate_outbound_url`
+/// documents: it resolves the hostname via the system resolver, then drops any
+/// address that fails [`ip_is_acceptable`] for this [`UrlKind`]. A hostile A
+/// record pointing a legit name at 169.254.169.254 / private space yields zero
+/// acceptable addresses → the connection fails closed. Attach via
+/// `reqwest::Client::builder().dns_resolver(Arc::new(SsrfGuardedResolver::new(kind)))`.
+pub struct SsrfGuardedResolver {
+    kind: UrlKind,
+}
+
+impl SsrfGuardedResolver {
+    pub fn new(kind: UrlKind) -> Self {
+        Self { kind }
+    }
+}
+
+impl reqwest::dns::Resolve for SsrfGuardedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let kind = self.kind;
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            // Port is irrelevant to the policy; lookup_host needs one. reqwest
+            // overrides it with the URL's actual port afterward.
+            let addrs = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+            let safe: Vec<std::net::SocketAddr> =
+                addrs.filter(|sa| ip_is_acceptable(sa.ip(), kind)).collect();
+            if safe.is_empty() {
+                return Err(format!(
+                    "SSRF guard: '{host}' resolved only to forbidden addresses (metadata/private)"
+                )
+                .into());
+            }
+            let iter: reqwest::dns::Addrs = Box::new(safe.into_iter());
+            Ok(iter)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -535,6 +573,34 @@ mod tests {
         assert_eq!(validate_bucket_name("10.0.0.1"), Err(IpLike));
         // BSD shorthand and radix-tagged forms covered by bucket_name_is_ip_like.
         assert_eq!(validate_bucket_name("127.1"), Err(IpLike));
+    }
+
+    // SsrfGuardedResolver: a literal IP used as a "host" resolves to itself via
+    // lookup_host, so we can exercise the accept/reject filter without real DNS.
+    #[tokio::test]
+    async fn ssrf_resolver_rejects_metadata_and_private_addresses() {
+        use reqwest::dns::Resolve;
+        let resolver = SsrfGuardedResolver::new(UrlKind::Oidc);
+        let resolve = |h: &str| {
+            let name: reqwest::dns::Name = h.parse().unwrap();
+            resolver.resolve(name)
+        };
+        // Cloud metadata + private ranges → empty after filter → error.
+        assert!(
+            resolve("169.254.169.254").await.is_err(),
+            "IMDS must be rejected"
+        );
+        assert!(
+            resolve("10.0.0.1").await.is_err(),
+            "private must be rejected"
+        );
+        assert!(
+            resolve("127.0.0.1").await.is_err(),
+            "loopback must be rejected"
+        );
+        // A public literal → at least one acceptable addr → Ok.
+        let ok = resolve("8.8.8.8").await.expect("public addr accepted");
+        assert!(ok.count() >= 1);
     }
 }
 

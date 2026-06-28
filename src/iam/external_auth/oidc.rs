@@ -103,6 +103,12 @@ impl OidcProvider {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
+            // Close the DNS-rebinding gap: reject hostnames resolving to
+            // metadata/private addresses at connect time (the literal-IP
+            // validate_outbound_url check can't see DNS).
+            .dns_resolver(std::sync::Arc::new(
+                crate::security::SsrfGuardedResolver::new(crate::security::UrlKind::Oidc),
+            ))
             .build()
             .unwrap_or_default();
         Self {
