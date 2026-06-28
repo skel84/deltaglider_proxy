@@ -23,6 +23,23 @@
 //! with the GET/PUT/HEAD/DELETE handlers in `object.rs` — the only
 //! coupling is the dispatcher choosing between DeleteObjects and form
 //! upload at the top of `delete_objects`.
+//!
+//! ## Replay-guard blast-radius trade-off (documented)
+//!
+//! `form_post_replay_check` is now an idempotency/observability ledger, not a
+//! gate — it always allows. This MATCHES native AWS S3, which has no form-POST
+//! replay protection: a presigned POST is valid for as many policy-conforming
+//! uploads as fit within its expiration. The earlier guard capped a captured
+//! signature at ONE object; removing that cap widens the blast radius of a
+//! *leaked* signature to "any key matching the policy's `starts-with $key`, until
+//! `expiration`." We accept this because (a) it was breaking the legitimate
+//! AWS-intended batch pattern (the ROR CI uploads `.zip`/`.sha512`/`.sha1` under
+//! one signature), and (b) the policy's own conditions — `starts-with $key`,
+//! `content-length-range`, `expiration` — are re-validated on EVERY request
+//! (`validate_form_post_policy`) and are the real bound. A future tightening
+//! could re-impose the one-object cap ONLY for policies with an exact
+//! `{"key": "..."}` condition (where reuse genuinely is an attack) while leaving
+//! `starts-with` policies permissive; not done here.
 
 use super::object_helpers::{check_quota, enqueue_object_event};
 use super::{audit_log_s3, ensure_bucket_exists, AppState};
@@ -260,6 +277,9 @@ fn validate_form_post_policy(
     let expires_at = chrono::DateTime::parse_from_rfc3339(expiration)
         .map_err(|_| S3Error::InvalidArgument("Policy expiration is not valid RFC3339".into()))?;
     if Utc::now() > expires_at.with_timezone(&Utc) {
+        tracing::warn!(
+            "form-POST DENY | reason=policy_expired | bucket={bucket} key={key_field} expired_at={expiration}"
+        );
         return Err(S3Error::AccessDenied);
     }
 
@@ -364,6 +384,9 @@ fn validate_form_post_policy(
                         )
                     })?;
                 if file_len < min || file_len > max {
+                    tracing::warn!(
+                        "form-POST DENY | reason=content_length_range | bucket={bucket} key={key_field} file_len={file_len} range=[{min},{max}]"
+                    );
                     return Err(S3Error::AccessDenied);
                 }
             }
@@ -393,6 +416,9 @@ fn validate_form_post_policy(
                     actual.starts_with(expected)
                 };
                 if !matched {
+                    tracing::warn!(
+                        "form-POST DENY | reason=policy_condition_{op} | bucket={bucket} key={key_field} variable={variable} expected={expected} actual={actual}"
+                    );
                     return Err(S3Error::AccessDenied);
                 }
             }
@@ -530,6 +556,10 @@ fn authenticate_form_post(
 
     let (access_key, scope_date, scope_region) = parse_policy_scope(&credential)?;
     if !amz_date.starts_with(scope_date) {
+        tracing::warn!(
+            "form-POST DENY | reason=scope_date_mismatch | bucket={bucket} key={} amz_date={amz_date} scope_date={scope_date}",
+            parsed.resolved_key
+        );
         return Err(S3Error::AccessDenied);
     }
 
@@ -585,6 +615,11 @@ fn authenticate_form_post(
     // exactly 64 hex chars up front — this is a cheap, length-independent gate
     // (one length check + a fixed-shape scan) that closes the oracle.
     if signature.len() != 64 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+        tracing::warn!(
+            "form-POST DENY | reason=signature_bad_shape | bucket={bucket} key={} access_key={access_key} sig_len={}",
+            parsed.resolved_key,
+            signature.len()
+        );
         return Err(S3Error::SignatureDoesNotMatch);
     }
     let signing_key = derive_v4_signing_key(&secret_access_key, scope_date, scope_region);
@@ -595,6 +630,16 @@ fn authenticate_form_post(
     )
     .into();
     if !sig_matches {
+        // The computed HMAC over the policy doesn't match the client's signature.
+        // This is a SIGNING mismatch (wrong secret, wrong scope, or the client
+        // signed a different policy than it sent) — NOT a replay. Log enough to
+        // tell the two apart in prod (the prefixes only; never the full sig).
+        tracing::warn!(
+            "form-POST DENY | reason=signature_mismatch | bucket={bucket} key={} access_key={access_key} scope_date={scope_date} computed_prefix={} client_prefix={}",
+            parsed.resolved_key,
+            &computed_signature[..computed_signature.len().min(8)],
+            &signature[..signature.len().min(8)]
+        );
         return Err(S3Error::SignatureDoesNotMatch);
     }
 
@@ -617,6 +662,11 @@ fn authenticate_form_post(
     )?;
 
     if !auth_user.can(S3Action::Write, bucket, &parsed.resolved_key) {
+        tracing::warn!(
+            "form-POST DENY | reason=iam_no_write | bucket={bucket} key={} user={}",
+            parsed.resolved_key,
+            auth_user.access_key_id
+        );
         return Err(S3Error::AccessDenied);
     }
     Ok(Some(auth_user))

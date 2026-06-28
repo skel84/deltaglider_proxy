@@ -423,7 +423,6 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         // (3) Encode from the body spool against the reference, capped. Reaches
         // here both for an existing reference AND a freshly-created baseline
         // (the first member self-deltas against its own reference).
-        let ratio_loss_keeps_reference = has_existing_reference;
         // ONE timed, combined reservation for both spools (ref + delta) — two raw
         // sequential acquire()s self-deadlock when 2×size > budget, the exact
         // class the GET path uses acquire_pair to prevent (mega-review finding).
@@ -517,17 +516,17 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
                         etag.clone(),
                     )
                     .await?;
-                // If WE just minted the reference for this PUT (fresh baseline)
-                // and the ratio lost, tear it down — no sibling delta needs it
-                // (parity with the buffered commit_delta_or_passthrough case 1).
-                // delete_reference is its own op; it doesn't need the prefix lock.
-                if !ratio_loss_keeps_reference {
-                    self.cache
-                        .invalidate(&Self::cache_key(bucket, &deltaspace_id));
-                    if let Err(e) = self.storage.delete_reference(bucket, &deltaspace_id).await {
-                        warn!("Failed to clean up fresh reference after ratio loss: {e}");
-                    }
-                }
+                // NOTE: a fresh baseline whose first member lost the ratio is
+                // LEFT IN PLACE — we deliberately do NOT tear it down here.
+                // The buffered path deletes it inside its prefix-lock scope; the
+                // streaming path had to DROP the lock before the passthrough
+                // store (which re-acquires it), so an unguarded delete_reference
+                // here would race a concurrent PUT B that, between our drop and
+                // our delete, sees the reference, deltas against it, and commits —
+                // we'd then delete the reference B needs (MissingReference on B's
+                // GET). A reference with no delta pointing at it is harmless: a
+                // later sibling PUT may delta against it, and it's reclaimed when
+                // the deltaspace empties. Correctness over a minor cleanup.
                 self.metadata_cache
                     .insert(bucket, key, result.metadata.clone());
                 Ok(result.with_accounting(prior_for_counter, 0))
