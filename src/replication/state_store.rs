@@ -142,9 +142,13 @@ impl ConfigDb {
                     "DELETE FROM replication_state WHERE rule_name = ?",
                     params![existing],
                 )?;
-                // Drop the rule's parity cache too — otherwise its per-object
-                // rows are orphaned forever (it's keyed by rule_name).
+                // Drop the rule's parity object-cache AND result row too —
+                // otherwise they're orphaned forever (both keyed by rule_name).
                 self.parity_cache_clear(&existing)?;
+                self.conn.execute(
+                    "DELETE FROM replication_parity WHERE rule_name = ?",
+                    params![existing],
+                )?;
                 removed += n;
             }
         }
@@ -778,6 +782,190 @@ impl ConfigDb {
         tx.commit()?;
         Ok(removed)
     }
+
+    // ── Parity RESULT cache + background-job lease (v19) ──────────────────────
+
+    /// Load the cached parity result row for a rule (status + last outcome).
+    pub fn parity_result_load(&self, rule: &str) -> Result<Option<ParityResultRow>, ConfigDbError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT status, scanned_at, progress_scanned, outcome_json, last_error
+                 FROM replication_parity WHERE rule_name = ?",
+                [rule],
+                |r| {
+                    Ok(ParityResultRow {
+                        status: r.get(0)?,
+                        scanned_at: r.get(1)?,
+                        progress_scanned: r.get(2)?,
+                        outcome_json: r.get(3)?,
+                        last_error: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Mark a rule's parity audit as RUNNING (clears the prior outcome's error,
+    /// keeps the last outcome_json visible while the new scan runs).
+    pub fn parity_result_set_running(&self, rule: &str, now: i64) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "INSERT INTO replication_parity (rule_name, status, progress_scanned, updated_at)
+             VALUES (?, 'running', 0, ?)
+             ON CONFLICT(rule_name) DO UPDATE SET
+                status = 'running', progress_scanned = 0, last_error = NULL, updated_at = ?",
+            params![rule, now, now],
+        )?;
+        Ok(())
+    }
+
+    /// Update the live progress counter of a running parity audit.
+    /// `ponytail`: the audit doesn't yet call this per-page — the scan is now
+    /// metadata-only + cache-warm (seconds), so the UI shows a spinner, not a
+    /// live count. This is the hook for a future streaming-progress pass; the UI
+    /// already degrades gracefully (it only renders the count when > 0).
+    pub fn parity_result_progress(
+        &self,
+        rule: &str,
+        scanned: i64,
+        now: i64,
+    ) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "UPDATE replication_parity SET progress_scanned = ?, updated_at = ?
+             WHERE rule_name = ?",
+            params![scanned, now, rule],
+        )?;
+        Ok(())
+    }
+
+    /// Persist a COMPLETED parity audit (the serialized outcome + verdict).
+    pub fn parity_result_done(
+        &self,
+        rule: &str,
+        in_sync: bool,
+        outcome_json: &str,
+        now: i64,
+    ) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "INSERT INTO replication_parity
+                (rule_name, status, scanned_at, in_sync, outcome_json, last_error, updated_at)
+             VALUES (?, 'done', ?, ?, ?, NULL, ?)
+             ON CONFLICT(rule_name) DO UPDATE SET
+                status = 'done', scanned_at = ?, in_sync = ?,
+                outcome_json = ?, last_error = NULL, updated_at = ?",
+            params![
+                rule,
+                now,
+                in_sync as i64,
+                outcome_json,
+                now,
+                now,
+                in_sync as i64,
+                outcome_json,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a parity audit FAILED with the error message.
+    pub fn parity_result_failed(
+        &self,
+        rule: &str,
+        error: &str,
+        now: i64,
+    ) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "INSERT INTO replication_parity (rule_name, status, last_error, updated_at)
+             VALUES (?, 'failed', ?, ?)
+             ON CONFLICT(rule_name) DO UPDATE SET
+                status = 'failed', last_error = ?, updated_at = ?",
+            params![rule, error, now, error, now],
+        )?;
+        Ok(())
+    }
+
+    /// Try to acquire the parity background-job lease for a rule.
+    pub fn parity_try_acquire_lease(
+        &self,
+        rule: &str,
+        owner: &str,
+        now: i64,
+        ttl_secs: i64,
+    ) -> Result<bool, ConfigDbError> {
+        // Ensure a row exists so the lease UPDATE has a target.
+        self.conn.execute(
+            "INSERT OR IGNORE INTO replication_parity (rule_name, updated_at) VALUES (?, ?)",
+            params![rule, now],
+        )?;
+        job_store::try_acquire_leader_lease(
+            &self.conn,
+            "replication_parity",
+            "rule_name",
+            &rule,
+            owner,
+            now,
+            ttl_secs,
+        )
+    }
+
+    /// Renew the parity lease this owner still holds (heartbeat during a long
+    /// scan). Returns false if the owner lost it (lapsed / taken) — the caller
+    /// should then stop, since another owner may have started a fresh scan.
+    pub fn parity_renew_lease(
+        &self,
+        rule: &str,
+        owner: &str,
+        now: i64,
+        ttl_secs: i64,
+    ) -> Result<bool, ConfigDbError> {
+        job_store::renew_leader_lease(
+            &self.conn,
+            "replication_parity",
+            "rule_name",
+            &rule,
+            owner,
+            now,
+            ttl_secs,
+        )
+    }
+
+    /// Release the parity lease this owner holds.
+    pub fn parity_release_lease(&self, rule: &str, owner: &str) -> Result<(), ConfigDbError> {
+        job_store::release_leader_lease(
+            &self.conn,
+            "replication_parity",
+            "rule_name",
+            &rule,
+            owner,
+        )?;
+        Ok(())
+    }
+
+    /// Boot reconcile: clear stale parity leases + mark any 'running' row failed
+    /// (a previous process died mid-audit). Returns rows reconciled.
+    pub fn parity_reconcile_on_boot(&self) -> Result<usize, ConfigDbError> {
+        let now = current_unix_seconds();
+        job_store::clear_stale_leases(&self.conn, "replication_parity", now)?;
+        let n = self.conn.execute(
+            "UPDATE replication_parity
+             SET status = 'failed', last_error = 'proxy restarted mid-audit', updated_at = ?
+             WHERE status = 'running'",
+            params![now],
+        )?;
+        Ok(n)
+    }
+}
+
+/// The cached parity result row (the background-job state the UI polls).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityResultRow {
+    pub status: String,
+    pub scanned_at: Option<i64>,
+    pub progress_scanned: i64,
+    pub outcome_json: Option<String>,
+    pub last_error: Option<String>,
 }
 
 /// Which side of a replication rule a cached parity entry describes. Source and
@@ -1113,6 +1301,68 @@ mod tests {
         let db = db();
         let got = db.replication_object_failures_for_keys("r", &[]).unwrap();
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn parity_result_lifecycle_running_then_done() {
+        let db = db();
+        assert!(
+            db.parity_result_load("r").unwrap().is_none(),
+            "idle = no row"
+        );
+        db.parity_result_set_running("r", 100).unwrap();
+        let row = db.parity_result_load("r").unwrap().unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(row.progress_scanned, 0);
+
+        db.parity_result_progress("r", 4200, 110).unwrap();
+        assert_eq!(
+            db.parity_result_load("r")
+                .unwrap()
+                .unwrap()
+                .progress_scanned,
+            4200
+        );
+
+        db.parity_result_done("r", true, "{\"in_sync\":true}", 120)
+            .unwrap();
+        let row = db.parity_result_load("r").unwrap().unwrap();
+        assert_eq!(row.status, "done");
+        assert_eq!(row.scanned_at, Some(120));
+        assert_eq!(row.outcome_json.as_deref(), Some("{\"in_sync\":true}"));
+        assert!(row.last_error.is_none());
+
+        db.parity_result_failed("r", "boom", 130).unwrap();
+        let row = db.parity_result_load("r").unwrap().unwrap();
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn parity_lease_serialises_and_boot_reconcile_clears_running() {
+        let db = db();
+        assert!(db
+            .parity_try_acquire_lease("r", "owner-a", 100, 60)
+            .unwrap());
+        // A second owner can't take a live lease.
+        assert!(!db
+            .parity_try_acquire_lease("r", "owner-b", 110, 60)
+            .unwrap());
+        db.parity_result_set_running("r", 110).unwrap();
+
+        // Boot reconcile: stale-lease clear + mark a 'running' row failed.
+        let n = db.parity_reconcile_on_boot().unwrap();
+        assert_eq!(n, 1, "the running audit is reconciled to failed");
+        assert_eq!(
+            db.parity_result_load("r").unwrap().unwrap().status,
+            "failed"
+        );
+
+        db.parity_release_lease("r", "owner-a").unwrap();
+        // After release a fresh owner can acquire.
+        assert!(db
+            .parity_try_acquire_lease("r", "owner-c", 200, 60)
+            .unwrap());
     }
 
     #[test]

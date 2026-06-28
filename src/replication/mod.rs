@@ -34,6 +34,7 @@ pub use remediation::{
     RerunVerdict,
 };
 pub use state_store::{
-    current_unix_seconds, FailureRecord, ObjectFailure, ReplicationState, RunRecord, RunTotals,
+    current_unix_seconds, FailureRecord, ObjectFailure, ParityResultRow, ReplicationState,
+    RunRecord, RunTotals,
 };
 pub use worker::{run_rule, RunConcurrency, RunLease, RunOutcome};

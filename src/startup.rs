@@ -753,6 +753,16 @@ pub fn init_config_db(
                     warn!("Failed to reconcile replication runtime state on boot: {err}");
                 }
             }
+            // Clear a parity audit left 'running' by a crashed process + its lease.
+            match db.parity_reconcile_on_boot() {
+                Ok(count) if count > 0 => {
+                    warn!("Reconciled {count} parity audit(s) left running by a previous process");
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!("Failed to reconcile parity audit state on boot: {err}");
+                }
+            }
             match db.lifecycle_reconcile_on_boot() {
                 Ok(count) if count > 0 => {
                     warn!("Reconciled {count} lifecycle run(s) left running by a previous process");

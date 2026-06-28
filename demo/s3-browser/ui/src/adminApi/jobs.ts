@@ -141,15 +141,34 @@ export async function getJobs(): Promise<JobsOverview> {
 
 /**
  * On-demand source-vs-dest parity audit for a replication rule.
- * Synchronous POST: metadata-only compare, seconds typical, capped + truncatable.
+ * Server-side background job. POST kicks one off (202 + running status); the
+ * result is persisted server-side so it survives navigation + restart. Poll
+ * `getVerifyStatus` for progress + the final verdict.
  */
-export async function verifyReplicationParity(ruleName: string): Promise<ParityOutcome> {
+export interface ParityStatus {
+  status: 'idle' | 'running' | 'done' | 'failed';
+  progress_scanned: number;
+  scanned_at?: number;
+  outcome?: ParityOutcome;
+  error?: string;
+}
+
+/** POST: start (or report) the background parity audit. */
+export async function startVerifyParity(ruleName: string): Promise<ParityStatus> {
   const res = await adminFetch(
     `/api/admin/jobs/replication:${encodeURIComponent(ruleName)}/verify`,
     'POST'
   );
   if (!res.ok) await throwApiError(res, 'Verify replication parity');
   return safeJson(res);
+}
+
+/** GET: poll the current parity audit status / last result (no scan started). */
+export async function getVerifyStatus(ruleName: string): Promise<ParityStatus> {
+  return fetchJson(
+    `/api/admin/jobs/replication:${encodeURIComponent(ruleName)}/verify`,
+    'Verify status'
+  );
 }
 
 export async function getJobRuns(id: string): Promise<{ runs: JobRunEntry[] }> {

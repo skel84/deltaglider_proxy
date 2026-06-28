@@ -7,10 +7,11 @@ import {
   getJobFailures,
   getJobRuns,
   getJobs,
+  getVerifyStatus,
   runJobAction,
-  verifyReplicationParity,
+  startVerifyParity,
 } from '../adminApi';
-import type { ParityOutcome } from '../adminApi';
+import type { ParityStatus } from '../adminApi';
 import { isActiveJobStatus } from '../jobsView';
 import { qk } from './keys';
 
@@ -45,13 +46,29 @@ export function useJobFailures(id: string | null) {
 }
 
 /**
- * On-demand parity verification for a replication rule. A mutation, NOT a
- * query: it never runs on mount, never polls — the user clicks "Run
- * verification" and we surface isPending / data / error.
+ * Server-side parity verification status for a replication rule. The audit is a
+ * BACKGROUND job: the result is persisted server-side, so this query gives an
+ * instant cached verdict on mount (survives navigation + restart) and polls
+ * (2s) while a scan is running. `useStartVerify` POSTs to kick one off.
  */
-export function useVerifyParity() {
-  return useMutation<ParityOutcome, Error, string>({
-    mutationFn: (ruleName: string) => verifyReplicationParity(ruleName),
+export function useParityStatus(ruleName: string) {
+  return useQuery<ParityStatus, Error>({
+    queryKey: qk.jobs.verify(ruleName),
+    queryFn: () => getVerifyStatus(ruleName),
+    enabled: !!ruleName,
+    refetchInterval: (q) => (q.state.data?.status === 'running' ? POLL_MS : false),
+  });
+}
+
+/** Kick off the background parity audit, then refetch its status. */
+export function useStartVerify(ruleName: string) {
+  const qc = useQueryClient();
+  return useMutation<ParityStatus, Error, void>({
+    mutationFn: () => startVerifyParity(ruleName),
+    onSuccess: (data) => {
+      qc.setQueryData(qk.jobs.verify(ruleName), data);
+      qc.invalidateQueries({ queryKey: qk.jobs.verify(ruleName) });
+    },
   });
 }
 

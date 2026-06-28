@@ -25,7 +25,7 @@ pub struct ConfigDb {
 }
 
 /// Schema version — bump when adding migrations.
-const SCHEMA_VERSION: i32 = 18;
+const SCHEMA_VERSION: i32 = 19;
 
 pub(crate) mod auth_providers;
 mod declarative;
@@ -695,6 +695,32 @@ impl ConfigDb {
             )?;
             info!(
                 "Migrated config DB schema from v{} to v18 (replication parity cache)",
+                version
+            );
+        }
+
+        if version < 19 {
+            // v19: parity RESULT cache — one row per rule holding the last audit
+            // verdict (outcome_json) + a leader lease so a verify runs as a
+            // background job (not in the request) and survives navigation /
+            // restart. `status` is idle|running|done|failed; a crashed run's
+            // stale lease is cleared on boot.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS replication_parity (
+                    rule_name           TEXT PRIMARY KEY,
+                    status              TEXT NOT NULL DEFAULT 'idle',
+                    scanned_at          INTEGER,
+                    progress_scanned    INTEGER NOT NULL DEFAULT 0,
+                    in_sync             INTEGER NOT NULL DEFAULT 0,
+                    outcome_json        TEXT,
+                    last_error          TEXT,
+                    leader_instance_id  TEXT,
+                    leader_expires_at   INTEGER,
+                    updated_at          INTEGER
+                );",
+            )?;
+            info!(
+                "Migrated config DB schema from v{} to v19 (replication parity result cache)",
                 version
             );
         }

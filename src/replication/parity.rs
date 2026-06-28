@@ -22,7 +22,7 @@ use crate::config_db::ConfigDb;
 use crate::config_sections::{ConflictPolicy, ReplicationRule};
 use crate::deltaglider::DynEngine;
 use crate::types::FileMetadata;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tracing::warn;
 
@@ -94,7 +94,7 @@ impl ObjState {
 }
 
 /// Which evidence proved a `Match` (or failed to, for a mismatch).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verifier {
     /// Strongest: logical SHA-256 + size compared on both sides.
@@ -106,7 +106,7 @@ pub enum Verifier {
 }
 
 /// The classification of one key across source and destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     Match,
@@ -116,7 +116,7 @@ pub enum FindingKind {
 }
 
 /// One per-key finding, carried in the bounded sample vecs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParityFinding {
     pub key: String,
     pub kind: FindingKind,
@@ -434,7 +434,7 @@ pub fn fold_actionable(diff: &ParityDiff) -> ActionableSummary {
 /// Sample-scoped tally of remediation verdicts across the annotated findings.
 /// Bounded by the per-category sample caps — NOT the exact diff totals (those
 /// stay in `ParityOutcome`'s count fields).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionableSummary {
     /// Re-run will fix it (`RerunVerdict::Yes`).
     pub rerun_fixes: u64,
@@ -449,7 +449,7 @@ pub struct ActionableSummary {
 }
 
 /// The serialized audit verdict consumed by the frontend.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParityOutcome {
     pub rule_name: String,
     pub source_bucket: String,

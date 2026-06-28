@@ -59,6 +59,7 @@ export const qk = {
     list: () => ['jobs'] as const,
     runs: (id: string) => ['jobs', 'runs', id] as const,
     failures: (id: string) => ['jobs', 'failures', id] as const,
+    verify: (rule: string) => ['jobs', 'verify', rule] as const,
   },
   // Per-bucket busy banner (session-light endpoint).
   maintenance: {

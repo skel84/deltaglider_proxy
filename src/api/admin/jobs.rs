@@ -458,6 +458,21 @@ pub struct LimitQuery {
     pub limit: Option<u32>,
 }
 
+/// GET /_/api/admin/jobs/:id/verify — poll the server-side parity audit status
+/// (replication only). No scan is started; the result survives navigation +
+/// restart. POST on the same id (the `:action`=verify dispatch) kicks one off.
+pub async fn job_verify_status(
+    Path(id): Path<String>,
+    State(state): State<Arc<AdminState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (sub, key) = parse_job_id(&id).ok_or(not_found())?;
+    if sub != JobSubsystem::Replication {
+        return Err(not_found());
+    }
+    let Json(resp) = super::replication::verify_status(Path(key.to_string()), State(state)).await?;
+    Ok(Json(serde_json::to_value(resp).map_err(internal)?))
+}
+
 /// GET /_/api/admin/jobs/:id/runs
 pub async fn job_runs(
     Path(id): Path<String>,
@@ -646,11 +661,9 @@ pub async fn job_action(
             ))
         }
         (JobSubsystem::Replication, JobAction::Verify) => {
-            let Json(resp) = super::replication::verify(Path(name), State(state)).await?;
-            Ok((
-                StatusCode::OK,
-                Json(serde_json::to_value(resp).map_err(internal)?),
-            ))
+            // Kicks off a BACKGROUND audit; returns 202 + the (running) status.
+            let (code, Json(resp)) = super::replication::verify(Path(name), State(state)).await?;
+            Ok((code, Json(serde_json::to_value(resp).map_err(internal)?)))
         }
         (JobSubsystem::Lifecycle, JobAction::Pause) => {
             super::lifecycle::pause(Path(name), State(state)).await?;

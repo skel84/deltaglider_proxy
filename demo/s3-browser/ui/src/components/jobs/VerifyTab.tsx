@@ -19,7 +19,7 @@ import {
 } from '@ant-design/icons';
 import type { FindingKind, ParityFinding, ParityOutcome, Verifier } from '../../adminApi';
 import { conflictPolicyLabel, fixActionMeta, parityKindMeta, rerunVerdictMeta } from '../../jobsView';
-import { useRunReplicationNow, useVerifyParity } from '../../queries/jobs';
+import { useParityStatus, useRunReplicationNow, useStartVerify } from '../../queries/jobs';
 import { useColors } from '../../ThemeContext';
 import { timeAgo } from '../../utils';
 
@@ -54,17 +54,50 @@ function toneFor(o: ParityOutcome): Tone {
 
 export default function VerifyTab({ ruleName }: Props) {
   const c = useColors();
-  const verify = useVerifyParity();
+  // Server-side status: instant cached verdict on mount (survives navigation +
+  // restart), polls while a scan runs. `start` POSTs to kick one off.
+  const status = useParityStatus(ruleName);
+  const start = useStartVerify(ruleName);
   const runNow = useRunReplicationNow();
-  const data = verify.data;
 
-  const run = () => verify.mutate(ruleName);
+  const s = status.data;
+  const running = s?.status === 'running' || start.isPending;
+  const outcome = s?.outcome;
+
+  const run = () => start.mutate();
   // The one executable per-finding fix: run the rule, then re-verify.
-  const onRunNow = () =>
-    runNow.mutate(ruleName, { onSuccess: () => verify.mutate(ruleName) });
+  const onRunNow = () => runNow.mutate(ruleName, { onSuccess: () => start.mutate() });
 
-  // ── idle ──────────────────────────────────────────────────────────────────
-  if (verify.isIdle && !data) {
+  // ── first load (no server state yet) ───────────────────────────────────────
+  if (status.isLoading) {
+    return <LoadingBlock c={c} label="Loading verification status…" />;
+  }
+
+  // ── running with NO prior result → live progress ───────────────────────────
+  if (running && !outcome) {
+    return <LoadingBlock c={c} label="Comparing source and destination…" scanned={s?.progress_scanned} />;
+  }
+
+  // ── failed (and no prior result to show) ───────────────────────────────────
+  if (s?.status === 'failed' && !outcome) {
+    return (
+      <div style={{ padding: '8px 4px' }}>
+        <Alert
+          type="error"
+          showIcon
+          message="Verification failed"
+          description={s.error || 'The parity audit could not complete.'}
+          style={{ borderRadius: 8, marginBottom: 16 }}
+        />
+        <Button icon={<ReloadOutlined />} onClick={run} loading={start.isPending}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+
+  // ── idle, never run ────────────────────────────────────────────────────────
+  if (!outcome) {
     return (
       <div style={{ padding: '8px 4px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
@@ -77,43 +110,26 @@ export default function VerifyTab({ ruleName }: Props) {
           Verify that every object in the source exists on the destination with a matching checksum.
         </Text>
         <Text type="secondary" style={{ display: 'block', fontSize: 12.5, marginBottom: 18 }}>
-          Compares logical SHA-256 + size from metadata — no downloads.
+          Compares logical SHA-256 + size from metadata — no downloads. Runs in the background;
+          the result is saved, so you can leave this page and come back.
         </Text>
-        <Button type="primary" icon={<SafetyCertificateOutlined />} onClick={run}>
+        <Button
+          type="primary"
+          icon={<SafetyCertificateOutlined />}
+          onClick={run}
+          loading={start.isPending}
+        >
           Run verification
         </Button>
       </div>
     );
   }
 
-  // ── loading ───────────────────────────────────────────────────────────────
-  if (verify.isPending) {
-    return <LoadingBlock c={c} />;
-  }
-
-  // ── error ─────────────────────────────────────────────────────────────────
-  if (verify.isError) {
-    return (
-      <div style={{ padding: '8px 4px' }}>
-        <Alert
-          type="error"
-          showIcon
-          message="Verification failed"
-          description={verify.error?.message || 'The parity audit could not complete.'}
-          style={{ borderRadius: 8, marginBottom: 16 }}
-        />
-        <Button icon={<ReloadOutlined />} onClick={run}>
-          Retry
-        </Button>
-      </div>
-    );
-  }
-
-  // ── result ────────────────────────────────────────────────────────────────
-  if (!data) return <LoadingBlock c={c} />;
+  // ── result (cached verdict; may be re-verifying in the background) ─────────
   return (
     <ParityResult
-      outcome={data}
+      outcome={outcome}
+      reverifying={running}
       onReverify={run}
       onRunNow={onRunNow}
       runNowPending={runNow.isPending}
@@ -122,9 +138,15 @@ export default function VerifyTab({ ruleName }: Props) {
   );
 }
 
-function LoadingBlock({ c }: { c: ReturnType<typeof useColors> }) {
-  // LoadingState chrome (StatePlaceholders exports only LoadingState); the import
-  // would create a cycle of generic spinners, so reuse its visual contract inline.
+function LoadingBlock({
+  c,
+  label = 'Comparing source and destination…',
+  scanned,
+}: {
+  c: ReturnType<typeof useColors>;
+  label?: string;
+  scanned?: number;
+}) {
   return (
     <div
       style={{
@@ -138,7 +160,15 @@ function LoadingBlock({ c }: { c: ReturnType<typeof useColors> }) {
     >
       <span className="dg-verify-spinner" aria-hidden />
       <Text type="secondary" style={{ fontSize: 12.5 }}>
-        Comparing source and destination…
+        {label}
+      </Text>
+      {scanned != null && scanned > 0 && (
+        <Text type="secondary" style={{ fontSize: 12, color: c.TEXT_MUTED, fontVariantNumeric: 'tabular-nums' }}>
+          {scanned.toLocaleString()} objects scanned
+        </Text>
+      )}
+      <Text type="secondary" style={{ fontSize: 11.5, color: c.TEXT_MUTED }}>
+        Runs in the background — safe to navigate away.
       </Text>
       <style>{`
         .dg-verify-spinner {
@@ -157,12 +187,15 @@ function LoadingBlock({ c }: { c: ReturnType<typeof useColors> }) {
 
 export function ParityResult({
   outcome,
+  reverifying,
   onReverify,
   onRunNow,
   runNowPending,
   c,
 }: {
   outcome: ParityOutcome;
+  /** A background re-verify is running — show a subtle badge + spin the button. */
+  reverifying?: boolean;
   onReverify: () => void;
   /** Executes the rule's run-now (the only executable fix). Omitted = disabled CTA. */
   onRunNow?: () => void;
@@ -302,8 +335,8 @@ export function ParityResult({
         </div>
 
         <div style={{ marginTop: 18 }}>
-          <Button icon={<ReloadOutlined />} onClick={onReverify}>
-            {inSync ? 'Re-verify' : 'Verify again'}
+          <Button icon={<ReloadOutlined />} onClick={onReverify} loading={reverifying}>
+            {reverifying ? 'Re-verifying…' : inSync ? 'Re-verify' : 'Verify again'}
           </Button>
         </div>
       </div>
