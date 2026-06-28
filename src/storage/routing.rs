@@ -887,6 +887,15 @@ mod tests {
             Err(StorageError::NotFound("object".to_string()))
         }
 
+        async fn get_passthrough_stream(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<BoxStream<'static, Result<Bytes, StorageError>>, StorageError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
         async fn get_passthrough_stream_range(
             &self,
             bucket: &str,

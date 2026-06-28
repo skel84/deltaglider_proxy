@@ -1830,6 +1830,36 @@ mod tests {
         ) -> Result<Vec<u8>, crate::storage::StorageError> {
             Ok(vec![])
         }
+        async fn get_passthrough_stream(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<bytes::Bytes, crate::storage::StorageError>>,
+            crate::storage::StorageError,
+        > {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+        async fn get_passthrough_stream_range(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: u64,
+            _: u64,
+        ) -> Result<
+            (
+                futures::stream::BoxStream<
+                    'static,
+                    Result<bytes::Bytes, crate::storage::StorageError>,
+                >,
+                u64,
+            ),
+            crate::storage::StorageError,
+        > {
+            Ok((Box::pin(futures::stream::empty()), 0))
+        }
         async fn get_passthrough_metadata(
             &self,
             _: &str,
