@@ -47,7 +47,10 @@ pub(crate) fn audit_log_s3(
     crate::audit::audit_log(action, user, "", headers, bucket, path);
 }
 
-pub use status::{get_stats, head_root, health_check, HealthResponse, StatsQuery, StatsResponse};
+pub use status::{
+    get_stats, head_root, health_check, readiness_check, HealthResponse, ReadinessResponse,
+    StatsQuery, StatsResponse,
+};
 
 // Re-export for use by metrics module
 pub(crate) use status::get_peak_rss_bytes;

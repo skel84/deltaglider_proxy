@@ -156,7 +156,9 @@ pub async fn head_root() -> Response {
         .unwrap()
 }
 
-/// Health check handler
+/// Liveness probe — the process is up and the engine pointer is live. Fast, no
+/// I/O (an LB liveness check must not block on a slow backend). Always 200 while
+/// the process answers. For dependency health use the readiness probe below.
 /// GET /health
 pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let engine = state.engine.load();
@@ -171,11 +173,63 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResp
 
     Json(HealthResponse {
         status: "healthy".to_string(),
-        backend: "ready".to_string(),
+        backend: "live".to_string(),
         peak_rss_bytes: get_peak_rss_bytes(),
         cache_size_bytes,
         cache_max_bytes,
         cache_entries,
         cache_utilization_pct,
     })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReadinessResponse {
+    /// "ready" when every checked dependency is reachable, else "not_ready".
+    pub status: &'static str,
+    /// Storage backend reachability ("ready" | "unreachable" | "timeout").
+    pub backend: &'static str,
+    /// Config DB openability ("ready" | "locked" | "absent").
+    pub config_db: &'static str,
+}
+
+/// Readiness probe — actually exercises dependencies, so an LB can pull a node
+/// out of rotation when its backend is down (vs `/health` which only proves the
+/// process answers). Returns 503 when not ready. Bounded by a short timeout so a
+/// hung backend yields a fast "not ready" instead of blocking the probe.
+/// GET /ready
+pub async fn readiness_check(
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ReadinessResponse>) {
+    use std::time::Duration;
+    let engine = state.engine.load();
+    // Cheapest real backend op: list buckets, capped so a dead/slow backend
+    // fails the probe fast rather than hanging the LB health check.
+    let backend = match tokio::time::timeout(Duration::from_secs(3), engine.list_buckets()).await {
+        Ok(Ok(_)) => "ready",
+        Ok(Err(_)) => "unreachable",
+        Err(_) => "timeout",
+    };
+    // config DB: if configured, confirm we can take the lock (a poisoned/wedged
+    // mutex would mean the control plane is stuck). `None` = legacy/open mode.
+    let config_db = match &state.config_db {
+        Some(db) => match db.try_lock() {
+            Ok(_) => "ready",
+            Err(_) => "locked",
+        },
+        None => "absent",
+    };
+    let ready = backend == "ready" && config_db != "locked";
+    let code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(ReadinessResponse {
+            status: if ready { "ready" } else { "not_ready" },
+            backend,
+            config_db,
+        }),
+    )
 }

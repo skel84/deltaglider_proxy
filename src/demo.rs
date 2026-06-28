@@ -418,6 +418,10 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
             get(deltaglider_proxy::api::handlers::health_check).with_state(s3_state.clone()),
         )
         .route(
+            "/_/ready",
+            get(deltaglider_proxy::api::handlers::readiness_check).with_state(s3_state.clone()),
+        )
+        .route(
             "/_/metrics",
             get(deltaglider_proxy::metrics::metrics_handler).with_state(s3_state.clone()),
         );
