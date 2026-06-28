@@ -75,9 +75,10 @@ pub use groups::{
     update_group, AddGroupMemberRequest, CloneGroupRequest, CreateGroupRequest, UpdateGroupRequest,
 };
 pub use jobs::{
-    job_action as jobs_action, job_failures as jobs_failures, job_runs as jobs_runs,
-    job_verify_cancel as jobs_verify_cancel, job_verify_start as jobs_verify_start,
-    job_verify_status as jobs_verify_status, list_jobs as jobs_list,
+    job_action as jobs_action, job_failures as jobs_failures, job_parity_version,
+    job_runs as jobs_runs, job_verify_cancel as jobs_verify_cancel,
+    job_verify_start as jobs_verify_start, job_verify_status as jobs_verify_status,
+    list_jobs as jobs_list,
 };
 pub use logs::{get_logs, get_logs_stream};
 pub use maintenance::{
@@ -153,7 +154,15 @@ pub struct AdminState {
     /// currently derived from). See [`crate::admission`] for the type
     /// shape and evaluator.
     pub admission_chain: crate::admission::SharedAdmissionChain,
+    /// In-process cancel flags for running parity audits, keyed by rule name.
+    /// `verify_cancel` sets the flag for a fast (lock-free) abort; the durable
+    /// `cancelling` DB row remains the cross-instance / post-restart signal.
+    pub parity_cancels: ParityCancels,
 }
+
+/// Per-rule cancel flags for in-flight parity audits (see [`AdminState`]).
+pub type ParityCancels =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>;
 
 /// Trigger an async config DB upload to S3 if sync is enabled.
 /// Spawns a background task so the caller is not blocked.

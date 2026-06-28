@@ -843,6 +843,7 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         external_auth,
         public_prefix_snapshot,
         admission_chain,
+        parity_cancels: Default::default(),
     });
 
     // --- TLS ---

@@ -34,15 +34,24 @@ use super::remediation::{analyze_finding, FindingFacts, Remediation};
 use super::state_store::{ObjectFailure, ParityCacheEntry, ParitySide};
 
 /// Live-progress + cancel control for a background parity audit. The driver
-/// reports `objects scanned so far` into the parity row once per LIST page, and
-/// checks whether an external `POST verify/cancel` flipped the row to
-/// `cancelling` — if so it aborts with [`CANCELLED`]. Both use the same DB
-/// handle the audit already holds; passing `None` runs without progress/cancel
-/// (the no-DB / synchronous fallback path).
+/// reports `objects scanned so far` into the parity row (throttled — every
+/// [`PROGRESS_EVERY_N_PAGES`] pages), and checks for cancellation. Cancel uses
+/// TWO signals: a fast in-process `AtomicBool` (no lock, checked every page)
+/// AND the durable `cancelling` DB row (checked at phase boundaries — covers a
+/// cancel from ANOTHER instance / after a restart, where the in-process flag is
+/// absent). Passing `None` runs without progress/cancel (no-DB fallback path).
 pub struct ParityProgress<'a> {
     pub db: &'a tokio::sync::Mutex<ConfigDb>,
     pub rule: &'a str,
+    /// In-process cancel flag set by this instance's `verify_cancel`.
+    pub cancel: &'a std::sync::atomic::AtomicBool,
 }
+
+/// Write progress to the DB once every N pages (not every page) — the global
+/// ConfigDb mutex is shared with the whole IAM/admin path, and the count is a
+/// spinner-grade estimate. `ponytail`: fixed N; lower it if live progress ever
+/// needs to be finer-grained.
+const PROGRESS_EVERY_N_PAGES: usize = 8;
 
 /// Sentinel error string an audit returns when cancelled, so the caller can
 /// settle the row as `cancelled` rather than `failed`. `ponytail`: a sentinel
@@ -50,11 +59,37 @@ pub struct ParityProgress<'a> {
 /// and cancel is the single case that needs distinguishing.
 pub const CANCELLED: &str = "__parity_cancelled__";
 
+/// Monotonic counter bumped each time a background parity audit SETTLES
+/// (done/failed/cancelled). Mirrors `IAM_VERSION` — lets integration tests poll
+/// `GET …/jobs/parity-version` for a deterministic completion barrier instead of
+/// sleeping. Process-local (one per proxy), matching one-process-per-TestServer.
+static PARITY_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bump on settle. Call AFTER the terminal status row is written so a poller
+/// that sees the new version also sees the settled row.
+pub fn bump_parity_version() -> u64 {
+    PARITY_VERSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// Current settle count.
+pub fn current_parity_version() -> u64 {
+    PARITY_VERSION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 impl ParityProgress<'_> {
-    /// Status-only cancel check — used at phase boundaries OUTSIDE the per-page
-    /// scan loop (the resolve/HEAD-burst tail can be slow on a cold cache, so a
-    /// cancel must be honoured there too, not just during listing).
+    /// Fast in-process cancel check (no lock) — every page.
+    fn cancelled_local(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Cancel check at phase boundaries OUTSIDE the per-page loop (the
+    /// resolve/HEAD-burst tail can be slow on a cold cache). Checks the
+    /// in-process flag first (cheap), then the durable `cancelling` row (covers
+    /// a cancel from another instance / after a restart).
     async fn check_cancel(&self) -> Result<(), String> {
+        if self.cancelled_local() {
+            return Err(CANCELLED.to_string());
+        }
         let db = self.db.lock().await;
         if matches!(db.parity_status(self.rule).ok().flatten(), Some(s) if s == "cancelling") {
             return Err(CANCELLED.to_string());
@@ -733,20 +768,24 @@ async fn scan_prefix(
 ) -> Result<(bool, usize), String> {
     let mut kept = 0usize;
     let mut seen = 0usize;
+    let mut page_idx = 0usize;
     let mut truncated = false;
     let mut pager = crate::job_loop::Pager::fresh();
     'pages: while pager.begin_page().is_some() {
-        // Cancel check + progress report, once per page (cheap, bounded by the
-        // page count, not the object count). Status-only read — never loads the
-        // big outcome_json. The lock is held only for the SELECT + UPDATE.
+        // Fast cancel check EVERY page — in-process AtomicBool, no lock.
         if let Some(p) = progress {
-            let db = p.db.lock().await;
-            if matches!(db.parity_status(p.rule).ok().flatten(), Some(s) if s == "cancelling") {
+            if p.cancelled_local() {
                 return Err(CANCELLED.to_string());
             }
-            let now = super::current_unix_seconds();
-            let _ = db.parity_result_progress(p.rule, (base_scanned + seen) as i64, now);
+            // Progress write is throttled (lock-bearing) — the count is a
+            // spinner-grade estimate, not worth the global-mutex churn per page.
+            if page_idx.is_multiple_of(PROGRESS_EVERY_N_PAGES) {
+                let db = p.db.lock().await;
+                let now = super::current_unix_seconds();
+                let _ = db.parity_result_progress(p.rule, (base_scanned + seen) as i64, now);
+            }
         }
+        page_idx += 1;
         // Retry transient list errors (Hetzner 503 throttle on a long scan)
         // with backoff instead of failing the whole audit on one blip.
         // LITE list (metadata=false) — no per-object HEAD; logical metadata for
@@ -1148,6 +1187,25 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn check_cancel_honours_in_process_flag_without_a_db_hit() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let db = tokio::sync::Mutex::new(crate::config_db::ConfigDb::in_memory("t").unwrap());
+        let flag = AtomicBool::new(true);
+        let p = ParityProgress {
+            db: &db,
+            rule: "r",
+            cancel: &flag,
+        };
+        assert!(p.cancelled_local());
+        assert_eq!(p.check_cancel().await.unwrap_err(), CANCELLED);
+        // Cleared flag → local check is false (DB branch would run; here the row
+        // is absent so it returns Ok).
+        flag.store(false, Ordering::Relaxed);
+        assert!(!p.cancelled_local());
+        assert!(p.check_cancel().await.is_ok());
     }
 
     #[test]

@@ -314,6 +314,12 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
             "/_/api/admin/jobs/reencrypt",
             post(admin::maintenance_start_reencrypt),
         )
+        // Literal sibling of /jobs/:id/* (1-deep, like reencrypt) — the parity
+        // settle counter for the deterministic test barrier.
+        .route(
+            "/_/api/admin/jobs/parity-version",
+            get(admin::job_parity_version),
+        )
         .route("/_/api/admin/jobs/:id/runs", get(admin::jobs_runs))
         .route("/_/api/admin/jobs/:id/failures", get(admin::jobs_failures))
         // `verify` is a LITERAL segment handling BOTH GET (poll status) and POST

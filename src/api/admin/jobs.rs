@@ -503,6 +503,14 @@ pub async fn job_verify_cancel(
     Ok(Json(serde_json::to_value(resp).map_err(internal)?))
 }
 
+/// GET /_/api/admin/jobs/parity-version — monotonic counter bumped each time a
+/// background parity audit settles. Mirrors `iam/version`: lets integration
+/// tests poll for a deterministic completion barrier instead of sleeping.
+/// Unauthenticated (just a number, like the other version endpoints).
+pub async fn job_parity_version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "version": crate::replication::parity::current_parity_version() }))
+}
+
 /// GET /_/api/admin/jobs/:id/runs
 pub async fn job_runs(
     Path(id): Path<String>,

@@ -309,10 +309,20 @@ pub async fn verify(
         &rule.source.prefix,
     );
 
+    // In-process cancel flag for a fast (lock-free) abort. Registered for the
+    // duration of the scan; removed on settle. The durable 'cancelling' DB row
+    // stays the cross-instance / post-restart signal.
+    let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut map = state.parity_cancels.lock().unwrap();
+        map.insert(rule.name.clone(), cancel_flag.clone());
+    }
+
     // Detach the audit. It persists its own result + releases the lease.
     let engine = state.s3_state.engine.load().clone();
     let rule_clone = rule.clone();
     let db_for_task = db_arc.clone();
+    let cancels = state.parity_cancels.clone();
     tokio::spawn(async move {
         // Catch a panic in the audit so the lease + 'running' status are ALWAYS
         // settled — otherwise a panicked task would leave the lease stuck for the
@@ -325,6 +335,7 @@ pub async fn verify(
             Some(replication::parity::ParityProgress {
                 db: &db_for_task,
                 rule: &rule_clone.name,
+                cancel: &cancel_flag,
             }),
         ));
         let audit = futures::FutureExt::catch_unwind(audit);
@@ -391,6 +402,20 @@ pub async fn verify(
             }
         }
         let _ = db.parity_release_lease(&rule_clone.name, &owner);
+        drop(db);
+        // Bump AFTER the terminal row is written, so a test polling parity-version
+        // that sees the new count also sees the settled row.
+        replication::parity::bump_parity_version();
+        // Deregister this run's cancel flag (only if it's still ours — a new run
+        // may have replaced it). Removing a flag the registry no longer points to
+        // is harmless; guard on identity to avoid evicting a successor's flag.
+        let mut map = cancels.lock().unwrap();
+        if map
+            .get(&rule_clone.name)
+            .is_some_and(|f| Arc::ptr_eq(f, &cancel_flag))
+        {
+            map.remove(&rule_clone.name);
+        }
     });
 
     // Return the (now 'running') status immediately.
@@ -427,10 +452,15 @@ pub async fn verify_cancel(
     State(state): State<Arc<AdminState>>,
 ) -> Result<Json<ParityStatusResponse>, (StatusCode, String)> {
     let _ = snapshot_and_find_rule(&state, &name).await?;
+    // Fast in-process signal: a local scan checks this every page without a lock.
+    if let Some(flag) = state.parity_cancels.lock().unwrap().get(&name) {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let row = match &state.config_db {
         Some(db_arc) => {
             let db = db_arc.lock().await;
             let now = crate::replication::current_unix_seconds();
+            // Durable signal — survives restart + reaches another instance.
             let _ = db.parity_request_cancel(&name, now);
             db.parity_result_load(&name).ok().flatten()
         }

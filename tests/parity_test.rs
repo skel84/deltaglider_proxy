@@ -50,31 +50,50 @@ lifecycle:
 /// Kick off the background parity audit (POST → 202) then poll the status
 /// (GET) until it reaches a terminal state, returning the `outcome` object so
 /// the existing assertions (out["in_sync"], out["matched"], …) keep working.
+async fn parity_version(admin: &reqwest::Client, endpoint: &str) -> u64 {
+    admin
+        .get(format!("{endpoint}/_/api/admin/jobs/parity-version"))
+        .send()
+        .await
+        .expect("parity-version GET")
+        .json::<Value>()
+        .await
+        .unwrap()["version"]
+        .as_u64()
+        .expect("version is a number")
+}
+
 async fn verify(admin: &reqwest::Client, endpoint: &str) -> Value {
     let url = format!("{endpoint}/_/api/admin/jobs/replication:parity-a-to-b/verify");
+    // Capture the settle-counter BEFORE kicking off — the audit bumps it on
+    // terminal write, giving a deterministic barrier (no status-row polling).
+    let before = parity_version(admin, endpoint).await;
     let resp = admin.post(&url).send().await.expect("verify POST");
     let code = resp.status().as_u16();
     assert!(
         code == 202 || code == 200,
         "verify POST should be 202 (background) or 200 (no-DB), got {code}"
     );
-    // Poll GET until done/failed (≤ ~10s).
+    // Wait for the counter to advance (≤ ~10s), then read the settled status.
     for _ in 0..100 {
-        let s: Value = admin
-            .get(&url)
-            .send()
-            .await
-            .expect("verify GET")
-            .json()
-            .await
-            .unwrap();
-        match s.get("status").and_then(|v| v.as_str()) {
-            Some("done") => return s.get("outcome").cloned().expect("done has outcome"),
-            Some("failed") => panic!("parity audit failed: {:?}", s.get("error")),
-            _ => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+        if parity_version(admin, endpoint).await > before {
+            break;
         }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    panic!("parity audit did not complete in time");
+    let s: Value = admin
+        .get(&url)
+        .send()
+        .await
+        .expect("verify GET")
+        .json()
+        .await
+        .unwrap();
+    match s.get("status").and_then(|v| v.as_str()) {
+        Some("done") => s.get("outcome").cloned().expect("done has outcome"),
+        Some("failed") => panic!("parity audit failed: {:?}", s.get("error")),
+        other => panic!("parity audit did not settle to done; status={other:?}"),
+    }
 }
 
 #[tokio::test]
