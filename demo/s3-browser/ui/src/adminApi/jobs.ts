@@ -39,7 +39,7 @@ interface JobFailureEntry {
 
 // === Replication parity audit (the "Verify" tab) ===
 export type Verifier = 'sha256' | 'etag_size' | 'size_only';
-export type FindingKind = 'match' | 'checksum_mismatch' | 'missing_on_dest' | 'orphan_on_dest';
+type FindingKind = 'match' | 'checksum_mismatch' | 'missing_on_dest' | 'orphan_on_dest';
 
 /** The rule's conflict policy (kebab-case on the wire — see ConflictPolicy). */
 export type ConflictPolicy = 'newer-wins' | 'source-wins' | 'skip-if-dest-exists';

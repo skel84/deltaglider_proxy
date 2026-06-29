@@ -22,7 +22,6 @@ import {
   PauseOutlined,
   PlusOutlined,
   StopOutlined,
-  SyncOutlined,
 } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import type { LifecycleConfig, ReplicationConfig, StorageSectionBody } from '../../adminApi';
@@ -46,7 +45,6 @@ import { useApplyHandler } from '../../useDirtySection';
 import { useCardStyles } from '../shared-styles';
 import ApplyDialog from '../ApplyDialog';
 import StickyDirtyBar from '../StickyDirtyBar';
-import SectionHeader from '../SectionHeader';
 import ReencryptProposalModal from '../ReencryptProposalModal';
 import MigrateBucketModal from '../MigrateBucketModal';
 import JobDrawer from './JobDrawer';
@@ -402,14 +400,14 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       />
 
       <div style={cardStyle}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <SectionHeader
-              icon={<SyncOutlined />}
-              title="Jobs"
-              description={`Everything that runs in the background. ${displayRows.length} job${displayRows.length === 1 ? '' : 's'} — click one for its definition, runs, and failures.`}
-            />
-          </div>
+        {/* Lean toolbar — the page TabHeader already carries the "Jobs" title +
+            description, so this row is just the count + the action (no duplicate
+            heading). Keeps one header per screen and saves vertical space. */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            {displayRows.length} job{displayRows.length === 1 ? '' : 's'} — tap one for definition,
+            runs, and failures.
+          </Text>
           <Dropdown menu={newJobMenu} trigger={['click']}>
             <Button type="primary" icon={<PlusOutlined />}>
               New job

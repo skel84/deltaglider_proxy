@@ -9,7 +9,8 @@
  * Owns its own state via a useMutation (no poll, no auto-run on mount); it does
  * NOT touch the editable Definition form.
  */
-import { Alert, Button, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Tag, Typography } from 'antd';
+import RecordList from './RecordList';
 import {
   CaretRightOutlined,
   CheckOutlined,
@@ -17,7 +18,7 @@ import {
   SafetyCertificateOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
-import type { FindingKind, ParityFinding, ParityOutcome, Verifier } from '../../adminApi';
+import type { ParityFinding, ParityOutcome, Verifier } from '../../adminApi';
 import { conflictPolicyLabel, fixActionMeta, parityKindMeta, rerunVerdictMeta } from '../../jobsView';
 import {
   useCancelVerify,
@@ -549,51 +550,41 @@ function FindingsTable({
       <Text strong style={{ display: 'block', fontSize: 13.5, marginBottom: 8 }}>
         Differences
       </Text>
-      <Table<ParityFinding>
-        dataSource={rows}
+      <RecordList<ParityFinding>
+        rows={rows}
         rowKey={(f) => `${f.kind}:${f.key}`}
-        size="small"
-        pagination={false}
-        locale={{ emptyText: 'No sampled differences' }}
+        empty="No sampled differences"
         columns={[
           {
-            title: 'Object',
-            render: (_: unknown, f) => (
-              <Text
-                style={{
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 12,
-                  display: 'inline-block',
-                  maxWidth: 220,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  verticalAlign: 'bottom',
-                }}
-                title={f.key}
-              >
+            key: 'object',
+            label: 'Object',
+            track: 'minmax(0,2fr)',
+            render: (f) => (
+              <span className="dg-fail-text" style={{ fontFamily: 'var(--font-mono)' }} title={f.key}>
                 {f.key}
-              </Text>
+              </span>
             ),
           },
           {
-            title: 'Issue',
-            width: 140,
-            render: (_: unknown, f) => {
-              const kind: FindingKind = f.kind;
-              const meta = parityKindMeta(kind);
+            key: 'issue',
+            label: 'Issue',
+            track: 'max-content',
+            render: (f) => {
+              const meta = parityKindMeta(f.kind);
               return <Tag color={meta.color}>{meta.label}</Tag>;
             },
           },
           {
-            title: 'Why',
-            width: 250,
-            render: (_: unknown, f) => <WhyCell finding={f} c={c} />,
+            key: 'why',
+            label: 'Why',
+            track: 'minmax(0,1.5fr)',
+            render: (f) => <WhyCell finding={f} c={c} />,
           },
           {
-            title: 'Fix',
-            width: 230,
-            render: (_: unknown, f) => (
+            key: 'fix',
+            label: 'Fix',
+            track: 'minmax(0,1.5fr)',
+            render: (f) => (
               <FixCell finding={f} c={c} onRunNow={onRunNow} runNowPending={runNowPending} />
             ),
           },
