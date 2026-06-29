@@ -10,6 +10,25 @@ follow [semantic versioning](https://semver.org/); the Docker image
 
 _Last updated: 2026-06-29_
 
+## v1.8.3 — 2026-06-29
+
+### Fixed
+
+- **Verify tab showed stale results as if live during a re-verify.** While a
+  re-verification was running, the panel kept displaying the previous run's
+  full verdict (difference counts, breakdown chips, "Checked Nh ago") with only
+  a small "Re-verifying…" button to hint it was out of date — easy to mistake
+  the old numbers for the current state. A re-verify now shows a prominent
+  progress banner (live scanned count + Cancel) and dims the prior result,
+  clearly labelled as the previous verdict being refreshed.
+
+### Changed
+
+- **Polished the verification wait screen.** The first-run/in-progress state is
+  now a framed panel matching the verdict's visual language — a pulsing shield
+  halo, the live objects-scanned count, an indeterminate progress bar, and a
+  reminder that the scan runs in the background — instead of a bare spinner.
+
 ## v1.8.2 — 2026-06-29
 
 ### Fixed
