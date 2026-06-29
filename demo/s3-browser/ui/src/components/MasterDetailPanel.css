@@ -1,0 +1,26 @@
+/* Responsive split: wide = list|detail side-by-side; narrow = stacked
+   (list on top, capped height; detail below). Container-query on own width. */
+.dg-master-detail {
+  container-type: inline-size;
+  container-name: masterdetail;
+}
+
+@container masterdetail (max-width: 640px) {
+  .dg-md-split {
+    flex-direction: column;
+    overflow: auto;
+  }
+  .dg-md-list {
+    /* Full width; cap height so the detail below stays reachable. */
+    width: auto !important;
+    min-width: 0 !important;
+    max-height: 45vh;
+    border-right: none !important;
+    border-bottom: 1px solid var(--dg-md-border, rgba(0, 0, 0, 0.08));
+  }
+  .dg-md-detail {
+    /* Let the detail grow with its content. */
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+}

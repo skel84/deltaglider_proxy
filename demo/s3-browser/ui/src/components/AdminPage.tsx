@@ -899,6 +899,9 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         <div
           style={{
             flex: 1,
+            // min-width:0 lets the flex pane shrink below content's intrinsic
+            // width — without it, wide rows force horizontal overflow on mobile.
+            minWidth: 0,
             overflow: 'auto',
           }}
         >

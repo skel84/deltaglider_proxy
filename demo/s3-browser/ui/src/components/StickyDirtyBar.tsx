@@ -94,13 +94,16 @@ export default function StickyDirtyBar({
           pointerEvents: visible ? 'auto' : 'none',
           display: 'flex',
           alignItems: 'center',
+          // Wrap so the message + Discard/Apply don't overflow a phone width.
+          flexWrap: 'wrap',
+          rowGap: 8,
           gap: 14,
           padding: '8px 12px 8px 14px',
           borderRadius: 12,
           background: c.BG_ELEVATED,
           border: `1px solid ${hasErrors ? c.ACCENT_RED : c.BORDER}`,
           boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
-          maxWidth: 560,
+          maxWidth: 'min(560px, calc(100vw - 24px))',
         }}
       >
         <ExclamationCircleFilled

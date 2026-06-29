@@ -201,6 +201,13 @@ body {
   display: none !important;
 }
 
+/* AntD <Layout> flex children default to min-width:auto, so wide content (a
+   fixed-px table) balloons the whole shell past the viewport on mobile. */
+.ant-layout,
+.ant-layout-content {
+  min-width: 0;
+}
+
 /* ───── Ant Design table overrides ───── */
 .ant-table-wrapper .ant-table-tbody > tr.ant-table-row:hover > td {
   background: var(--table-row-hover) !important;

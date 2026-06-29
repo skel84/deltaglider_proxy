@@ -358,11 +358,11 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
               borderRadius: 8,
               background: b.name === defaultBackend ? colors.ACCENT_BLUE + '08' : colors.BG_ELEVATED,
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', rowGap: 8 }}>
                 {b.backend_type === 'filesystem'
                   ? <DatabaseOutlined style={{ fontSize: 16, color: colors.ACCENT_BLUE }} />
                   : <CloudOutlined style={{ fontSize: 16, color: colors.ACCENT_BLUE }} />}
-                <div style={{ flex: 1 }}>
+                <div style={{ flex: '1 1 180px', minWidth: 0 }}>
                   <Text strong style={{ fontFamily: 'var(--font-ui)', fontSize: 14 }}>{b.name}</Text>
                   {b.name === defaultBackend && (
                     <span style={{ fontSize: 10, color: colors.ACCENT_BLUE, marginLeft: 8, fontWeight: 600 }}>DEFAULT</span>
@@ -375,7 +375,7 @@ export default function BackendsPanel({ onSessionExpired }: Props) {
                       LEGACY SINGLETON
                     </span>
                   )}
-                  <div style={{ fontSize: 12, color: colors.TEXT_MUTED, fontFamily: 'var(--font-mono)' }}>
+                  <div style={{ fontSize: 12, color: colors.TEXT_MUTED, fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere' }}>
                     {b.backend_type === 'filesystem'
                       ? `filesystem: ${b.path}`
                       : `s3: ${b.endpoint || 'AWS'} (${b.region})`}

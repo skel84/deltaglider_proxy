@@ -3,6 +3,7 @@ import { Button, Typography, Alert, Input } from 'antd';
 import { PlusOutlined, SearchOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import { LoadingState } from './StatePlaceholders';
+import './MasterDetailPanel.css';
 
 const { Text } = Typography;
 
@@ -80,20 +81,36 @@ export default function MasterDetailPanel<T>({
   const colors = useColors();
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+    <div
+      className="dg-master-detail"
+      style={
+        {
+          display: 'flex',
+          flexDirection: 'column',
+          height: '100%',
+          overflow: 'hidden',
+          '--dg-md-border': colors.BORDER,
+        } as React.CSSProperties
+      }
+    >
       {banner !== undefined && (
         <div style={{ padding: '12px 16px 0' }}>{banner}</div>
       )}
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {/* Split: side-by-side on a wide container, stacked (list-over-detail) on
+          narrow via the container query in MasterDetailPanel.css. */}
+      <div className="dg-md-split" style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* Left: List */}
-        <div style={{
-          width: 300,
-          minWidth: 260,
-          borderRight: `1px solid ${colors.BORDER}`,
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}>
+        <div
+          className="dg-md-list"
+          style={{
+            width: 300,
+            minWidth: 260,
+            borderRight: `1px solid ${colors.BORDER}`,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
           <div style={{ padding: '16px 16px 12px', borderBottom: `1px solid ${colors.BORDER}` }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
               <Text strong style={{ fontSize: 14 }}>{title}</Text>
@@ -153,7 +170,7 @@ export default function MasterDetailPanel<T>({
         </div>
 
         {/* Right: Detail */}
-        <div style={{ flex: 1, overflow: 'auto', background: colors.BG_CARD }}>
+        <div className="dg-md-detail" style={{ flex: 1, overflow: 'auto', background: colors.BG_CARD }}>
           {detail}
         </div>
       </div>

@@ -24,13 +24,12 @@
  * beforeunload, and Cmd/Ctrl+S behave like the rest of Configuration.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Button, Space, message } from 'antd';
-import { CloudOutlined, PlusOutlined } from '@ant-design/icons';
+import { Alert, Button, Space, Typography, message } from 'antd';
+import { PlusOutlined } from '@ant-design/icons';
 import type { AdminConfig, BackendInfo } from '../adminApi';
 import { getBackends, getBucketOrigins } from '../adminApi';
 import { useAdminConfig } from '../queries/config';
 import { useCardStyles } from './shared-styles';
-import SectionHeader from './SectionHeader';
 import ApplyDialog from './ApplyDialog';
 import BucketCard from './BucketCard';
 import CreateBucketModal from './CreateBucketModal';
@@ -49,6 +48,8 @@ interface Props {
 type PolicyGet = NonNullable<AdminConfig['bucket_policies']>[string];
 /** GET returns full policies; PUT sends the merge-patch (values may be null). */
 type BucketWire = { buckets: Record<string, PolicyGet | BucketPolicyPatch | null> };
+
+const { Text } = Typography;
 
 export default function BucketsPanel({ onSessionExpired }: Props) {
   const { cardStyle, inputRadius } = useCardStyles();
@@ -269,19 +270,17 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
       )}
 
       <div style={cardStyle}>
-        <SectionHeader
-          icon={<CloudOutlined />}
-          title="Buckets"
-          description={
-            loading
-              ? 'Loading...'
-              : `${sortedReal.length} bucket${sortedReal.length === 1 ? '' : 's'}` +
-                (overrideCount > 0
-                  ? ` · ${overrideCount} with custom settings`
-                  : ' — all on defaults') +
-                '. Click a bucket to edit its settings.'
-          }
-        />
+        {/* The page TabHeader already carries the "Buckets" title + description,
+            so this is just the dynamic count line (no duplicate heading). */}
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          {loading
+            ? 'Loading…'
+            : `${sortedReal.length} bucket${sortedReal.length === 1 ? '' : 's'}` +
+              (overrideCount > 0
+                ? ` · ${overrideCount} with custom settings`
+                : ' — all on defaults') +
+              '. Click a bucket to edit its settings.'}
+        </Text>
 
         <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
           {sortedReal.map((name) => {
@@ -331,13 +330,13 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
             />
           ))}
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, rowGap: 6, marginTop: 4, flexWrap: 'wrap' }}>
             <Button
               data-testid="buckets-create"
               aria-label="Create bucket"
               icon={<PlusOutlined />}
               onClick={() => setCreateOpen(true)}
-              style={{ borderRadius: 8, fontFamily: 'var(--font-ui)' }}
+              style={{ borderRadius: 8, fontFamily: 'var(--font-ui)', flexShrink: 0 }}
               type="dashed"
             >
               Create bucket
@@ -345,7 +344,7 @@ export default function BucketsPanel({ onSessionExpired }: Props) {
             <Button
               type="link"
               size="small"
-              style={{ fontSize: 11, padding: 0 }}
+              style={{ fontSize: 11, padding: 0, whiteSpace: 'normal', textAlign: 'left', height: 'auto' }}
               onClick={addDraft}
             >
               Pre-provision settings for a bucket that doesn&rsquo;t exist yet

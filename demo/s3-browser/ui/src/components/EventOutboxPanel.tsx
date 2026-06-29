@@ -394,6 +394,8 @@ export default function EventOutboxPanel({ onSessionExpired }: Props) {
         )}
       </div>
 
+      {/* ponytail: dense server-paginated/sorted diagnostic table — scrolls
+          horizontally on mobile (clipped wrapper); card-stack would drop sort+pagination. */}
       <div style={{ border: `1px solid ${colors.BORDER}`, borderRadius: 8, overflow: 'hidden', background: colors.BG_CARD }}>
         <Table<EventOutboxRecord>
           columns={columns}
@@ -403,7 +405,7 @@ export default function EventOutboxPanel({ onSessionExpired }: Props) {
           size="small"
           tableLayout="fixed"
           showSorterTooltip={false}
-          scroll={{ x: 1510 }}
+          scroll={{ x: 'max-content' }}
           onChange={onTableChange}
           locale={{
             emptyText: loading

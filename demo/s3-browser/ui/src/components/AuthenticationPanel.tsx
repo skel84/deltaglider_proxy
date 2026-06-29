@@ -168,9 +168,9 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
       <IamSourceBanner iamMode={iamMode} resource="OAuth providers + mapping rules" />
       {/* Identity Providers */}
       <SectionHeader icon={<SafetyOutlined />} title="Identity Providers" />
-      <div style={{ display: 'flex', gap: 16, marginBottom: 24 }}>
-        {/* Left: provider list */}
-        <div style={{ width: 220, flexShrink: 0 }}>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 24, flexWrap: 'wrap' }}>
+        {/* Left: provider list — stacks above the detail when the row wraps. */}
+        <div style={{ width: 220, flexShrink: 0, flexGrow: 1, maxWidth: '100%' }}>
           {!readOnly && (
             <Button icon={<PlusOutlined />} block size="small" onClick={() => { setCreating(true); setSelectedProviderId(null); }} style={{ marginBottom: 8 }}>
               New Provider
@@ -203,7 +203,7 @@ export default function AuthenticationPanel({ onSessionExpired }: Props) {
         {/* Right: provider form — keyed remount resets state per selection
             (key={provider.id} for edit, key="new" for create), so there's no
             imperative prop→state mirror. */}
-        <div style={{ flex: 1 }}>
+        <div style={{ flex: '1 1 280px', minWidth: 0 }}>
           {creating ? (
             <ProviderForm
               key="new"
