@@ -179,6 +179,12 @@ export default function VerifyTab({ ruleName }: Props) {
   );
 }
 
+/**
+ * Wait screen for an in-flight verification (first run or loading). A framed
+ * panel that mirrors the verdict's visual language: a pulsing blue halo around
+ * the shield glyph, the live scanned count as the anchor, an indeterminate
+ * progress bar, and a reassurance that it runs in the background.
+ */
 function LoadingBlock({
   c,
   label = 'Comparing source and destination…',
@@ -192,33 +198,96 @@ function LoadingBlock({
   onCancel?: () => void;
 }) {
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 12,
-        padding: 56,
-      }}
-    >
-      <span className="dg-verify-spinner" aria-hidden />
-      <Text type="secondary" style={{ fontSize: 12.5 }}>
-        {label}
-      </Text>
-      {scanned != null && scanned > 0 && (
-        <Text type="secondary" style={{ fontSize: 12, color: c.TEXT_MUTED, fontVariantNumeric: 'tabular-nums' }}>
-          {scanned.toLocaleString()} objects scanned
+    <div style={{ padding: '4px 2px' }}>
+      <div
+        role="status"
+        aria-live="polite"
+        style={{
+          background: c.BG_ELEVATED,
+          border: `1px solid ${c.BORDER}`,
+          borderRadius: 14,
+          padding: '40px 24px 30px',
+          textAlign: 'center',
+          boxShadow: c.ELEV_SHADOW,
+        }}
+      >
+        {/* Pulsing blue halo + shield — same motif as the verdict panel. */}
+        <div
+          className="dg-verify-halo"
+          style={{
+            width: 96,
+            height: 96,
+            margin: '0 auto 20px',
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: `radial-gradient(circle at center, ${c.ACCENT_BLUE}33 0%, transparent 70%)`,
+          }}
+        >
+          <div
+            style={{
+              position: 'relative',
+              width: 72,
+              height: 72,
+              borderRadius: '50%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: `${c.ACCENT_BLUE}1f`,
+              border: `1.5px solid ${c.ACCENT_BLUE}66`,
+            }}
+          >
+            <span className="dg-verify-spinner dg-verify-ring" aria-hidden />
+            <SafetyCertificateOutlined style={{ fontSize: 32, color: c.ACCENT_BLUE }} />
+          </div>
+        </div>
+
+        <div style={{ fontSize: 18, fontWeight: 700, color: c.TEXT_PRIMARY, marginBottom: 6 }}>
+          {label}
+        </div>
+
+        {/* Live scanned count — the anchor while it runs. */}
+        <div
+          style={{
+            fontSize: 13,
+            color: c.TEXT_SECONDARY,
+            fontVariantNumeric: 'tabular-nums',
+            minHeight: 18,
+          }}
+        >
+          {scanned != null && scanned > 0
+            ? `${scanned.toLocaleString()} objects scanned`
+            : 'Starting scan…'}
+        </div>
+
+        {/* Indeterminate progress bar (no known total from the server). */}
+        <div
+          style={{
+            position: 'relative',
+            height: 4,
+            maxWidth: 280,
+            margin: '18px auto 0',
+            borderRadius: 999,
+            background: c.BORDER,
+            overflow: 'hidden',
+          }}
+        >
+          <span className="dg-verify-bar" style={{ background: c.ACCENT_BLUE }} aria-hidden />
+        </div>
+
+        <Text type="secondary" style={{ display: 'block', fontSize: 11.5, color: c.TEXT_MUTED, marginTop: 16 }}>
+          Logical SHA-256 + size from metadata — no downloads. Runs in the background, so you can
+          leave this page and come back.
         </Text>
-      )}
-      <Text type="secondary" style={{ fontSize: 11.5, color: c.TEXT_MUTED }}>
-        Runs in the background — safe to navigate away.
-      </Text>
-      {onCancel && (
-        <Button size="small" onClick={onCancel} style={{ marginTop: 4 }}>
-          Cancel
-        </Button>
-      )}
+
+        {onCancel && (
+          <Button size="small" onClick={onCancel} style={{ marginTop: 16 }}>
+            Cancel
+          </Button>
+        )}
+      </div>
+
       <style>{`
         .dg-verify-spinner {
           width: 28px; height: 28px; border-radius: 50%;
@@ -226,7 +295,27 @@ function LoadingBlock({
           border-top-color: ${c.ACCENT_BLUE};
           animation: dg-verify-spin 0.7s linear infinite;
         }
+        .dg-verify-ring {
+          position: absolute; inset: -7px; width: auto; height: auto;
+          border-width: 2.5px; border-color: transparent;
+          border-top-color: ${c.ACCENT_BLUE};
+        }
         @keyframes dg-verify-spin { to { transform: rotate(360deg); } }
+        .dg-verify-halo { animation: dg-verify-pulse 1.8s ease-in-out infinite; }
+        @keyframes dg-verify-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.75; } }
+        .dg-verify-bar {
+          position: absolute; top: 0; left: 0; height: 100%; width: 40%;
+          border-radius: 999px;
+          animation: dg-verify-slide 1.3s ease-in-out infinite;
+        }
+        @keyframes dg-verify-slide {
+          0% { transform: translateX(-110%); }
+          100% { transform: translateX(360%); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .dg-verify-bar { animation: none; width: 100%; opacity: 0.5; }
+          .dg-verify-halo { animation: none; }
+        }
       `}</style>
     </div>
   );
@@ -280,8 +369,20 @@ export function ParityResult({
 
   return (
     <div style={{ padding: '4px 2px' }}>
-      {/* Framed verdict panel on elevated bg */}
+      {/* While a re-verify runs, the prior verdict below is STALE. Show a live
+          progress header so the old numbers aren't mistaken for current. */}
+      {reverifying && (
+        <ReverifyBanner
+          c={c}
+          scanned={reverifyScanned}
+          onCancel={onCancelReverify}
+          since={scannedDate}
+        />
+      )}
+      {/* Framed verdict panel on elevated bg. Dimmed + non-interactive while a
+          re-verify is in flight (it's the previous result, not live). */}
       <div
+        aria-hidden={reverifying || undefined}
         style={{
           background: c.BG_ELEVATED,
           border: `1px solid ${c.BORDER}`,
@@ -289,6 +390,10 @@ export function ParityResult({
           padding: '32px 24px 26px',
           textAlign: 'center',
           boxShadow: c.ELEV_SHADOW,
+          opacity: reverifying ? 0.45 : 1,
+          filter: reverifying ? 'grayscale(0.4)' : 'none',
+          pointerEvents: reverifying ? 'none' : 'auto',
+          transition: 'opacity 0.2s ease, filter 0.2s ease',
         }}
       >
         {/* Halo + glyph */}
@@ -389,61 +494,128 @@ export function ParityResult({
           Checked {timeAgo(scannedDate)} · logical SHA-256 + size, from metadata
         </div>
 
-        <div style={{ marginTop: 18, display: 'flex', gap: 8, justifyContent: 'center', alignItems: 'center' }}>
-          <Button icon={<ReloadOutlined />} onClick={onReverify} loading={reverifying}>
-            {reverifying ? 'Re-verifying…' : inSync ? 'Re-verify' : 'Verify again'}
-          </Button>
-          {reverifying && onCancelReverify && (
-            <Button size="small" onClick={onCancelReverify}>
-              Cancel
+        {/* Re-verify control lives here only when idle; while running, the
+            ReverifyBanner above owns the progress + Cancel. */}
+        {!reverifying && (
+          <div style={{ marginTop: 18, display: 'flex', gap: 8, justifyContent: 'center', alignItems: 'center' }}>
+            <Button icon={<ReloadOutlined />} onClick={onReverify}>
+              {inSync ? 'Re-verify' : 'Verify again'}
             </Button>
-          )}
-          {reverifying && reverifyScanned != null && reverifyScanned > 0 && (
-            <Text type="secondary" style={{ fontSize: 12, color: c.TEXT_MUTED, fontVariantNumeric: 'tabular-nums' }}>
-              {reverifyScanned.toLocaleString()} scanned
-            </Text>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
-      {/* Truncation note */}
-      {outcome.truncated && (
-        <Alert
-          type="info"
-          showIcon
-          style={{ borderRadius: 8, marginTop: 14 }}
-          message="Scan capped"
-          description={`The audit stopped after the first ${(
-            outcome.source_objects + outcome.dest_objects
-          ).toLocaleString()} objects. Counts and findings cover only the scanned portion.`}
-        />
-      )}
-
-      {/* Unverifiable-only case: nothing is missing/extra/corrupt, but some
-          objects could only be size-matched (foreign, no logical SHA-256). */}
-      {!inSync &&
-        outcome.unverifiable > 0 &&
-        outcome.missing_on_dest === 0 &&
-        outcome.orphan_on_dest === 0 &&
-        outcome.checksum_mismatch === 0 && (
+      {/* Everything below the verdict is also part of the STALE prior result —
+          dim it together while a re-verify runs. */}
+      <div
+        aria-hidden={reverifying || undefined}
+        style={{
+          opacity: reverifying ? 0.45 : 1,
+          filter: reverifying ? 'grayscale(0.4)' : 'none',
+          pointerEvents: reverifying ? 'none' : 'auto',
+          transition: 'opacity 0.2s ease, filter 0.2s ease',
+        }}
+      >
+        {/* Truncation note */}
+        {outcome.truncated && (
           <Alert
             type="info"
             showIcon
             style={{ borderRadius: 8, marginTop: 14 }}
-            message="Some objects matched on size only"
-            description="These objects weren't written through the proxy, so no logical SHA-256 is available — write them through the proxy for full checksum parity."
+            message="Scan capped"
+            description={`The audit stopped after the first ${(
+              outcome.source_objects + outcome.dest_objects
+            ).toLocaleString()} objects. Counts and findings cover only the scanned portion.`}
           />
         )}
 
-      {/* Findings table */}
-      {!inSync && (
-        <FindingsTable
-          outcome={outcome}
-          c={c}
-          onRunNow={onRunNow}
-          runNowPending={runNowPending}
-        />
+        {/* Unverifiable-only case: nothing is missing/extra/corrupt, but some
+            objects could only be size-matched (foreign, no logical SHA-256). */}
+        {!inSync &&
+          outcome.unverifiable > 0 &&
+          outcome.missing_on_dest === 0 &&
+          outcome.orphan_on_dest === 0 &&
+          outcome.checksum_mismatch === 0 && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ borderRadius: 8, marginTop: 14 }}
+              message="Some objects matched on size only"
+              description="These objects weren't written through the proxy, so no logical SHA-256 is available — write them through the proxy for full checksum parity."
+            />
+          )}
+
+        {/* Findings table */}
+        {!inSync && (
+          <FindingsTable
+            outcome={outcome}
+            c={c}
+            onRunNow={onRunNow}
+            runNowPending={runNowPending}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Live progress header shown above the (dimmed) prior verdict while a re-verify
+ * runs — so the stale numbers below can't be mistaken for the current result.
+ */
+function ReverifyBanner({
+  c,
+  scanned,
+  onCancel,
+  since,
+}: {
+  c: ReturnType<typeof useColors>;
+  scanned?: number;
+  onCancel?: () => void;
+  since: Date;
+}) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        padding: '14px 16px',
+        marginBottom: 14,
+        borderRadius: 12,
+        background: c.BG_ELEVATED,
+        border: `1px solid ${c.ACCENT_BLUE}40`,
+      }}
+    >
+      <span className="dg-verify-spinner dg-verify-spinner-sm" aria-hidden />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <Text strong style={{ display: 'block', fontSize: 14, color: c.TEXT_PRIMARY }}>
+          Re-verifying parity…
+        </Text>
+        <Text type="secondary" style={{ fontSize: 12.5, color: c.TEXT_MUTED }}>
+          {scanned != null && scanned > 0
+            ? `${scanned.toLocaleString()} objects scanned · `
+            : ''}
+          recomputing — the result below is from {timeAgo(since)} and is being refreshed.
+        </Text>
+      </div>
+      {onCancel && (
+        <Button size="small" onClick={onCancel} style={{ flexShrink: 0 }}>
+          Cancel
+        </Button>
       )}
+      <style>{`
+        .dg-verify-spinner-sm { width: 22px; height: 22px; border-width: 2.5px; flex-shrink: 0; }
+        .dg-verify-spinner {
+          width: 28px; height: 28px; border-radius: 50%;
+          border: 3px solid ${c.BORDER};
+          border-top-color: ${c.ACCENT_BLUE};
+          animation: dg-verify-spin 0.7s linear infinite;
+        }
+        @keyframes dg-verify-spin { to { transform: rotate(360deg); } }
+      `}</style>
     </div>
   );
 }
