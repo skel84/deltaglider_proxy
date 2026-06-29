@@ -74,7 +74,11 @@ export default function StickyDirtyBar({
       // margins; the inner bar re-enables them.
       style={{
         ...positionStyle,
-        zIndex: 20,
+        // Above the AntD Drawer/Modal (z-index 1000): a rule edited INSIDE the
+        // Jobs drawer raises this page-level bar, so it must float OVER the
+        // drawer to stay reachable (it sat behind it at z-index 20). Inline mode
+        // has no positioning, so the high z is harmless there.
+        zIndex: 1001,
         display: 'flex',
         justifyContent: 'center',
         pointerEvents: 'none',
