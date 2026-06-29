@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## v1.8.1 — 2026-06-29
+
+### Fixed
+
+- **Mobile horizontal overflow across the admin UI.** Every admin settings page
+  (all 15 routes) could scroll sideways on a phone, clipping chips, buttons, and
+  table columns. Root cause was flex containers — the content pane and the
+  Ant Design `<Layout>` chain — defaulting to `min-width: auto`, so a single wide
+  row or fixed-width table widened the whole shell past the viewport. Fixed
+  systemically (`min-width: 0`) plus per-panel wrap fixes; dense diagnostic
+  tables (Audit, Event Outbox) now scroll within their own card. The
+  Users/Groups/Authentication master-detail split stacks vertically on narrow
+  screens. Verified at a 380px viewport with zero page-level horizontal scroll.
+- **Jobs and Verify-findings panels are now mobile-friendly** — the Verify results
+  table reflows to stacked cards, and the Jobs list drops its duplicate header.
+- **The unsaved-changes bar no longer hides behind the Jobs drawer** — it now
+  floats above the drawer where replication/lifecycle rules are edited, so Apply
+  stays reachable.
+
 ## v1.8.0 — 2026-06-29
 
 ### Security
