@@ -553,9 +553,10 @@ fn wrap_backend_with_encryption(
         legacy_key: legacy_key_opt,
         legacy_key_id: legacy_kid_opt,
     })));
-    Ok(Box::new(crate::storage::EncryptingBackend::new(
-        inner, enc_config,
-    )))
+    Ok(Box::new(
+        crate::storage::EncryptingBackend::new(inner, enc_config)
+            .with_native_relay_allowed(!matches!(enc, E::Aes256GcmProxy { .. })),
+    ))
 }
 
 /// Pull the legacy_key / legacy_key_id pair out of the per-backend

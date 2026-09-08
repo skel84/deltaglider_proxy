@@ -815,11 +815,21 @@ async fn fetch_chunked_header<B: StorageBackend + ?Sized>(
 pub struct EncryptingBackend<B: StorageBackend> {
     inner: B,
     config: Arc<ArcSwap<EncryptionConfig>>,
+    native_relay_allowed: bool,
 }
 
 impl<B: StorageBackend> EncryptingBackend<B> {
     pub fn new(inner: B, config: Arc<ArcSwap<EncryptionConfig>>) -> Self {
-        Self { inner, config }
+        Self {
+            inner,
+            config,
+            native_relay_allowed: true,
+        }
+    }
+
+    pub(crate) fn with_native_relay_allowed(mut self, allowed: bool) -> Self {
+        self.native_relay_allowed = allowed;
+        self
     }
 
     fn current_key(&self) -> Option<EncryptionKey> {
@@ -1038,6 +1048,85 @@ impl<B: StorageBackend + Send + Sync> StorageBackend for EncryptingBackend<B> {
         let enc = self.encrypt_if_enabled(data, &mut meta)?;
         self.inner
             .put_passthrough(bucket, prefix, filename, &enc, &meta)
+            .await
+    }
+
+    fn native_relay_target(&self, bucket: &str) -> Option<(Box<dyn StorageBackend>, String)> {
+        let config = self.config.load_full();
+        if !self.native_relay_allowed
+            || (config.write_mode == WriteMode::Encrypt && config.key.is_some())
+        {
+            return None;
+        }
+        let (inner, bucket) = self.inner.native_relay_target(bucket)?;
+        Some((
+            Box::new(EncryptingBackend::new(
+                inner,
+                Arc::new(ArcSwap::from(config)),
+            )),
+            bucket,
+        ))
+    }
+
+    async fn put_passthrough_parts(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        part_paths: &[std::path::PathBuf],
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncReadExt;
+
+        // One snapshot fixes the write policy for this operation even during reload.
+        let config = self.config.load_full();
+        if config.write_mode == WriteMode::Encrypt && config.key.is_some() {
+            return Err(StorageError::Encryption(
+                "bounded relay-parts completion does not support proxy encryption".into(),
+            ));
+        }
+        // These paths contain plaintext; retaining an encryption marker would
+        // publish an object that the read path cannot decrypt.
+        if metadata.user_metadata.contains_key(ENCRYPTION_MARKER_KEY)
+            || metadata.user_metadata.contains_key(ENCRYPTION_KEY_ID_KEY)
+        {
+            return Err(StorageError::Encryption(
+                "plaintext relay parts must not carry encryption markers".into(),
+            ));
+        }
+
+        let mut sha256 = Sha256::new();
+        let mut md5 = md5::Md5::new();
+        let mut size = 0u64;
+        let mut buffer = vec![0u8; 64 * 1024];
+        for path in part_paths {
+            let mut file = tokio::fs::File::open(path).await?;
+            loop {
+                let count = file.read(&mut buffer).await?;
+                if count == 0 {
+                    break;
+                }
+                size = size
+                    .checked_add(count as u64)
+                    .ok_or_else(|| StorageError::Other("relay size overflow".into()))?;
+                if size > metadata.file_size {
+                    return Err(StorageError::Other("relay plaintext size mismatch".into()));
+                }
+                sha256.update(&buffer[..count]);
+                md5.update(&buffer[..count]);
+            }
+        }
+        if size != metadata.file_size
+            || hex::encode(sha256.finalize()) != metadata.file_sha256
+            || hex::encode(md5.finalize()) != metadata.md5
+        {
+            return Err(StorageError::Other(
+                "relay plaintext integrity mismatch".into(),
+            ));
+        }
+        self.inner
+            .put_passthrough_parts(bucket, prefix, filename, part_paths, metadata)
             .await
     }
 
@@ -1600,6 +1689,158 @@ mod tests {
     fn test_key() -> EncryptionKey {
         EncryptionKey::from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
             .unwrap()
+    }
+
+    fn relay_metadata(data: &[u8]) -> FileMetadata {
+        use sha2::{Digest, Sha256};
+        FileMetadata::new_passthrough(
+            "archive.tar.gz".into(),
+            hex::encode(Sha256::digest(data)),
+            hex::encode(md5::Md5::digest(data)),
+            data.len() as u64,
+            None,
+        )
+    }
+
+    async fn relay_backend(
+        root: &std::path::Path,
+        config: EncryptionConfig,
+    ) -> Box<dyn StorageBackend> {
+        use crate::storage::{filesystem::FilesystemBackend, routing::RoutingBackend};
+        use std::collections::HashMap;
+        let inner = FilesystemBackend::new(root.to_path_buf()).await.unwrap();
+        inner.create_bucket("physical").await.unwrap();
+        let encrypted: Box<dyn StorageBackend> = Box::new(EncryptingBackend::new(
+            inner,
+            Arc::new(ArcSwap::from_pointee(config)),
+        ));
+        Box::new(
+            RoutingBackend::new(
+                HashMap::from([("disk".into(), Arc::new(encrypted))]),
+                HashMap::from([("virtual".into(), ("disk".into(), Some("physical".into())))]),
+                "disk".into(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn relay_parts_box_routing_plaintext_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = relay_backend(&dir.path().join("data"), EncryptionConfig::default()).await;
+        let parts = [dir.path().join("part1"), dir.path().join("part2")];
+        tokio::fs::write(&parts[0], b"first").await.unwrap();
+        tokio::fs::write(&parts[1], b"second").await.unwrap();
+        let meta = relay_metadata(b"firstsecond");
+        backend
+            .put_passthrough_parts("virtual", "", "archive.tar.gz", &parts, &meta)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .get_passthrough("virtual", "", "archive.tar.gz")
+                .await
+                .unwrap(),
+            b"firstsecond"
+        );
+        let stored = backend
+            .get_passthrough_metadata("virtual", "", "archive.tar.gz")
+            .await
+            .unwrap();
+        assert_eq!(stored.file_sha256, meta.file_sha256);
+        assert!(!stored.user_metadata.contains_key(ENCRYPTION_MARKER_KEY));
+    }
+
+    #[tokio::test]
+    async fn relay_parts_refuse_corruption_before_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = relay_backend(&dir.path().join("data"), EncryptionConfig::default()).await;
+        let parts = [dir.path().join("part")];
+        tokio::fs::write(&parts[0], b"valid").await.unwrap();
+        let valid = relay_metadata(b"valid");
+        let mut bad_hash = valid.clone();
+        bad_hash.file_sha256 = "0".repeat(64);
+        let mut bad_md5 = valid.clone();
+        bad_md5.md5 = "0".repeat(32);
+        let mut bad_size = valid.clone();
+        bad_size.file_size -= 1;
+        let mut bad_marker = valid.clone();
+        mark_encrypted(&mut bad_marker, Some("key"));
+        for meta in [bad_hash, bad_md5, bad_size, bad_marker] {
+            assert!(backend
+                .put_passthrough_parts("virtual", "", "archive.tar.gz", &parts, &meta)
+                .await
+                .is_err());
+            assert!(matches!(
+                backend
+                    .get_passthrough("virtual", "", "archive.tar.gz")
+                    .await,
+                Err(StorageError::NotFound(_))
+            ));
+        }
+        // Valid metadata does not bless corrupted on-disk relay contents.
+        tokio::fs::write(&parts[0], b"wrong").await.unwrap();
+        assert!(backend
+            .put_passthrough_parts("virtual", "", "archive.tar.gz", &parts, &valid)
+            .await
+            .is_err());
+        assert!(matches!(
+            backend
+                .get_passthrough("virtual", "", "archive.tar.gz")
+                .await,
+            Err(StorageError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn relay_parts_refuse_proxy_encryption_without_plaintext_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = relay_backend(
+            &dir.path().join("data"),
+            EncryptionConfig {
+                key: Some(test_key()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let parts = [dir.path().join("part")];
+        tokio::fs::write(&parts[0], b"valid").await.unwrap();
+        assert!(matches!(
+            backend
+                .put_passthrough_parts(
+                    "virtual",
+                    "",
+                    "archive.tar.gz",
+                    &parts,
+                    &relay_metadata(b"valid")
+                )
+                .await,
+            Err(StorageError::Encryption(_))
+        ));
+        assert!(matches!(
+            backend
+                .get_passthrough("virtual", "", "archive.tar.gz")
+                .await,
+            Err(StorageError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn relay_parts_unsupported_backend_refuses_before_opening_paths() {
+        let backend: Box<dyn StorageBackend> = Box::new(CountingBackend::new());
+        let dir = tempfile::tempdir().unwrap();
+        let error = backend
+            .put_passthrough_parts(
+                "bucket",
+                "",
+                "archive.tar.gz",
+                &[dir.path().join("absent")],
+                &relay_metadata(b"valid"),
+            )
+            .await
+            .unwrap_err();
+        // An IO error would mean the default tried to hydrate the missing part.
+        assert!(matches!(error, StorageError::Other(_)));
     }
 
     fn other_key() -> EncryptionKey {

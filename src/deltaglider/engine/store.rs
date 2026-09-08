@@ -561,6 +561,17 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         Ok(result)
     }
 
+    pub(crate) fn native_relay_target(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Option<(Box<dyn StorageBackend>, String)> {
+        if self.bucket_policies.compression_enabled(bucket) && self.is_delta_eligible(key) {
+            return None;
+        }
+        self.storage.native_relay_target(bucket)
+    }
+
     /// Store a passthrough object from relayed multipart part files without
     /// materializing an assembled temporary file.
     #[instrument(skip(self, part_paths, user_metadata, multipart_etag))]
@@ -575,13 +586,42 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         user_metadata: HashMap<String, String>,
         multipart_etag: String,
     ) -> Result<StoreResult, EngineError> {
-        if total_size > self.max_object_size {
+        self.store_relayed_parts(
+            bucket,
+            key,
+            part_paths,
+            total_size,
+            content_type,
+            user_metadata,
+            multipart_etag,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn store_relayed_parts(
+        &self,
+        bucket: &str,
+        key: &str,
+        part_paths: &[PathBuf],
+        total_size: u64,
+        content_type: Option<String>,
+        user_metadata: HashMap<String, String>,
+        multipart_etag: String,
+        target: Option<&(Box<dyn StorageBackend>, String)>,
+    ) -> Result<StoreResult, EngineError> {
+        let limit = if target.is_some() {
+            crate::multipart::LARGE_OBJECT_BYTES
+        } else {
+            self.max_object_size
+        };
+        if total_size > limit {
             return Err(EngineError::TooLarge {
                 size: total_size,
-                max: self.max_object_size,
+                max: limit,
             });
         }
-
         self.metadata_cache.invalidate(bucket, key);
         let (obj_key, deltaspace_id) = Self::validated_key_ingest(bucket, key)?;
 
@@ -623,9 +663,13 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         metadata.user_metadata = user_metadata;
         metadata.multipart_etag = Some(multipart_etag);
 
-        self.storage
+        let (storage, storage_bucket): (&dyn StorageBackend, &str) = match target {
+            Some((storage, real_bucket)) => (storage.as_ref(), real_bucket),
+            None => (self.storage.as_ref(), bucket),
+        };
+        storage
             .put_passthrough_parts(
-                bucket,
+                storage_bucket,
                 &deltaspace_id,
                 &obj_key.filename,
                 part_paths,

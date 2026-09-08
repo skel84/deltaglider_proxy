@@ -631,7 +631,11 @@ pub fn build_s3_router(
         .layer(axum::Extension(iam_state.clone()))
         .layer(axum::Extension(public_prefix_snapshot.clone()))
         .layer(axum::Extension(admission_chain.clone()))
-        .layer(axum::Extension(state.maintenance_gate.clone()));
+        .layer(axum::Extension(state.maintenance_gate.clone()))
+        .layer(middleware::from_fn_with_state(
+            state.multipart.clone(),
+            deltaglider_proxy::multipart::wire::bound_multipart_wire,
+        ));
 
     if config_db_mismatch {
         error!(

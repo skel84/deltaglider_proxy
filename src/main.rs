@@ -474,7 +474,13 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .set(engine.cache_max_capacity() as f64);
 
     // --- Multipart uploads ---
-    let multipart = Arc::new(MultipartStore::new(config.max_object_size));
+    let mut multipart = MultipartStore::new(config.max_object_size);
+    if let Some(path) =
+        deltaglider_proxy::config::env_parse::<std::path::PathBuf>("DGP_MPU_LARGE_SPOOL_DIR")
+    {
+        multipart = multipart.with_large_spool(&path)?;
+    }
+    let multipart = Arc::new(multipart);
     let multipart_sweep_interval_secs: u64 =
         env_parse_with_default("DGP_MULTIPART_SWEEP_INTERVAL_SECS", 300);
     let multipart_sweep_max_age_secs: u64 =

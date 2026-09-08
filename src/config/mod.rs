@@ -262,6 +262,24 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Security",
     },
     EnvVarEntry {
+        name: "DGP_MPU_LARGE_SPOOL_DIR",
+        description: "Opt-in fixed native-S3 multipart disk profile; exclusive pre-provisioned spool directory; restart required",
+        example: "/var/lib/deltaglider/multipart",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_MPU_MAX_PART_BYTES",
+        description: "Optional UploadPart body ceiling in bytes (never raises object cap); disables UploadPartCopy",
+        example: "16777216",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_MPU_MAX_BUFFERED_PARTS",
+        description: "Optional concurrent UploadPart body collectors; excess returns SlowDown; disables UploadPartCopy",
+        example: "2",
+        category: "Server",
+    },
+    EnvVarEntry {
         name: "DGP_MAX_MULTIPART_UPLOADS",
         description: "Max concurrent multipart uploads (default: 1000)",
         example: "1000",
@@ -2636,6 +2654,9 @@ mod tests {
             "DGP_DEBUG_HEADERS",                     // api::handlers::debug_headers_enabled()
             "DGP_TRUST_PROXY_HEADERS",               // rate_limiter::trust_proxy_headers()
             "DGP_SESSION_TTL_HOURS",                 // session::default_session_ttl()
+            "DGP_MPU_LARGE_SPOOL_DIR",               // main multipart disk profile
+            "DGP_MPU_MAX_PART_BYTES",                // multipart::MultipartIngress
+            "DGP_MPU_MAX_BUFFERED_PARTS",            // multipart::MultipartIngress
             "DGP_MAX_MULTIPART_UPLOADS",             // multipart::default_max_uploads()
             "DGP_MULTIPART_SWEEP_INTERVAL_SECS",     // main multipart sweeper cadence
             "DGP_MULTIPART_SWEEP_MAX_AGE_SECS",      // main multipart sweeper max-age cutoff
