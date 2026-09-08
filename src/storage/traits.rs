@@ -223,23 +223,26 @@ pub trait StorageBackend: Send + Sync {
             .await
     }
 
+    /// Freeze a native S3 relay target without probing a bucket. Unsupported
+    /// backends fail closed. The returned wrapper owns its encryption snapshot.
+    fn native_relay_target(&self, _bucket: &str) -> Option<(Box<dyn StorageBackend>, String)> {
+        None
+    }
+
     /// Store a passthrough file from ordered relay part paths.
-    /// Default implementation materializes an intermediate file in-memory.
+    /// Backends must implement bounded completion explicitly. Never fall back to
+    /// whole-object buffering: relay callers may exceed the in-memory object cap.
     async fn put_passthrough_parts(
         &self,
-        bucket: &str,
-        prefix: &str,
-        filename: &str,
-        part_paths: &[PathBuf],
-        metadata: &FileMetadata,
+        _bucket: &str,
+        _prefix: &str,
+        _filename: &str,
+        _part_paths: &[PathBuf],
+        _metadata: &FileMetadata,
     ) -> Result<(), StorageError> {
-        let mut assembled = Vec::new();
-        for path in part_paths {
-            let part = tokio::fs::read(path).await?;
-            assembled.extend_from_slice(&part);
-        }
-        self.put_passthrough(bucket, prefix, filename, &assembled, metadata)
-            .await
+        Err(StorageError::Other(
+            "backend does not support bounded relay-parts completion".into(),
+        ))
     }
 
     /// Get passthrough file metadata
@@ -711,6 +714,24 @@ macro_rules! impl_storage_backend_for_box {
             ) -> Result<(), StorageError> {
                 (**self)
                     .put_passthrough_file(bucket, prefix, filename, source_path, metadata)
+                    .await
+            }
+            fn native_relay_target(
+                &self,
+                bucket: &str,
+            ) -> Option<(Box<dyn StorageBackend>, String)> {
+                (**self).native_relay_target(bucket)
+            }
+            async fn put_passthrough_parts(
+                &self,
+                bucket: &str,
+                prefix: &str,
+                filename: &str,
+                part_paths: &[PathBuf],
+                metadata: &FileMetadata,
+            ) -> Result<(), StorageError> {
+                (**self)
+                    .put_passthrough_parts(bucket, prefix, filename, part_paths, metadata)
                     .await
             }
             async fn get_passthrough_metadata(

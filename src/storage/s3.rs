@@ -178,6 +178,81 @@ pub struct S3Backend {
 }
 
 impl S3Backend {
+    async fn upload_relay_parts(
+        &self,
+        upload: &MultipartUpload,
+        prefix: &str,
+        filename: &str,
+        paths: &[std::path::PathBuf],
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncReadExt;
+        const PART_SIZE: usize = 8 * 1024 * 1024;
+        let mut payload = Vec::with_capacity(PART_SIZE);
+        let mut scratch = vec![0; 64 * 1024];
+        let mut parts = Vec::new();
+        let mut size = 0u64;
+        let mut sha = Sha256::new();
+        let mut md5 = md5::Md5::new();
+        for path in paths {
+            let mut file = tokio::fs::File::open(path).await?;
+            loop {
+                let limit = scratch.len().min(PART_SIZE - payload.len());
+                let n = file.read(&mut scratch[..limit]).await?;
+                if n == 0 {
+                    break;
+                }
+                size = size
+                    .checked_add(n as u64)
+                    .ok_or_else(|| StorageError::Other("relay size overflow".into()))?;
+                if size > metadata.file_size {
+                    return Err(StorageError::Other("relay size mismatch".into()));
+                }
+                sha.update(&scratch[..n]);
+                md5.update(&scratch[..n]);
+                payload.extend_from_slice(&scratch[..n]);
+                if payload.len() == PART_SIZE {
+                    if parts.len() == 10_000 {
+                        return Err(StorageError::Other("relay exceeds S3 part limit".into()));
+                    }
+                    let data = Bytes::from(std::mem::take(&mut payload));
+                    parts.push(
+                        self.upload_part(upload, prefix, filename, parts.len() as i32 + 1, data)
+                            .await?,
+                    );
+                    payload = Vec::with_capacity(PART_SIZE);
+                }
+            }
+        }
+        // Verify the bytes actually sent, not just an earlier read of mutable
+        // paths. Corruption can leave remote parts but cannot publish an object.
+        if size != metadata.file_size
+            || hex::encode(sha.finalize()) != metadata.file_sha256
+            || hex::encode(md5.finalize()) != metadata.md5
+        {
+            return Err(StorageError::Other("relay integrity mismatch".into()));
+        }
+        if !payload.is_empty() || parts.is_empty() {
+            if parts.len() == 10_000 {
+                return Err(StorageError::Other("relay exceeds S3 part limit".into()));
+            }
+            parts.push(
+                self.upload_part(
+                    upload,
+                    prefix,
+                    filename,
+                    parts.len() as i32 + 1,
+                    Bytes::from(payload),
+                )
+                .await?,
+            );
+        }
+        self.complete_multipart_upload(upload, prefix, filename, &parts, &[], metadata)
+            .await?;
+        Ok(())
+    }
+
     /// Max concurrent HEAD requests to avoid S3 503 SlowDown throttling.
     /// See `bounded_head_calls()` for rationale.
     const MAX_CONCURRENT_HEADS: usize = 50;
@@ -1432,6 +1507,60 @@ impl StorageBackend for S3Backend {
         Ok(())
     }
 
+    fn native_relay_target(&self, bucket: &str) -> Option<(Box<dyn StorageBackend>, String)> {
+        Some((
+            Box::new(Self {
+                client: Client::from_conf(
+                    self.client
+                        .config()
+                        .to_builder()
+                        .timeout_config(
+                            aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                                .connect_timeout(std::time::Duration::from_secs(10))
+                                .read_timeout(std::time::Duration::from_secs(60))
+                                .operation_attempt_timeout(std::time::Duration::from_secs(120))
+                                .operation_timeout(std::time::Duration::from_secs(300))
+                                .build(),
+                        )
+                        .build(),
+                ),
+                native_encryption: self.native_encryption.clone(),
+            }),
+            bucket.to_owned(),
+        ))
+    }
+
+    /// Repack arbitrary relay boundaries into sequential S3 parts. No local
+    /// assembly file: at most one 8 MiB payload plus a 64 KiB read scratch.
+    /// The owned worker survives caller cancellation long enough to abort an
+    /// acquired upload (including cancellation while CreateMultipartUpload runs).
+    async fn put_passthrough_parts(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        part_paths: &[std::path::PathBuf],
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        // The adapter's owned completion awaits this entire lifecycle, including
+        // create and abort. Do not spawn a second detached cleanup owner here.
+        let upload = self
+            .create_multipart_upload(bucket, prefix, filename, metadata)
+            .await?;
+        let result = self
+            .upload_relay_parts(&upload, prefix, filename, part_paths, metadata)
+            .await;
+        if result.is_err()
+            && self
+                .abort_multipart_upload(&upload, prefix, filename)
+                .await
+                .is_err()
+        {
+            warn!("relay multipart abort failed; upstream lifecycle cleanup required");
+        }
+        result
+    }
+
     #[instrument(skip(self))]
     async fn get_passthrough(
         &self,
@@ -2111,6 +2240,229 @@ mod tests {
     use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
     use aws_smithy_runtime_api::http::StatusCode;
     use aws_smithy_types::body::SdkBody;
+
+    #[derive(Default)]
+    struct RelayFixture {
+        bodies: Vec<Vec<u8>>,
+        metadata_sha: String,
+        aborts: usize,
+        completes: usize,
+        attempts: usize,
+        fail: bool,
+        retry_once: bool,
+        digest_only: bool,
+        received: u64,
+        digest: sha2::Sha256,
+        native_sse: String,
+        creates: usize,
+        pause_create: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+        pause_abort: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    }
+
+    async fn relay_request(
+        axum::extract::State(state): axum::extract::State<
+            std::sync::Arc<tokio::sync::Mutex<RelayFixture>>,
+        >,
+        request: axum::http::Request<axum::body::Body>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let (head, body) = request.into_parts();
+        let bytes = axum::body::to_bytes(body, 9 * 1024 * 1024).await.unwrap();
+        let mut state = state.lock().await;
+        let query = head.uri.query().unwrap_or("");
+        if head.method == axum::http::Method::HEAD {
+            return axum::http::StatusCode::OK.into_response();
+        }
+        if head.method == axum::http::Method::DELETE && !query.contains("uploadId") {
+            return axum::http::StatusCode::NO_CONTENT.into_response();
+        }
+        let xml = if head.method == axum::http::Method::DELETE {
+            state.aborts += 1;
+            let pause = state.pause_abort.clone();
+            drop(state);
+            if let Some(pause) = pause {
+                pause.acquire().await.unwrap().forget();
+            }
+            "".to_owned()
+        } else if query.contains("uploads") {
+            state.creates += 1;
+            state.native_sse = head
+                .headers
+                .get("x-amz-server-side-encryption")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            state.metadata_sha = head
+                .headers
+                .get("x-amz-meta-dg-file-sha256")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            let pause = state.pause_create.clone();
+            drop(state);
+            if let Some(pause) = pause {
+                pause.acquire().await.unwrap().forget();
+            }
+            "<InitiateMultipartUploadResult><UploadId>local-upload</UploadId></InitiateMultipartUploadResult>".to_owned()
+        } else if head.method == axum::http::Method::PUT {
+            state.attempts += 1;
+            if state.fail || (state.retry_once && state.attempts == 1) {
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "<Error><Code>SlowDown</Code></Error>",
+                )
+                    .into_response();
+            }
+            use sha2::Digest;
+            state.received += bytes.len() as u64;
+            state.digest.update(&bytes);
+            if !state.digest_only {
+                state.bodies.push(bytes.to_vec());
+            }
+            return ([("etag", "\"part-etag\"")], "").into_response();
+        } else {
+            state.completes += 1;
+            "<CompleteMultipartUploadResult><ETag>completed</ETag></CompleteMultipartUploadResult>"
+                .to_owned()
+        };
+        ([("content-type", "application/xml")], xml).into_response()
+    }
+
+    async fn relay_fixture() -> (
+        S3Backend,
+        std::sync::Arc<tokio::sync::Mutex<RelayFixture>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(RelayFixture::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new()
+            .fallback(relay_request)
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        // Dummy local credentials only; no environment credential resolution.
+        let config = aws_sdk_s3::config::Builder::new()
+            .behavior_version(BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(Credentials::new("local", "local", None, None, "fixture"))
+            .endpoint_url(endpoint)
+            .force_path_style(true)
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(1))
+            .build();
+        (
+            S3Backend {
+                client: Client::from_conf(config),
+                native_encryption: NativeEncryptionConfig::None,
+            },
+            state,
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn relay_s3_sdk_preserves_bytes_with_retry_through_wrappers() {
+        use crate::storage::{
+            encrypting::{EncryptingBackend, EncryptionConfig},
+            routing::RoutingBackend,
+        };
+        use sha2::{Digest, Sha256};
+        let (backend, state, server) = relay_fixture().await;
+        state.lock().await.retry_once = true;
+        let backend: Box<dyn StorageBackend> = Box::new(EncryptingBackend::new(
+            backend,
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(EncryptionConfig::default())),
+        ));
+        let backend: Box<dyn StorageBackend> = Box::new(
+            RoutingBackend::new(
+                HashMap::from([("s3".into(), std::sync::Arc::new(backend))]),
+                HashMap::from([("virtual".into(), ("s3".into(), Some("physical".into())))]),
+                "s3".into(),
+            )
+            .unwrap(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..9 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let paths = [dir.path().join("a"), dir.path().join("b")];
+        tokio::fs::write(&paths[0], &data[..12345]).await.unwrap();
+        tokio::fs::write(&paths[1], &data[12345..]).await.unwrap();
+        let meta = FileMetadata::new_passthrough(
+            "archive.gz".into(),
+            hex::encode(Sha256::digest(&data)),
+            hex::encode(md5::Md5::digest(&data)),
+            data.len() as u64,
+            None,
+        );
+        backend
+            .put_passthrough_parts("virtual", "", "archive.gz", &paths, &meta)
+            .await
+            .unwrap();
+        let state = state.lock().await;
+        assert_eq!(state.bodies.concat(), data);
+        assert_eq!(state.completes, 1);
+        assert_eq!(state.aborts, 0);
+        assert!(state.attempts > state.bodies.len());
+        assert_eq!(state.metadata_sha, meta.file_sha256);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_s3_sdk_failed_upload_aborts_without_publication() {
+        use sha2::{Digest, Sha256};
+        let (backend, state, server) = relay_fixture().await;
+        state.lock().await.fail = true;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part");
+        tokio::fs::write(&path, b"data").await.unwrap();
+        let meta = FileMetadata::new_passthrough(
+            "archive.gz".into(),
+            hex::encode(Sha256::digest(b"data")),
+            hex::encode(md5::Md5::digest(b"data")),
+            4,
+            None,
+        );
+        assert!(backend
+            .put_passthrough_parts(
+                "physical",
+                "",
+                "archive.gz",
+                std::slice::from_ref(&path),
+                &meta
+            )
+            .await
+            .is_err());
+        let state = state.lock().await;
+        assert_eq!(state.aborts, 1);
+        assert_eq!(state.completes, 0);
+        assert_eq!(tokio::fs::read(path).await.unwrap(), b"data");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_s3_sdk_corrupt_source_aborts_before_complete() {
+        let (backend, state, server) = relay_fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part");
+        tokio::fs::write(&path, b"data").await.unwrap();
+        let meta = FileMetadata::new_passthrough(
+            "archive.gz".into(),
+            "0".repeat(64),
+            "0".repeat(32),
+            4,
+            None,
+        );
+        assert!(backend
+            .put_passthrough_parts("physical", "", "archive.gz", &[path], &meta)
+            .await
+            .is_err());
+        let state = state.lock().await;
+        assert_eq!(state.aborts, 1);
+        assert_eq!(state.completes, 0);
+        server.abort();
+    }
+
+    include!("s3_relay_lifecycle_tests.rs");
 
     /// Build a minimal `HttpResponse` with the given status code and an
     /// optional `x-amz-request-id` header. The SDK uses both to populate

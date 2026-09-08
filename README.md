@@ -51,6 +51,11 @@ Clients see standard S3. They don't know which backend stores their bucket. They
 - **SigV4 authentication** — Full AWS Signature V4 support, including presigned URLs up to 7 days. Compatible with every S3 SDK and CLI tool.
 - **Public prefixes** — Publish specific folders (e.g. release artifacts) for anonymous download without exposing the rest of the bucket. Scoped read-only — no writes, no listing beyond the published prefix.
 
+For operator-controlled native gzip backup streams, the disabled-by-default
+[native-S3 multipart disk profile](docs/product/reference/rate-limits.md#opt-in-native-s3-large-backup-profile)
+defines bounded ingress, spool ownership and recovery prerequisites; it is not a
+general increase to object-engine memory limits.
+
 ### Transparent Delta Compression
 - **60-95% storage reduction** on repeated binary workloads when internal structure is similar across versions (backup archives, software catalogs, media/texture variants, AI model variants, release artifacts, firmware, ML checkpoints)
 - Clients PUT and GET normally — the proxy intercepts, computes xdelta3 diffs against a per-prefix baseline, and stores the delta when smaller

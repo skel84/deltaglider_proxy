@@ -11,16 +11,8 @@ permissions: {}
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: deltaglider_proxy
-  DOCKERHUB_REPO: beshultd/deltaglider_proxy
-  # ── sccache: local MinIO compilation cache (NOT the CI test MinIO) ──
-  RUSTC_WRAPPER: sccache
+  IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/deltaglider_proxy
   CARGO_INCREMENTAL: "0"
-  SCCACHE_BUCKET: sccache-rust
-  SCCACHE_ENDPOINT: http://sccache-minio.sccache.svc.cluster.local:9000
-  SCCACHE_REGION: auto
-  SCCACHE_S3_USE_SSL: "false"
-  AWS_ACCESS_KEY_ID: sccache
-  AWS_SECRET_ACCESS_KEY: sccache-secret-key
 
 jobs:
   # ── Job 1: CI Gate ──────────────────────────────────────────────────
@@ -41,6 +33,19 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+
+      - name: Require prepared manifest and lockfile versions
+        run: |
+          python3 - <<'PYTHON'
+          import os, tomllib
+          from pathlib import Path
+          package = tomllib.loads(Path("Cargo.toml").read_text())["package"]
+          locked = tomllib.loads(Path("Cargo.lock").read_text())["package"]
+          root = [p for p in locked if p["name"] == package["name"] and "source" not in p]
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          if len(root) != 1 or package["version"] != version or root[0]["version"] != version:
+              raise SystemExit("Release tag must match committed Cargo.toml and Cargo.lock; run release preparation first")
+          PYTHON
 
       - name: Resolve tag target
         id: resolve
@@ -114,12 +119,8 @@ jobs:
   validate:
     name: Validate Release
     needs: verify-ci
-    runs-on: k3s
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: read
@@ -128,30 +129,10 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Stamp version from git tag into Cargo.toml
+      - uses: ./.github/actions/setup-hosted
+      - name: Read committed release version
         id: meta
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          echo "Tag version: $TAG_VERSION"
-
-          # Validate semver format
-          if ! echo "$TAG_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
-            echo "::error::Tag $GITHUB_REF_NAME is not valid semver"
-            exit 1
-          fi
-
-          # Stamp the tag version into Cargo.toml (first version = line)
-          sed -i "s/^version = \".*\"/version = \"$TAG_VERSION\"/" Cargo.toml
-
-          # Verify it took effect
-          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "Cargo.toml now: $CARGO_VERSION"
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Failed to stamp version into Cargo.toml"
-            exit 1
-          fi
-
-          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Verify Cargo.lock is committed
         run: |
@@ -164,36 +145,28 @@ jobs:
         run: cd demo/s3-browser/ui && npm ci && npm run build
 
       - name: Dry-run build check
-        run: cargo check
+        run: cargo check --locked
 
-  # ── Job 3a: Build Linux x86_64 (self-hosted, builder image) ────────
+  # ── Job 3a: Build Linux x86_64 (GitHub-hosted runner) ────────
   # Depends on verify-ci (not validate) — builds start as soon as CI passes.
   # validate runs in parallel as a sanity check; finalize waits for both.
   build-linux-x86_64:
     name: Build x86_64-unknown-linux-gnu
     needs: verify-ci
-    runs-on: k3s
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Stamp version from git tag
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version = \".*\"/version = \"$TAG_VERSION\"/" Cargo.toml
-
+      - uses: ./.github/actions/setup-hosted
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
 
       - name: Build
-        run: cargo build --release --target x86_64-unknown-linux-gnu
+        run: cargo build --locked --release --target x86_64-unknown-linux-gnu
 
       - name: Prepare artifacts
         run: |
@@ -217,16 +190,16 @@ jobs:
     permissions:
       contents: read
     env:
-      # Disable sccache for non-k3s runners (no access to local MinIO)
+      # Native toolchains for the other hosted targets
       RUSTC_WRAPPER: ""
       CARGO_INCREMENTAL: "1"
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux ARM64 (native on Blacksmith ARM)
+          # Linux ARM64 (native on GitHub ARM)
           - target: aarch64-unknown-linux-gnu
-            os: blacksmith-4vcpu-ubuntu-2404-arm
+            os: ubuntu-24.04-arm
 
           # macOS x86_64 (Intel)
           - target: x86_64-apple-darwin
@@ -239,11 +212,6 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Stamp version from git tag
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          sed -i'' -e "s/^version = \".*\"/version = \"$TAG_VERSION\"/" Cargo.toml
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "26"
@@ -255,6 +223,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
         with:
+          toolchain: "1.96.0"
           targets: ${{ matrix.target }}
 
       - name: Rust cache
@@ -263,7 +232,7 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Prepare artifacts
         run: |
@@ -288,6 +257,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      packages: write
     env:
       RUSTC_WRAPPER: ""  # Docker build has its own caching
     strategy:
@@ -295,31 +265,27 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: k3s
+            runner: ubuntu-24.04
           - platform: linux/arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Stamp version from git tag
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          sed -i'' -e "s/^version = \".*\"/version = \"$TAG_VERSION\"/" Cargo.toml
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
-      - name: Log in to DockerHub
+      - name: Log in to GHCR
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
         with:
-          images: ${{ env.DOCKERHUB_REPO }}
+          images: ${{ env.IMAGE_REPO }}
 
       - name: Build and push by digest (attempt 1)
         id: build_a
@@ -329,7 +295,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.DOCKERHUB_REPO }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.IMAGE_REPO }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,scope=${{ matrix.platform }},mode=max
           # Disable provenance / SBOM attestations. With them enabled,
@@ -356,7 +322,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.DOCKERHUB_REPO }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.IMAGE_REPO }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,scope=${{ matrix.platform }},mode=max
           provenance: false
@@ -426,6 +392,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
     env:
       RUSTC_WRAPPER: ""
     steps:
@@ -439,17 +406,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
-      - name: Log in to DockerHub
+      - name: Log in to GHCR
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker metadata (tags)
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
         with:
-          images: ${{ env.DOCKERHUB_REPO }}
+          images: ${{ env.IMAGE_REPO }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -490,18 +458,13 @@ jobs:
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.DOCKERHUB_REPO }}@sha256:%s ' *)
+            $(printf '${{ env.IMAGE_REPO }}@sha256:%s ' *)
 
   # ── Job 5: Release ──────────────────────────────────────────────────
   release:
     name: Create Release
     needs: [validate, build-linux-x86_64, build-other, docker-merge]
-    runs-on: k3s
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: read
@@ -510,6 +473,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - uses: ./.github/actions/setup-hosted
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -536,6 +500,8 @@ jobs:
           echo "--- SHA256SUMS.txt ---"
           cat SHA256SUMS.txt
 
+      - name: Install cargo-sbom
+        run: cargo install --locked cargo-sbom
       - name: Generate SBOM
         run: |
           cargo sbom --output-format spdx_json_2_3 > artifacts/sbom-spdx.json
@@ -552,66 +518,6 @@ jobs:
             artifacts/sbom-spdx.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Sync DockerHub repository description
-        # `DOCKERHUB.md` is the source of truth for the repo's "Full
-        # description" on hub.docker.com. Pre-automation, an operator
-        # had to log into the hub UI and paste the file by hand — easy
-        # to forget, easy to drift. This step uploads the file via the
-        # DockerHub v2 API so the description matches what we shipped.
-        #
-        # Auth: same DOCKERHUB_USERNAME + DOCKERHUB_TOKEN secrets used
-        # by the image push. The token must have "Read & Write" scope
-        # on the repository.
-        #
-        # `continue-on-error: true` because a description sync failure
-        # must not fail the release — the artifacts are already
-        # published at this point.
-        continue-on-error: true
-        timeout-minutes: 5
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          REPO: ${{ env.DOCKERHUB_REPO }}
-        run: |
-          set -euo pipefail
-          if [ ! -f DOCKERHUB.md ]; then
-            echo "DOCKERHUB.md missing — skipping description sync"
-            exit 0
-          fi
-
-          # Get a JWT for the v2 API. The image-push login uses the
-          # registry endpoint; for repo-management calls we need
-          # hub.docker.com's `users/login` endpoint.
-          JWT="$(curl -fsS \
-            -H "Content-Type: application/json" \
-            -X POST \
-            -d "{\"username\": \"${DOCKERHUB_USERNAME}\", \"password\": \"${DOCKERHUB_TOKEN}\"}" \
-            https://hub.docker.com/v2/users/login/ \
-            | jq -r .token)"
-
-          if [ -z "$JWT" ] || [ "$JWT" = "null" ]; then
-            echo "::warning::DockerHub login returned no token — description not synced"
-            exit 0
-          fi
-
-          # PATCH the repository's full_description field. The body is
-          # JSON-encoded markdown; we feed the file through `jq` so
-          # newlines / quotes / backslashes are escaped correctly.
-          BODY="$(jq -Rs '{full_description: .}' < DOCKERHUB.md)"
-          HTTP_CODE="$(curl -sS -o /tmp/dh-resp -w '%{http_code}' \
-            -H "Authorization: JWT ${JWT}" \
-            -H "Content-Type: application/json" \
-            -X PATCH \
-            -d "$BODY" \
-            "https://hub.docker.com/v2/repositories/${REPO}/")"
-
-          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-            echo "DockerHub description synced (HTTP $HTTP_CODE)"
-          else
-            echo "::warning::DockerHub description sync returned HTTP $HTTP_CODE"
-            cat /tmp/dh-resp
-          fi
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0

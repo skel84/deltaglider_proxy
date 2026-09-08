@@ -1,0 +1,23 @@
+name: Set up hosted Linux build tools
+description: Public toolchains and GitHub cache; no private builder or cluster services
+runs:
+  using: composite
+  steps:
+    - name: Install native dependencies
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends clang lld pkg-config libssl-dev xdelta3 python3-venv
+        xdelta3 -V
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: "26"
+        cache: npm
+        cache-dependency-path: demo/s3-browser/ui/package-lock.json
+    - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+      with:
+        toolchain: "1.96.0"
+        components: rustfmt, clippy, llvm-tools-preview
+    - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      with:
+        key: hosted-${{ github.job }}

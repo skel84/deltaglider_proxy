@@ -502,6 +502,32 @@ impl StorageBackend for RoutingBackend {
         )
     }
 
+    fn native_relay_target(&self, bucket: &str) -> Option<(Box<dyn StorageBackend>, String)> {
+        // Large relay requires an explicit route. Discovery would probe providers
+        // and could choose a different backend between admission and dispatch.
+        let (backend, real_bucket) = self.explicit_route(bucket)?;
+        backend.native_relay_target(&real_bucket)
+    }
+
+    async fn put_passthrough_parts(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        part_paths: &[std::path::PathBuf],
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        route_existing!(
+            self,
+            bucket,
+            put_passthrough_parts,
+            prefix,
+            filename,
+            part_paths,
+            metadata
+        )
+    }
+
     async fn get_passthrough_metadata(
         &self,
         bucket: &str,

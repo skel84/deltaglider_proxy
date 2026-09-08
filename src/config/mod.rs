@@ -262,6 +262,24 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Security",
     },
     EnvVarEntry {
+        name: "DGP_MPU_LARGE_SPOOL_DIR",
+        description: "Opt-in fixed native-S3 multipart disk profile; exclusive pre-provisioned spool directory; restart required",
+        example: "/var/lib/deltaglider/multipart",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_MPU_MAX_PART_BYTES",
+        description: "Optional UploadPart body ceiling in bytes (never raises object cap); disables UploadPartCopy",
+        example: "16777216",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_MPU_MAX_BUFFERED_PARTS",
+        description: "Optional concurrent UploadPart body collectors; excess returns SlowDown; disables UploadPartCopy",
+        example: "2",
+        category: "Server",
+    },
+    EnvVarEntry {
         name: "DGP_MAX_MULTIPART_UPLOADS",
         description: "Max concurrent multipart uploads (default: 1000)",
         example: "1000",
@@ -2636,6 +2654,9 @@ mod tests {
             "DGP_DEBUG_HEADERS",                     // api::handlers::debug_headers_enabled()
             "DGP_TRUST_PROXY_HEADERS",               // rate_limiter::trust_proxy_headers()
             "DGP_SESSION_TTL_HOURS",                 // session::default_session_ttl()
+            "DGP_MPU_LARGE_SPOOL_DIR",               // main multipart disk profile
+            "DGP_MPU_MAX_PART_BYTES",                // multipart::MultipartIngress
+            "DGP_MPU_MAX_BUFFERED_PARTS",            // multipart::MultipartIngress
             "DGP_MAX_MULTIPART_UPLOADS",             // multipart::default_max_uploads()
             "DGP_MULTIPART_SWEEP_INTERVAL_SECS",     // main multipart sweeper cadence
             "DGP_MULTIPART_SWEEP_MAX_AGE_SECS",      // main multipart sweeper max-age cutoff
@@ -3566,19 +3587,25 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
         drop(guard);
     }
 
-    /// Test-only RAII guard that sets an env var on construction and
-    /// unsets it on drop. Prevents one test from polluting another when
-    /// they exercise environment-driven behavior.
+    /// Serializes these process-environment tests and restores their prior
+    /// value before releasing the lock, including during unwinding.
     struct EnvGuard {
         key: &'static str,
         prior: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
             let prior = std::env::var(key).ok();
             std::env::set_var(key, value);
-            Self { key, prior }
+            Self {
+                key,
+                prior,
+                _lock: lock,
+            }
         }
     }
 

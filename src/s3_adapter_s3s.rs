@@ -922,6 +922,19 @@ impl s3s::S3 for DeltaGliderS3Service {
             "DGP_MPU_DELTA_RECONSTRUCT_MAX_BYTES",
             64 * 1024 * 1024,
         );
+        let engine = self.state.engine.load_full();
+        let admission = if self.state.multipart.large_profile() {
+            engine
+                .native_relay_target(&input.bucket, &input.key)
+                .map(|target| {
+                    Arc::new(crate::multipart::NativeRelayAdmission {
+                        engine: Arc::downgrade(&engine),
+                        target,
+                    })
+                })
+        } else {
+            None
+        };
         let upload_id = self
             .state
             .multipart
@@ -934,6 +947,11 @@ impl s3s::S3 for DeltaGliderS3Service {
                 false,
             )
             .map_err(engine_error_to_s3s)?;
+        self.state.multipart.pin_admission(
+            &upload_id,
+            admission,
+            delta_limit.min(engine.max_object_size()),
+        );
         Ok(s3s::S3Response::new(
             s3s::dto::CreateMultipartUploadOutput {
                 bucket: Some(input.bucket),
@@ -951,13 +969,42 @@ impl s3s::S3 for DeltaGliderS3Service {
         let headers = req.headers.clone();
         let input = req.input;
         ensure_bucket_exists_s3s(&self.state, &input.bucket).await?;
-        let data = collect_blob_limited(
+        let _part_owner = self
+            .state
+            .multipart
+            .acquire_part_owner(&input.upload_id)
+            .map_err(engine_error_to_s3s)?;
+        let admission = self.state.multipart.admission(&input.upload_id);
+        if let Some(admission) = &admission {
+            if !std::sync::Weak::ptr_eq(
+                &admission.engine,
+                &Arc::downgrade(&self.state.engine.load_full()),
+            ) {
+                return Err(s3s::s3_error!(
+                    InvalidRequest,
+                    "Multipart configuration changed; abort and restart upload"
+                ));
+            }
+        }
+        let remaining = self
+            .state
+            .multipart
+            .remaining_part_bytes(
+                &input.upload_id,
+                &input.bucket,
+                &input.key,
+                input.part_number as u32,
+            )
+            .map_err(engine_error_to_s3s)?;
+        let admitted = collect_part_body(
+            &self.state.multipart.ingress,
+            remaining,
+            input.content_length,
             input.body,
-            self.state.engine.load().max_object_size(),
-            Some(&headers),
+            &headers,
         )
         .await?;
-        validate_content_md5_s3s(input.content_md5.as_deref(), &data)?;
+        validate_content_md5_s3s(input.content_md5.as_deref(), &admitted.data)?;
         let etag = self
             .state
             .multipart
@@ -966,7 +1013,7 @@ impl s3s::S3 for DeltaGliderS3Service {
                 &input.bucket,
                 &input.key,
                 input.part_number as u32,
-                data,
+                admitted.data,
             )
             .map_err(engine_error_to_s3s)?;
         Ok(s3s::S3Response::new(s3s::dto::UploadPartOutput {
@@ -1034,139 +1081,30 @@ impl s3s::S3 for DeltaGliderS3Service {
         &self,
         req: s3s::S3Request<s3s::dto::CompleteMultipartUploadInput>,
     ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
-        let input = req.input;
-        ensure_bucket_exists_s3s(&self.state, &input.bucket).await?;
-        let requested_parts = completed_parts_to_request(input.multipart_upload.as_ref())?;
-        let engine = self.state.engine.load();
-        let delta_limit = crate::config::env_parse_with_default(
-            "DGP_MPU_DELTA_RECONSTRUCT_MAX_BYTES",
-            64 * 1024 * 1024,
-        );
-        let total_parts_size: u64 = requested_parts
-            .iter()
-            .filter_map(|(num, _)| self.state.multipart.get_part_size(&input.upload_id, *num))
-            .sum();
-        // Quota check before storing (parity with axum
-        // `multipart::handle_complete_multipart` line 127). Done here,
-        // not on UploadPart, because parts can be aborted before
-        // storage; only Complete commits bytes.
-        crate::api::handlers::object_helpers::check_quota(
-            &self.state,
-            &input.bucket,
-            total_parts_size,
-        )
-        .map_err(engine_error_to_s3s)?;
-        let force_chunked_passthrough =
-            !engine.is_delta_eligible(&input.key) || total_parts_size > delta_limit;
-        let (multipart_etag, store_meta) = if force_chunked_passthrough {
-            let completed = self
-                .state
-                .multipart
-                .complete_passthrough(
-                    &input.upload_id,
-                    &input.bucket,
-                    &input.key,
-                    &requested_parts,
-                )
-                .map_err(engine_error_to_s3s)?;
-            let etag = completed.etag.clone();
-            let store_result = match completed.payload {
-                crate::multipart::PassthroughPayload::Chunks(parts) => {
-                    engine
-                        .store_passthrough_chunked_with_multipart_etag(
-                            &input.bucket,
-                            &input.key,
-                            &parts,
-                            completed.total_size,
-                            completed.content_type,
-                            completed.user_metadata,
-                            etag.clone(),
-                        )
-                        .await
-                }
-                crate::multipart::PassthroughPayload::RelayedParts(paths) => {
-                    engine
-                        .store_passthrough_relayed_parts_with_multipart_etag(
-                            &input.bucket,
-                            &input.key,
-                            &paths,
-                            completed.total_size,
-                            completed.content_type,
-                            completed.user_metadata,
-                            etag.clone(),
-                        )
-                        .await
-                }
-            };
-            match store_result {
-                Ok(result) => (etag, Some(result.metadata)),
-                Err(e) => {
-                    self.state.multipart.rollback_upload(&input.upload_id);
-                    return Err(engine_error_to_s3s(e));
-                }
-            }
+        let permit = if self.state.multipart.large_profile() {
+            Some(
+                self.state
+                    .multipart
+                    .completions
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| {
+                        s3s::s3_error!(SlowDown, "Multipart completion capacity reached")
+                    })?,
+            )
         } else {
-            let completed = self
-                .state
-                .multipart
-                .complete(
-                    &input.upload_id,
-                    &input.bucket,
-                    &input.key,
-                    &requested_parts,
-                )
-                .map_err(engine_error_to_s3s)?;
-            let etag = completed.etag.clone();
-            match engine
-                .store_with_multipart_etag(
-                    &input.bucket,
-                    &input.key,
-                    &completed.data,
-                    completed.content_type,
-                    completed.user_metadata,
-                    etag.clone(),
-                )
-                .await
-            {
-                Ok(result) => (etag, Some(result.metadata)),
-                Err(e) => {
-                    self.state.multipart.rollback_upload(&input.upload_id);
-                    return Err(engine_error_to_s3s(e));
-                }
-            }
+            None
         };
-        self.state.multipart.finish_upload(&input.upload_id);
-        // A completed multipart upload created the final object — emit
-        // ObjectCreated before `input.bucket`/`input.key` are moved into the
-        // response.
-        self.emit_object_event(
-            crate::event_outbox::EventKind::ObjectCreated,
-            &input.bucket,
-            &input.key,
-            serde_json::json!({
-                "etag": multipart_etag,
-                "storage_type": store_meta.as_ref().map(|m| m.storage_info.label()),
-            }),
-        )
-        .await;
-        let location = format!("/{}/{}", input.bucket, input.key);
-        let mut resp = s3s::S3Response::new(s3s::dto::CompleteMultipartUploadOutput {
-            bucket: Some(input.bucket),
-            key: Some(input.key),
-            e_tag: Some(parse_s3s_etag(&multipart_etag)?),
-            location: Some(location),
-            ..Default::default()
-        });
-        // Parity with the legacy axum multipart handler: emit
-        // `x-amz-storage-type` (and `x-deltaglider-stored-size`) on
-        // CompleteMultipartUpload responses so tests / operators can
-        // observe whether the multipart landed as `delta`, `passthrough`,
-        // or another storage shape. The s3s rewrite dropped this header,
-        // breaking tests/s3_integration_test.rs::test_multipart_*.
-        if let Some(meta) = store_meta.as_ref() {
-            add_storage_debug_headers(&mut resp.headers, meta);
-        }
-        Ok(resp)
+        let service = Self::new(self.state.clone());
+        // Dropping the HTTP handler detaches this sole owner, not the backend.
+        // It retains the permit, spool, reservations and SDK create/abort future
+        // through quiescence. A disconnect does NOT mean an S3 abort succeeded.
+        tokio::spawn(async move {
+            let _permit = permit;
+            service.complete_multipart_owned(req).await
+        })
+        .await
+        .map_err(|_| s3s::s3_error!(InternalError, "Multipart completion worker failed"))?
     }
 
     async fn list_multipart_uploads(
@@ -1213,6 +1151,11 @@ impl s3s::S3 for DeltaGliderS3Service {
         &self,
         req: s3s::S3Request<s3s::dto::UploadPartCopyInput>,
     ) -> s3s::S3Result<s3s::S3Response<s3s::dto::UploadPartCopyOutput>> {
+        self.state
+            .multipart
+            .ingress
+            .check_copy_supported()
+            .map_err(engine_error_to_s3s)?;
         let auth_user = req.extensions.get::<AuthenticatedUser>().cloned();
         let input = req.input;
         let (source_bucket, source_key) = copy_source_bucket_key(&input.copy_source)?;
@@ -1287,6 +1230,43 @@ impl Stream for SyncStorageStream {
 }
 
 impl s3s::stream::ByteStream for SyncStorageStream {}
+
+/// Ownership deliberately includes the admission permit: it survives body
+/// collection through digest checks and insertion into retained upload state.
+#[derive(Debug)]
+struct AdmittedPartBody {
+    data: bytes::Bytes,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+async fn collect_part_body(
+    ingress: &crate::multipart::MultipartIngress,
+    object_limit: u64,
+    content_length: Option<i64>,
+    body: Option<s3s::dto::StreamingBlob>,
+    headers: &axum::http::HeaderMap,
+) -> s3s::S3Result<AdmittedPartBody> {
+    // Refuse instead of queuing requests that may retain SDK/body buffers.
+    let permit = ingress.acquire().map_err(engine_error_to_s3s)?;
+    let limit = ingress.part_limit(object_limit);
+    check_part_content_length(content_length, limit)?;
+    let data = collect_blob_limited(body, limit, Some(headers)).await?;
+    Ok(AdmittedPartBody {
+        data,
+        _permit: permit,
+    })
+}
+
+fn check_part_content_length(content_length: Option<i64>, limit: u64) -> s3s::S3Result<()> {
+    if let Some(length) = content_length {
+        let length = u64::try_from(length)
+            .map_err(|_| s3s::s3_error!(InvalidArgument, "Negative content length"))?;
+        if length > limit {
+            return Err(s3s::s3_error!(EntityTooLarge));
+        }
+    }
+    Ok(())
+}
 
 async fn collect_blob_limited(
     body: Option<s3s::dto::StreamingBlob>,
@@ -1693,6 +1673,7 @@ fn engine_error_to_s3s(err: impl Into<crate::api::S3Error>) -> s3s::S3Error {
         crate::api::S3Error::BucketAlreadyExists(_) => s3s::s3_error!(BucketAlreadyExists),
         crate::api::S3Error::BucketNotEmpty(_) => s3s::s3_error!(BucketNotEmpty),
         crate::api::S3Error::EntityTooLarge { .. } => s3s::s3_error!(EntityTooLarge),
+        crate::api::S3Error::SlowDown(_) => s3s::s3_error!(SlowDown),
         crate::api::S3Error::InvalidArgument(msg) => s3s::s3_error!(InvalidArgument, "{}", msg),
         crate::api::S3Error::InvalidRequest(msg) => s3s::s3_error!(InvalidRequest, "{}", msg),
         crate::api::S3Error::NoSuchUpload(_) => s3s::s3_error!(NoSuchUpload),
@@ -1936,6 +1917,179 @@ fn parse_s3s_etag(etag: &str) -> s3s::S3Result<s3s::dto::ETag> {
         .map_err(|_| s3s::s3_error!(InternalError, "invalid metadata ETag"))
 }
 
+impl DeltaGliderS3Service {
+    async fn complete_multipart_owned(
+        &self,
+        req: s3s::S3Request<s3s::dto::CompleteMultipartUploadInput>,
+    ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
+        let input = req.input;
+        ensure_bucket_exists_s3s(&self.state, &input.bucket).await?;
+        let requested_parts = completed_parts_to_request(input.multipart_upload.as_ref())?;
+        let current_engine = self.state.engine.load_full();
+        let admission = self.state.multipart.admission(&input.upload_id);
+        if let Some(admission) = &admission {
+            if !std::sync::Weak::ptr_eq(&admission.engine, &Arc::downgrade(&current_engine)) {
+                return Err(s3s::s3_error!(
+                    InvalidRequest,
+                    "Multipart configuration changed; abort and restart upload"
+                ));
+            }
+        }
+        let engine = &current_engine;
+        let delta_limit = crate::config::env_parse_with_default(
+            "DGP_MPU_DELTA_RECONSTRUCT_MAX_BYTES",
+            64 * 1024 * 1024,
+        );
+        let total_parts_size: u64 = requested_parts
+            .iter()
+            .filter_map(|(num, _)| self.state.multipart.get_part_size(&input.upload_id, *num))
+            .sum();
+        // Quota check before storing (parity with axum
+        // `multipart::handle_complete_multipart` line 127). Done here,
+        // not on UploadPart, because parts can be aborted before
+        // storage; only Complete commits bytes.
+        crate::api::handlers::object_helpers::check_quota(
+            &self.state,
+            &input.bucket,
+            total_parts_size,
+        )
+        .map_err(engine_error_to_s3s)?;
+        if total_parts_size > delta_limit && admission.is_none() {
+            return Err(s3s::s3_error!(
+                EntityTooLarge,
+                "Large multipart requires native S3 passthrough admission"
+            ));
+        }
+        let force_chunked_passthrough = admission.is_some()
+            || (!self.state.multipart.large_profile() && !engine.is_delta_eligible(&input.key));
+        // Arm settlement only after THIS request owns the Open -> Completing
+        // transition. A rejected duplicate must not clean another worker's files.
+        let settlement;
+        let (multipart_etag, store_meta) = if force_chunked_passthrough {
+            let completed = self
+                .state
+                .multipart
+                .complete_passthrough(
+                    &input.upload_id,
+                    &input.bucket,
+                    &input.key,
+                    &requested_parts,
+                )
+                .map_err(engine_error_to_s3s)?;
+            settlement = crate::multipart::CompletionSettlement::new(
+                self.state.multipart.clone(),
+                input.upload_id.clone(),
+            );
+            let etag = completed.etag.clone();
+            let store_result = match completed.payload {
+                crate::multipart::PassthroughPayload::Chunks(parts) => {
+                    engine
+                        .store_passthrough_chunked_with_multipart_etag(
+                            &input.bucket,
+                            &input.key,
+                            &parts,
+                            completed.total_size,
+                            completed.content_type,
+                            completed.user_metadata,
+                            etag.clone(),
+                        )
+                        .await
+                }
+                crate::multipart::PassthroughPayload::RelayedParts(paths) => {
+                    engine
+                        .store_relayed_parts(
+                            &input.bucket,
+                            &input.key,
+                            &paths,
+                            completed.total_size,
+                            completed.content_type,
+                            completed.user_metadata,
+                            etag.clone(),
+                            admission.as_ref().map(|a| &a.target),
+                        )
+                        .await
+                }
+            };
+            match store_result {
+                Ok(result) => (etag, Some(result.metadata)),
+                Err(e) => {
+                    if admission.is_some() {
+                        self.state.multipart.finish_upload(&input.upload_id);
+                    } else {
+                        settlement.rollback();
+                    }
+                    return Err(engine_error_to_s3s(e));
+                }
+            }
+        } else {
+            let completed = self
+                .state
+                .multipart
+                .complete(
+                    &input.upload_id,
+                    &input.bucket,
+                    &input.key,
+                    &requested_parts,
+                )
+                .map_err(engine_error_to_s3s)?;
+            settlement = crate::multipart::CompletionSettlement::new(
+                self.state.multipart.clone(),
+                input.upload_id.clone(),
+            );
+            let etag = completed.etag.clone();
+            match engine
+                .store_with_multipart_etag(
+                    &input.bucket,
+                    &input.key,
+                    &completed.data,
+                    completed.content_type,
+                    completed.user_metadata,
+                    etag.clone(),
+                )
+                .await
+            {
+                Ok(result) => (etag, Some(result.metadata)),
+                Err(e) => {
+                    settlement.rollback();
+                    return Err(engine_error_to_s3s(e));
+                }
+            }
+        };
+        self.state.multipart.finish_upload(&input.upload_id);
+        // A completed multipart upload created the final object — emit
+        // ObjectCreated before `input.bucket`/`input.key` are moved into the
+        // response.
+        self.emit_object_event(
+            crate::event_outbox::EventKind::ObjectCreated,
+            &input.bucket,
+            &input.key,
+            serde_json::json!({
+                "etag": multipart_etag,
+                "storage_type": store_meta.as_ref().map(|m| m.storage_info.label()),
+            }),
+        )
+        .await;
+        let location = format!("/{}/{}", input.bucket, input.key);
+        let mut resp = s3s::S3Response::new(s3s::dto::CompleteMultipartUploadOutput {
+            bucket: Some(input.bucket),
+            key: Some(input.key),
+            e_tag: Some(parse_s3s_etag(&multipart_etag)?),
+            location: Some(location),
+            ..Default::default()
+        });
+        // Parity with the legacy axum multipart handler: emit
+        // `x-amz-storage-type` (and `x-deltaglider-stored-size`) on
+        // CompleteMultipartUpload responses so tests / operators can
+        // observe whether the multipart landed as `delta`, `passthrough`,
+        // or another storage shape. The s3s rewrite dropped this header,
+        // breaking tests/s3_integration_test.rs::test_multipart_*.
+        if let Some(meta) = store_meta.as_ref() {
+            add_storage_debug_headers(&mut resp.headers, meta);
+        }
+        Ok(resp)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2085,6 +2239,363 @@ mod tests {
             s3s::dto::StreamingBlob::from(s3s::Body::from(bytes::Bytes::from_static(b"abcd")));
         let err = collect_blob_limited(Some(blob), 3, None).await.unwrap_err();
         assert_eq!(err.code(), &s3s::S3ErrorCode::EntityTooLarge);
+    }
+
+    fn counted_part_stream(
+        chunk: bytes::Bytes,
+        chunks: usize,
+        polls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> s3s::dto::StreamingBlob {
+        let mut remaining = chunks;
+        s3s::dto::StreamingBlob::new(SyncStorageStream::new(Box::pin(futures::stream::poll_fn(
+            move |_| {
+                polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if remaining == 0 {
+                    return Poll::Ready(None);
+                }
+                remaining -= 1;
+                Poll::Ready(Some(Ok::<_, StorageError>(chunk.clone())))
+            },
+        ))))
+    }
+
+    #[tokio::test]
+    async fn multipart_ingress_refuses_declared_excess_without_polling() {
+        let ingress = crate::multipart::MultipartIngress::new(Some(3), Some(1));
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = collect_part_body(
+            &ingress,
+            100,
+            Some(4),
+            Some(counted_part_stream(
+                bytes::Bytes::from_static(b"abcd"),
+                1,
+                polls.clone(),
+            )),
+            &axum::http::HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(
+            result.err().unwrap().code(),
+            &s3s::S3ErrorCode::EntityTooLarge
+        );
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(
+            ingress.acquire().is_ok(),
+            "refusal must release the body slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_ingress_generated_large_stream_stops_at_part_boundary() {
+        // A virtual 2 GiB source allocates one shared 64 KiB chunk. Exercise
+        // the actual collector at the candidate 16 MiB boundary, not a bucket.
+        let limit = 16 * 1024 * 1024;
+        let ingress = crate::multipart::MultipartIngress::new(Some(limit), Some(2));
+        for declared in [None, Some(1)] {
+            let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let result = collect_part_body(
+                &ingress,
+                2 * 1024 * 1024 * 1024,
+                declared,
+                Some(counted_part_stream(
+                    bytes::Bytes::from(vec![0x5a; 64 * 1024]),
+                    32768,
+                    polls.clone(),
+                )),
+                &axum::http::HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(
+                result.err().unwrap().code(),
+                &s3s::S3ErrorCode::EntityTooLarge
+            );
+            // The crossing chunk is observed but never appended; no later
+            // chunks are pulled, even if Content-Length understates the body.
+            assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 257);
+        }
+        assert!(ingress.acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn multipart_ingress_holds_two_slots_through_accepted_body_ownership() {
+        use sha2::Digest as _;
+        let ingress = crate::multipart::MultipartIngress::new(Some(8), Some(2));
+        let headers = axum::http::HeaderMap::new();
+        let mut admitted = Vec::new();
+        for _ in 0..2 {
+            admitted.push(
+                collect_part_body(
+                    &ingress,
+                    100,
+                    None,
+                    Some(counted_part_stream(
+                        bytes::Bytes::from_static(b"abcd"),
+                        2,
+                        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    )),
+                    &headers,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        assert_eq!(
+            sha2::Sha256::digest(&admitted[0].data),
+            sha2::Sha256::digest(b"abcdabcd")
+        );
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = collect_part_body(
+            &ingress,
+            100,
+            None,
+            Some(counted_part_stream(
+                bytes::Bytes::from_static(b"x"),
+                1,
+                polls.clone(),
+            )),
+            &headers,
+        )
+        .await;
+        assert_eq!(result.err().unwrap().code(), &s3s::S3ErrorCode::SlowDown);
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        admitted.pop();
+        assert!(
+            ingress.acquire().is_ok(),
+            "dropping owned body must release its slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_ingress_cancellation_releases_collector_slot() {
+        let ingress = Arc::new(crate::multipart::MultipartIngress::new(Some(8), Some(1)));
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let mut started = Some(started);
+        let body = s3s::dto::StreamingBlob::new(SyncStorageStream::new(Box::pin(
+            futures::stream::poll_fn(move |_| {
+                if let Some(started) = started.take() {
+                    let _ = started.send(());
+                }
+                Poll::<Option<Result<bytes::Bytes, StorageError>>>::Pending
+            }),
+        )));
+        let worker_ingress = ingress.clone();
+        let worker = tokio::spawn(async move {
+            collect_part_body(
+                &worker_ingress,
+                100,
+                None,
+                Some(body),
+                &axum::http::HeaderMap::new(),
+            )
+            .await
+        });
+        observed.await.unwrap();
+        assert!(ingress.acquire().is_err());
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        assert!(ingress.acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn multipart_ingress_adapter_copy_refusal_preserves_default_copy() {
+        use md5::Digest as _;
+        use s3s::S3 as _;
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            backend: crate::config::BackendConfig::Filesystem {
+                path: dir.path().into(),
+            },
+            ..Default::default()
+        };
+        let engine = Arc::new(
+            crate::deltaglider::DynEngine::new(&config, None)
+                .await
+                .unwrap(),
+        );
+        engine.create_bucket("backups").await.unwrap();
+        engine
+            .store("backups", "source.gz", b"backup", None, Default::default())
+            .await
+            .unwrap();
+        for bounded in [false, true] {
+            let mut multipart = crate::multipart::MultipartStore::new_for_test(
+                100,
+                100,
+                chrono::Duration::hours(1),
+            );
+            if bounded {
+                multipart.ingress = crate::multipart::MultipartIngress::new(Some(8), Some(2));
+            }
+            let upload_id = multipart
+                .create("backups", "target.gz", None, Default::default())
+                .unwrap();
+            let service = DeltaGliderS3Service::new(Arc::new(AppState {
+                engine: arc_swap::ArcSwap::from(engine.clone()),
+                multipart: Arc::new(multipart),
+                metrics: Arc::new(crate::metrics::Metrics::new()),
+                usage_scanner: Arc::new(crate::usage_scanner::UsageScanner::new()),
+                config_db: None,
+                form_post_replay: Default::default(),
+                maintenance_gate: Arc::new(crate::maintenance::gate::MaintenanceGate::new()),
+                maintenance_notify: Default::default(),
+            }));
+            let mut input = s3s::dto::UploadPartCopyInput::builder();
+            input
+                .set_bucket("backups".into())
+                .set_key("target.gz".into())
+                .set_upload_id(upload_id.clone())
+                .set_part_number(1)
+                .set_copy_source(s3s::dto::CopySource::Bucket {
+                    bucket: "backups".into(),
+                    key: "source.gz".into(),
+                    version_id: None,
+                });
+            let result = service
+                .upload_part_copy(s3s::S3Request {
+                    input: input.build().unwrap(),
+                    method: axum::http::Method::PUT,
+                    uri: axum::http::Uri::from_static("/backups/target.gz"),
+                    headers: Default::default(),
+                    extensions: Default::default(),
+                    credentials: None,
+                    region: None,
+                    service: None,
+                    trailing_headers: None,
+                })
+                .await;
+            if bounded {
+                assert_eq!(
+                    result.unwrap_err().code(),
+                    &s3s::S3ErrorCode::InvalidRequest
+                );
+                assert!(service
+                    .state
+                    .multipart
+                    .list_parts(&upload_id, "backups", "target.gz")
+                    .unwrap()
+                    .is_empty());
+            } else {
+                result.unwrap();
+                let completed = service
+                    .state
+                    .multipart
+                    .complete(
+                        &upload_id,
+                        "backups",
+                        "target.gz",
+                        &[(
+                            1,
+                            format!("\"{}\"", hex::encode(md5::Md5::digest(b"backup"))),
+                        )],
+                    )
+                    .unwrap();
+                assert_eq!(completed.data.as_ref(), b"backup");
+                service.state.multipart.finish_upload(&upload_id);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_duplicate_complete_cannot_settle_another_owner() {
+        use s3s::S3 as _;
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            backend: crate::config::BackendConfig::Filesystem {
+                path: dir.path().into(),
+            },
+            ..Default::default()
+        };
+        let engine = crate::deltaglider::DynEngine::new(&config, None)
+            .await
+            .unwrap();
+        engine.create_bucket("backups").await.unwrap();
+        // Default profile has no global completion semaphore. Stand in for its
+        // first active owner after begin-complete, then call the real adapter.
+        let multipart = Arc::new(crate::multipart::MultipartStore::new_for_test(
+            100,
+            100,
+            chrono::Duration::hours(1),
+        ));
+        let id = multipart
+            .create("backups", "archive.gz", None, Default::default())
+            .unwrap();
+        let etag = multipart
+            .upload_part(
+                &id,
+                "backups",
+                "archive.gz",
+                1,
+                bytes::Bytes::from_static(b"retained"),
+            )
+            .unwrap();
+        let active = multipart
+            .complete_passthrough(&id, "backups", "archive.gz", &[(1, etag.clone())])
+            .unwrap();
+        let service = DeltaGliderS3Service::new(Arc::new(AppState {
+            engine: arc_swap::ArcSwap::from_pointee(engine),
+            multipart: multipart.clone(),
+            metrics: Arc::new(crate::metrics::Metrics::new()),
+            usage_scanner: Arc::new(crate::usage_scanner::UsageScanner::new()),
+            config_db: None,
+            form_post_replay: Default::default(),
+            maintenance_gate: Arc::new(crate::maintenance::gate::MaintenanceGate::new()),
+            maintenance_notify: Default::default(),
+        }));
+        let mut input = s3s::dto::CompleteMultipartUploadInput::builder();
+        input
+            .set_bucket("backups".into())
+            .set_key("archive.gz".into())
+            .set_upload_id(id.clone())
+            .set_multipart_upload(Some(s3s::dto::CompletedMultipartUpload {
+                parts: Some(vec![s3s::dto::CompletedPart {
+                    part_number: Some(1),
+                    e_tag: Some(parse_s3s_etag(&etag).unwrap()),
+                    ..Default::default()
+                }]),
+            }));
+        assert_eq!(
+            service
+                .complete_multipart_upload(s3s::S3Request {
+                    input: input.build().unwrap(),
+                    method: axum::http::Method::POST,
+                    uri: axum::http::Uri::from_static("/backups/archive.gz"),
+                    headers: Default::default(),
+                    extensions: Default::default(),
+                    credentials: None,
+                    region: None,
+                    service: None,
+                    trailing_headers: None,
+                })
+                .await
+                .unwrap_err()
+                .code(),
+            &s3s::S3ErrorCode::InvalidRequest
+        );
+        assert_eq!(multipart.in_flight_bytes(), 8);
+        assert_eq!(multipart.count_uploads(), 1);
+        assert!(multipart.abort(&id, "backups", "archive.gz").is_err());
+        drop(active);
+        multipart.finish_upload(&id);
+        assert_eq!(multipart.in_flight_bytes(), 0);
+    }
+
+    #[test]
+    fn multipart_ingress_copy_and_object_cap_cannot_bypass_bounds() {
+        for ingress in [
+            crate::multipart::MultipartIngress::new(Some(8), None),
+            crate::multipart::MultipartIngress::new(None, Some(2)),
+        ] {
+            assert!(ingress.check_copy_supported().is_err());
+            assert!(
+                ingress.part_limit(4) <= 4,
+                "part setting cannot raise object cap"
+            );
+        }
+        let legacy = crate::multipart::MultipartIngress::new(None, None);
+        assert!(legacy.check_copy_supported().is_ok());
+        assert!(legacy.acquire().unwrap().is_none());
+        assert_eq!(legacy.part_limit(4), 4);
     }
 
     #[test]

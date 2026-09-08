@@ -22,20 +22,14 @@ permissions: {}
 
 defaults:
   run:
-    # Self-hosted k3s runner's container image defaults to /bin/sh, not
-    # bash. Every `run:` step here uses bash-isms (`set -o pipefail`,
-    # `[[ ... =~ ... ]]`). Pin bash workflow-wide.
+    # Release scripts use bash features.
     shell: bash
 
 jobs:
   prepare:
     name: Prepare release PR
-    runs-on: k3s
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     permissions:
       contents: write
       pull-requests: write
@@ -49,6 +43,7 @@ jobs:
           # we set `contents: write` on this job).
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: ./.github/actions/setup-hosted
       - name: Validate input
         id: input
         run: |
@@ -119,11 +114,7 @@ jobs:
 
           git push origin "$BRANCH"
 
-          # Create the PR via the GitHub REST API — the builder image
-          # on the k3s self-hosted runner doesn't ship with the `gh`
-          # CLI, so we can't shell out to `gh pr create` here. The
-          # REST API is always available and only needs `curl` + the
-          # GITHUB_TOKEN we already have via `pull-requests: write`.
+          # Create the PR through the GitHub REST API.
           BODY_JSON=$(jq -nR --arg ver "$NEW_VERSION" --arg date "$(date -u +%Y-%m-%d)" '{
             title: "chore(release): v\($ver)",
             head: "release/v\($ver)",

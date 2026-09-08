@@ -16,16 +16,10 @@ permissions:
   packages: read
 
 env:
-  BUILDER_IMAGE: ghcr.io/${{ github.repository }}/builder:latest
-  # ── sccache: local MinIO compilation cache (NOT the CI test MinIO) ──
-  RUSTC_WRAPPER: sccache
   CARGO_INCREMENTAL: "0"
-  SCCACHE_BUCKET: sccache-rust
-  SCCACHE_ENDPOINT: http://sccache-minio.sccache.svc.cluster.local:9000
-  SCCACHE_REGION: auto
-  SCCACHE_S3_USE_SSL: "false"
-  AWS_ACCESS_KEY_ID: sccache
-  AWS_SECRET_ACCESS_KEY: sccache-secret-key
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   verify-integration-test-registry:
@@ -86,27 +80,15 @@ jobs:
 
   fmt:
     name: Rustfmt
-    runs-on: k3s
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       - name: cargo fmt
         env:
           RUSTC_WRAPPER: ""  # fmt doesn't need sccache
@@ -114,32 +96,18 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: k3s
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: sccache stats (pre)
-        run: sccache --show-stats
+      - uses: ./.github/actions/setup-hosted
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
-      - name: cargo clippy (with sccache bypass + diagnostic capture)
+      - name: cargo clippy (with diagnostic capture)
         shell: bash
         env:
           RUSTC_WRAPPER: ""
@@ -161,7 +129,7 @@ jobs:
             echo ""
             echo "### Disk"
             echo '```'
-            df -h /github /home /tmp 2>&1 | head -10 || true
+            df -h "$GITHUB_WORKSPACE" /tmp 2>&1 | head -10 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -176,38 +144,22 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
-      - name: sccache stats (post)
-        if: always()
-        run: sccache --show-stats
 
   # ── Test jobs: split into 3 parallel groups for ~3x faster wall-clock ──
-  # Each job compiles via sccache (near-instant after first job populates cache).
+  # Each job uses a separate GitHub Rust cache and supports a cold build.
   # Split by execution time: unit (~60s), integration-fast (~50s), integration-slow (~70s).
 
   test-unit:
     name: Unit Tests
-    runs-on: k3s
-    timeout-minutes: 15
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
       - name: cargo test --lib
@@ -217,38 +169,23 @@ jobs:
 
   coverage:
     name: Unit Coverage (non-blocking)
-    runs-on: k3s
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     # Signal, not a gate. A flaky coverage tool must not block merges.
     # When a regression is real, the PR author sees the summary in
     # the job log; when it's noise (a new file without tests added
     # alongside, a cfg-gated branch, etc.) we want to avoid burning
     # review time on it.
     continue-on-error: true
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       - name: Install cargo-llvm-cov
-        # binstall is fast (~5s) and the builder image may not ship it.
-        # `--locked` pins to the lockfile-compatible version; no version
-        # drift between runs.
+        # Install the coverage tool explicitly on the fresh runner.
         run: |
           if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
             cargo install --locked cargo-llvm-cov
@@ -302,22 +239,8 @@ jobs:
     if: >-
       github.event_name != 'push' ||
       contains(github.event.head_commit.message, '[ci-integration]')
-    runs-on: k3s
-    timeout-minutes: 50
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     env:
       # Wave-1 security (commit 3ff9edc) rejects http:// + private-IP S3
       # endpoints by default to close SSRF surface. The MinIO under test
@@ -340,18 +263,23 @@ jobs:
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
       - name: Clean up stale config DB files
         run: |
           rm -f deltaglider_config.db deltaglider_config.db.bak .deltaglider_bootstrap_hash
           rm -f /tmp/deltaglider_config.db /tmp/deltaglider_config.db.bak /tmp/.deltaglider_bootstrap_hash
+      - name: Install MinIO client
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "$RUNNER_TEMP/mc"
+          sudo install -m 0755 "$RUNNER_TEMP/mc" /usr/local/bin/mc
       - name: Start MinIO for tests
         run: |
-          docker run -d --name minio-ci --network container:$(hostname) \
+          docker run -d --name minio-ci -p 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
+            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
           for i in $(seq 1 30); do
             mc alias set local http://localhost:9000 minioadmin minioadmin 2>/dev/null && break
             sleep 1
@@ -365,10 +293,13 @@ jobs:
           PIP_DISABLE_PIP_VERSION_CHECK: "1"
         run: |
           if ! python3 -m pip --version >/dev/null 2>&1; then
-            apt-get update -qq
-            apt-get install -y -qq python3-pip
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-pip
           fi
-          python3 -m pip install --quiet --break-system-packages deltaglider
+          python3 -m venv "$RUNNER_TEMP/deltaglider-cli"
+          "$RUNNER_TEMP/deltaglider-cli/bin/pip" install deltaglider
+          echo "$RUNNER_TEMP/deltaglider-cli/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/deltaglider-cli/bin:$PATH"
           deltaglider --version
       - name: Integration tests (fast)
         env:
@@ -454,28 +385,15 @@ jobs:
 
   test-delta:
     name: Delta & Optimization Tests
-    runs-on: k3s
-    timeout-minutes: 15
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
       - name: Delta, optimization, and memory tests
@@ -490,34 +408,21 @@ jobs:
 
   e2e-smoke:
     name: E2E smoke (embedded UI)
-    runs-on: k3s
-    timeout-minutes: 35
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       - name: Build demo UI + release binary
         env:
           RUSTC_WRAPPER: ""
         run: |
           cd demo/s3-browser/ui && npm ci && npm run build
-          cd ../.. && cargo build --locked --release --bin deltaglider_proxy
+          cd ../../.. && cargo build --locked --release --bin deltaglider_proxy
       - name: Install Playwright Chromium
         run: |
           cd demo/s3-browser/ui
@@ -529,28 +434,17 @@ jobs:
 
   audit:
     name: RustSec Audit
-    runs-on: k3s
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit --version 0.22.2
       - name: cargo audit
         env:
           RUSTC_WRAPPER: ""  # audit doesn't compile
@@ -558,60 +452,37 @@ jobs:
 
   deny:
     name: Cargo Deny
-    runs-on: k3s
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    continue-on-error: true  # warn-only until config stabilises
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       - name: Install cargo-deny
         env:
           RUSTC_WRAPPER: ""
-        run: cargo install --locked cargo-deny 2>/dev/null || echo "cargo-deny install failed (non-blocking)"
+        run: cargo install --locked cargo-deny --version 0.20.2
       - name: cargo deny check
         env:
           RUSTC_WRAPPER: ""
-        run: cargo deny check 2>&1 || true
+        # Preserve the existing unmaintained-package warning policy.
+        # Vulnerabilities, unsoundness, licenses and source violations still fail.
+        run: cargo deny check --warn unmaintained
 
   frontend-lint:
     name: Frontend Lint
-    runs-on: k3s
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       - name: Install dependencies
         run: cd demo/s3-browser/ui && npm ci
       # ── Blocking: ESLint with react-hooks/rules-of-hooks at error.
@@ -669,39 +540,20 @@ jobs:
           npm run test:file-preview-mode
           npm run test:make-zip
       - name: npm audit
-        run: cd demo/s3-browser/ui && npm audit --audit-level=high || true  # warn-only
+        run: cd demo/s3-browser/ui && npm audit --audit-level=high
 
   docs:
     name: Docs bundling + link check + YAML examples
-    runs-on: k3s
-    # 25 min ceiling: this job does the UI bundle + a from-scratch release
-    # `cargo build --bin deltaglider_proxy` for the config-lint (≈13 min cold on
-    # a loaded k3s runner, even with sccache) plus the (now hard-capped, warn-
-    # only) lychee link check. The earlier 10/15-min limits kept killing
-    # otherwise-green runs and blocking the release. Generous headroom here +
-    # the per-step `timeout` on lychee guarantees the job completes instead of
-    # being cancelled.
-    timeout-minutes: 25
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    # Allow cold compilation on hosted runners; individual network checks stay bounded.
+    timeout-minutes: 90
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       # ── Blocking: every .md under docs/product/ is registered in
       #    demo/s3-browser/ui/src/docs-imports.ts, and no dev docs
       #    (docs/dev/**) sneak into the product bundle. ──
@@ -716,24 +568,12 @@ jobs:
       #    docs/product/**/*.md parses + validates under the real
       #    schema. Prevents example drift. Needs a built binary. ──
       - name: Build deltaglider_proxy (for config lint)
-        # Use the workflow-default sccache wrapper (do NOT empty RUSTC_WRAPPER):
-        # this cold release build was the dominant cost making the job blow past
-        # its timeout. With sccache warm (same cache the clippy/unit jobs use)
-        # the build drops from ~10min to a few, well inside the limit.
         run: cd demo/s3-browser/ui && npm ci && npm run build && cd ../../.. && cargo build --locked --release --bin deltaglider_proxy
       - name: Validate docs YAML examples
         env:
           DELTAGLIDER_PROXY_BIN: ./target/release/deltaglider_proxy
         run: ./scripts/check-docs-yaml-examples.sh
-      # ── Non-blocking: inter-doc link check.
-      #    lycheeverse/lychee-action needs to install a binary at
-      #    runtime, and our container (ghcr.io/.../builder) doesn't
-      #    ship with the tools it expects — hit exit 127 on v0.8.8.
-      #    Until we bake lychee into the builder image (follow-up),
-      #    run it via `cargo install --locked lychee` here. If the
-      #    install fails (rust version drift, network), treat it
-      #    as warn-only so the registry + YAML guards above still
-      #    gate the release.
+      # Inter-doc link checks retain their existing advisory policy.
       - name: Link check (lychee, warn-only)
         # Hard-capped at 4 min. This step is WARN-ONLY (broken links never fail
         # the build), but it both compiles lychee from source AND makes live
@@ -759,28 +599,15 @@ jobs:
 
   config-schema:
     name: Config JSON Schema
-    runs-on: k3s
-    timeout-minutes: 10
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      # Raise the open-file limit. These jobs run on the self-hosted
-      # `k3s`-labelled Ryzen LXC runners, where the container inherits a low
-      # default nofile (~1024). The integration suite spawns ~35 test
-      # binaries in parallel, each with its own proxy + MinIO sockets, so the
-      # aggregate fd count blows past 1024 and surfaces as
-      # `ConnectError("tcp open error", Os code 24 "Too many open files")`.
-      # The LXC host also bumps nofile (lxc.prlimit.nofile) — this is the
-      # belt-and-suspenders so the workflow is self-documenting and portable.
-      options: --ulimit nofile=1048576:1048576
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Scrub stale workspace (drop .claude leftovers from prior runs)
         shell: bash
         run: |
           rm -rf .claude/worktrees .git/modules/.claude 2>/dev/null || true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       - name: Build demo UI (required by rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
       - name: Generate canonical JSON Schema

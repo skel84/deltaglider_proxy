@@ -17,25 +17,13 @@ permissions:
   packages: read
 
 env:
-  RUSTC_WRAPPER: sccache
   CARGO_INCREMENTAL: "0"
-  SCCACHE_BUCKET: sccache-rust
-  SCCACHE_ENDPOINT: http://sccache-minio.sccache.svc.cluster.local:9000
-  SCCACHE_REGION: auto
-  SCCACHE_S3_USE_SSL: "false"
-  AWS_ACCESS_KEY_ID: sccache
-  AWS_SECRET_ACCESS_KEY: sccache-secret-key
 
 jobs:
   test-all-default-features:
     name: cargo test --all (default features)
-    runs-on: k3s
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
-    container:
-      image: ghcr.io/beshu-tech/deltaglider_proxy/builder:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     env:
       # See ci.yml `test-integration` for rationale: MinIO under test
       # serves http://localhost:9000, which the wave-1 SSRF guard
@@ -47,18 +35,26 @@ jobs:
       DGP_REPLAY_WINDOW_SECS: "0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-hosted
       - name: Build demo UI (rust-embed)
         run: cd demo/s3-browser/ui && npm ci && npm run build
       - name: Clean stale config DB artifacts
         run: |
           rm -f deltaglider_config.db deltaglider_config.db.bak .deltaglider_bootstrap_hash
           rm -f /tmp/deltaglider_config.db /tmp/deltaglider_config.db.bak /tmp/.deltaglider_bootstrap_hash
+      - name: Install MinIO client and DeltaGlider CLI
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "$RUNNER_TEMP/mc"
+          sudo install -m 0755 "$RUNNER_TEMP/mc" /usr/local/bin/mc
+          python3 -m venv "$RUNNER_TEMP/deltaglider-cli"
+          "$RUNNER_TEMP/deltaglider-cli/bin/pip" install deltaglider
+          echo "$RUNNER_TEMP/deltaglider-cli/bin" >> "$GITHUB_PATH"
       - name: Start MinIO
         run: |
-          docker run -d --name minio-nightly --network container:$(hostname) \
+          docker run -d --name minio-nightly -p 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
+            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
           for i in $(seq 1 30); do
             mc alias set local http://localhost:9000 minioadmin minioadmin 2>/dev/null && break
             sleep 1
