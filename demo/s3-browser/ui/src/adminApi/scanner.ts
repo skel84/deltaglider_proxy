@@ -79,3 +79,43 @@ export async function getPrefixSavings(
   }
   return safeJson(res);
 }
+
+// === Per-bucket running usage counter (Ceph-style O(1) size) ===
+
+/**
+ * O(1) per-bucket size from the running counter (`src/bucket_usage.rs`),
+ * maintained inline on every PUT/DELETE — no scan. `last_scan_at` is when an
+ * authoritative full scan last reconciled it (null = never; the inline running
+ * total is still shown). Returns null on 401/403 (no admin session) so callers
+ * can silently degrade.
+ */
+export interface BucketUsage {
+  bucket: string;
+  object_count: number;
+  logical_bytes: number;
+  stored_bytes: number;
+  savings_percentage: number | null;
+  last_scan_at: number | null;
+  never_scanned: boolean;
+}
+
+export async function getBucketUsage(bucket: string): Promise<BucketUsage | null> {
+  const res = await adminFetch(`/api/admin/usage/bucket/${encodeURIComponent(bucket)}`);
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) return null;
+    await throwApiError(res, 'Bucket usage query');
+  }
+  return safeJson(res);
+}
+
+/** Force an authoritative full scan and overwrite the counter; returns the
+ *  reconciled row. The only O(n) path — the Refresh button. */
+export async function refreshBucketUsage(bucket: string): Promise<BucketUsage | null> {
+  const params = new URLSearchParams({ bucket });
+  const res = await adminFetch(`/api/admin/usage/refresh?${params}`, 'POST');
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) return null;
+    await throwApiError(res, 'Bucket usage refresh');
+  }
+  return safeJson(res);
+}

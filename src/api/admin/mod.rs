@@ -14,6 +14,7 @@ pub mod external_auth;
 mod groups;
 pub(crate) mod jobs;
 mod lifecycle;
+mod logs;
 pub(crate) mod maintenance;
 pub(crate) mod objects;
 pub(crate) mod replication;
@@ -51,6 +52,7 @@ pub use backup::{export_backup, import_backup, MAX_IMPORT_BODY_BYTES};
 pub use bucket_scan::{
     delete_scan, get_scan_status, get_scan_stream, post_scan_start, post_scan_stop, BucketScanner,
 };
+pub(crate) use config::apply_config_inner;
 pub use config::{
     apply_config_doc, apply_declarative_iam, change_password, config_defaults, export_config,
     export_declarative_iam, get_config, get_section, put_section, recover_db, sync_now,
@@ -74,9 +76,12 @@ pub use groups::{
     update_group, AddGroupMemberRequest, CloneGroupRequest, CreateGroupRequest, UpdateGroupRequest,
 };
 pub use jobs::{
-    job_action as jobs_action, job_failures as jobs_failures, job_runs as jobs_runs,
-    list_jobs as jobs_list,
+    job_action as jobs_action, job_failures as jobs_failures, job_parity_version,
+    job_replication_event_version, job_replication_run_version, job_runs as jobs_runs,
+    job_verify_cancel as jobs_verify_cancel, job_verify_start as jobs_verify_start,
+    job_verify_status as jobs_verify_status, list_jobs as jobs_list,
 };
+pub use logs::{get_logs, get_logs_stream};
 pub use maintenance::{
     bucket_status as maintenance_bucket_status, start_migrate as maintenance_start_migrate,
     start_reencrypt as maintenance_start_reencrypt,
@@ -86,7 +91,10 @@ pub use objects::{
     move_objects,
 };
 pub use savings::{get_savings, SavingsCache};
-pub use scanner::{get_usage, migrate_legacy, scan_usage, ScanUsageRequest, UsageQuery};
+pub use scanner::{
+    get_bucket_usage, get_usage, migrate_legacy, refresh_bucket_usage, scan_usage,
+    ScanUsageRequest, UsageQuery,
+};
 pub use users::{
     clone_user, create_user, delete_user, get_canned_policies, iam_version, list_users,
     rotate_user_keys, update_user, CloneUserRequest, CreateUserRequest, RotateKeysRequest,
@@ -147,7 +155,15 @@ pub struct AdminState {
     /// currently derived from). See [`crate::admission`] for the type
     /// shape and evaluator.
     pub admission_chain: crate::admission::SharedAdmissionChain,
+    /// In-process cancel flags for running parity audits, keyed by rule name.
+    /// `verify_cancel` sets the flag for a fast (lock-free) abort; the durable
+    /// `cancelling` DB row remains the cross-instance / post-restart signal.
+    pub parity_cancels: ParityCancels,
 }
+
+/// Per-rule cancel flags for in-flight parity audits (see [`AdminState`]).
+pub type ParityCancels =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>;
 
 /// Trigger an async config DB upload to S3 if sync is enabled.
 /// Spawns a background task so the caller is not blocked.

@@ -373,20 +373,37 @@ pub async fn apply_config_doc(
     headers: HeaderMap,
     Json(body): Json<ConfigDocumentRequest>,
 ) -> impl IntoResponse {
+    // Thin HTTP wrapper. The pipeline lives in `apply_config_inner` so a sibling
+    // mutation path (backup restore) can call it directly and read the TYPED
+    // result instead of re-parsing this handler's own HTTP response body.
+    let (status, resp) = apply_config_inner(&state, &headers, body).await;
+    (status, Json(resp))
+}
+
+/// The full config-apply pipeline as a typed call (no HTTP extractors):
+/// parse/validate → lock → preserve secrets → env-ref merge → bootstrap-hash
+/// guard → `apply_config_transition` → swap → persist → audit. Returns the
+/// status + typed [`ConfigApplyResponse`] for every arm. `apply_config_doc` is
+/// the thin `Json`-wrapping route handler; `backup.rs` calls this directly.
+pub(crate) async fn apply_config_inner(
+    state: &Arc<AdminState>,
+    headers: &HeaderMap,
+    body: ConfigDocumentRequest,
+) -> (StatusCode, ConfigApplyResponse) {
     // 1. Parse + validate the incoming document (no lock held — pure work).
     let (mut incoming, parse_warnings) = match parse_and_validate_yaml(&body.yaml) {
         Ok(v) => v,
         Err(err) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ConfigApplyResponse {
+                ConfigApplyResponse {
                     applied: false,
                     persisted: false,
                     requires_restart: false,
                     warnings: vec![],
                     error: Some(err),
                     persisted_path: None,
-                }),
+                },
             );
         }
     };
@@ -426,7 +443,7 @@ pub async fn apply_config_doc(
     if incoming.bootstrap_password_hash != cfg.bootstrap_password_hash {
         return (
             StatusCode::FORBIDDEN,
-            Json(ConfigApplyResponse {
+            ConfigApplyResponse {
                 applied: false,
                 persisted: false,
                 requires_restart: false,
@@ -435,7 +452,7 @@ pub async fn apply_config_doc(
                     "bootstrap_password_hash cannot be changed via /config/apply; use PUT /api/admin/password (verifies the current password and re-encrypts the config DB atomically)".to_string(),
                 ),
                 persisted_path: None,
-            }),
+            },
         );
     }
 
@@ -447,12 +464,12 @@ pub async fn apply_config_doc(
     //    transition truth.
     let old_cfg = cfg.clone();
     let (transition_warnings, requires_restart) =
-        match apply_config_transition(&state, &old_cfg, &incoming).await {
+        match apply_config_transition(state, &old_cfg, &incoming).await {
             Ok(r) => r,
             Err(e) => {
                 return (
                     StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ConfigApplyResponse {
+                    ConfigApplyResponse {
                         applied: false,
                         persisted: false,
                         requires_restart: false,
@@ -465,7 +482,7 @@ pub async fn apply_config_doc(
                             e
                         )),
                         persisted_path: None,
-                    }),
+                    },
                 );
             }
         };
@@ -480,7 +497,7 @@ pub async fn apply_config_doc(
     //    denied, disk full, missing directory); we surface that as
     //    `persisted: false` + HTTP 500 so GitOps pipelines don't mistake
     //    a persist failure for a clean apply.
-    let persist_path = active_config_path(&state);
+    let persist_path = active_config_path(state);
     let (persisted, persisted_path, status, persist_warning) =
         match cfg.persist_to_file(&persist_path) {
             Ok(()) => (true, Some(persist_path.clone()), StatusCode::OK, None),
@@ -495,7 +512,7 @@ pub async fn apply_config_doc(
             ),
         };
 
-    audit_log("apply_config", "admin", &persist_path, &headers);
+    audit_log("apply_config", "admin", &persist_path, headers);
 
     let warnings: Vec<String> = parse_warnings
         .into_iter()
@@ -506,14 +523,14 @@ pub async fn apply_config_doc(
 
     (
         status,
-        Json(ConfigApplyResponse {
+        ConfigApplyResponse {
             applied: true,
             persisted,
             requires_restart,
             warnings,
             error: None,
             persisted_path,
-        }),
+        },
     )
 }
 

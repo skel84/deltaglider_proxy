@@ -7,6 +7,7 @@ import {
   ExperimentOutlined,
   FileTextOutlined,
   LockOutlined,
+  ProfileOutlined,
   SecurityScanOutlined,
   SendOutlined,
   SettingOutlined,
@@ -55,14 +56,15 @@ export interface SidebarEntry {
 }
 
 /**
- * The 7-group / 15-leaf IA — one group per control domain (see
- * docs/plan/admin-ui-taxonomy.md): Overview, Diagnostics, Access,
- * Storage, Jobs, Integrations, System. No parent/overview pages: every
- * entry is a destination.
+ * The 5-group / 15-leaf IA — merged from 8 to drop single/double-leaf header
+ * tax (see docs/plan/admin-ui-taxonomy.md): Observability (overview +
+ * diagnostics + logs), Access, Storage (incl. Jobs), Integrations, System.
+ * No parent/overview pages: every entry is a destination. Leaf paths are
+ * unchanged across the merge, so routing/remap are untouched.
  */
 export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
   {
-    group: 'Overview',
+    group: 'Observability',
     entries: [
       {
         path: 'dashboard',
@@ -70,11 +72,6 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
         icon: <DashboardOutlined />,
         description: 'Health, metrics, and savings at a glance.',
       },
-    ],
-  },
-  {
-    group: 'Diagnostics',
-    entries: [
       {
         path: 'diagnostics/trace',
         label: 'Trace',
@@ -83,16 +80,22 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
           'Replay a synthetic request against the admission chain and see which rule fires.',
       },
       {
+        path: 'diagnostics/delta-efficiency',
+        label: 'Delta efficiency',
+        icon: <ThunderboltOutlined />,
+        description: 'Find prefixes where the delta baseline is underperforming.',
+      },
+      {
         path: 'diagnostics/audit',
         label: 'Audit log',
         icon: <FileTextOutlined />,
         description: 'Recent authentication and mutation events from this process.',
       },
       {
-        path: 'diagnostics/delta-efficiency',
-        label: 'Delta efficiency',
-        icon: <ThunderboltOutlined />,
-        description: 'Find prefixes where the delta baseline is underperforming.',
+        path: 'diagnostics/logs',
+        label: 'System logs',
+        icon: <ProfileOutlined />,
+        description: 'Live tail + filter of the proxy operational logs (INFO+).',
       },
     ],
   },
@@ -166,11 +169,6 @@ export const ADMIN_IA: Array<{ group: string; entries: SidebarEntry[] }> = [
         saveModel: 'review',
         description: 'Per-bucket settings: routing, public access, quotas, compression.',
       },
-    ],
-  },
-  {
-    group: 'Jobs',
-    entries: [
       {
         path: 'jobs',
         label: 'Jobs',

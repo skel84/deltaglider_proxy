@@ -52,7 +52,7 @@ deltaglider_proxy admission trace --method PUT --path /downloads/public/installe
 
 Expect a `deny` decision naming `deny-anonymous-writes-downloads`. Re-run with `--authenticated`: the block no longer matches (its `authenticated: false` predicate fails), and the request falls through to SigV4 authentication.
 
-The same tool lives in the UI at **Settings → Diagnostics → Trace** — it renders the decision path, the matched block, and ready-made example requests, with a Copy-as-JSON button:
+The same tool lives in the UI at **Settings → Observability → Trace** — it renders the decision path, the matched block, and ready-made example requests, with a Copy-as-JSON button:
 
 ![Request trace diagnostics](/_/screenshots/request-trace.jpg)
 
@@ -60,7 +60,7 @@ If you want explicit trace output for requests nothing matches, end the chain wi
 
 ## 4. Roll out
 
-Apply via the UI's dirty-bar, or commit the `admission:` section to your config file and push it with `deltaglider_proxy config apply`. The chain hot-reloads — no restart. Then watch **Settings → Diagnostics → Audit** for a few minutes: denials show up with source IP and path, so a too-broad block surfaces immediately.
+Apply via the UI's dirty-bar, or commit the `admission:` section to your config file and push it with `deltaglider_proxy config apply`. The chain hot-reloads — no restart. Then watch **Settings → Observability → Audit** for a few minutes: denials show up with source IP and path, so a too-broad block surfaces immediately.
 
 ## Verify
 

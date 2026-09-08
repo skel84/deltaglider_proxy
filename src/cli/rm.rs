@@ -133,7 +133,7 @@ async fn rm_one(engine: &DynEngine, args: &RmArgs, bucket: &str, key: &str) -> i
         return cli_exit::EXIT_OK;
     }
     match engine.delete(bucket, key).await {
-        Ok(()) => cli_exit::EXIT_OK,
+        Ok(_) => cli_exit::EXIT_OK,
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("NoSuchKey") || msg.contains("not found") {
@@ -184,7 +184,7 @@ async fn rm_recursive(engine: &DynEngine, args: &RmArgs, bucket: &str, prefix: &
                 continue;
             }
             match engine.delete(bucket, key).await {
-                Ok(()) => succeeded += 1,
+                Ok(_) => succeeded += 1,
                 Err(e) => {
                     eprintln!("warning: delete s3://{bucket}/{key} failed: {e}");
                     failed += 1;

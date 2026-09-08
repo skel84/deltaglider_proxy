@@ -64,6 +64,19 @@ async fn atomic_write_with_metadata(
     .map_err(super::join_error)?
 }
 
+/// Materialise `src` at `dest` cheaply: hardlink (O(1), no extra bytes) when on
+/// the same filesystem, byte-copy as fallback across fs boundaries (EXDEV).
+/// `dest` is removed first (hard_link refuses an existing target — the caller may
+/// hand a pre-created spool temp). Shared by `get_reference_to_file` and
+/// `put_reference_from_file`.
+async fn hardlink_or_copy(src: &Path, dest: &Path) -> Result<(), StorageError> {
+    let _ = fs::remove_file(dest).await;
+    if fs::hard_link(src, dest).await.is_err() {
+        fs::copy(src, dest).await?;
+    }
+    Ok(())
+}
+
 /// Atomically copy file data + metadata to destination using temp + rename.
 async fn atomic_copy_with_metadata(
     source_path: &Path,
@@ -782,6 +795,24 @@ impl StorageBackend for FilesystemBackend {
         .await
     }
 
+    async fn get_reference_to_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        dest: &Path,
+    ) -> Result<u64, StorageError> {
+        let src = self.reference_path(bucket, prefix);
+        if !path_exists(&src).await {
+            return Err(StorageError::NotFound(format!(
+                "reference: {}/reference.bin",
+                prefix
+            )));
+        }
+        hardlink_or_copy(&src, dest).await?;
+        let len = tokio::fs::metadata(dest).await?.len();
+        Ok(len)
+    }
+
     #[instrument(skip(self, data, metadata))]
     async fn put_reference(
         &self,
@@ -804,6 +835,22 @@ impl StorageBackend for FilesystemBackend {
     }
 
     #[instrument(skip(self, metadata))]
+    async fn put_reference_from_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        source_path: &Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        self.require_bucket_exists(bucket).await?;
+        let dest = self.reference_path(bucket, prefix);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        hardlink_or_copy(source_path, &dest).await?;
+        xattr_meta::write_metadata(&dest, metadata).await
+    }
+
     async fn put_reference_metadata(
         &self,
         bucket: &str,
@@ -1960,5 +2007,54 @@ mod tests {
             .join("visible")
             .join("reference.bin")
             .exists());
+    }
+
+    #[tokio::test]
+    async fn get_reference_to_file_is_byte_identical() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let backend = FilesystemBackend::new(tmp.path().to_path_buf())
+            .await
+            .expect("new backend");
+        backend.create_bucket("bucket").await.expect("create");
+        let payload: Vec<u8> = (0..50_000u32).flat_map(|n| n.to_le_bytes()).collect();
+        let meta = FileMetadata::new_reference(
+            "reference.bin".into(),
+            "source.bin".into(),
+            "0".repeat(64),
+            "0".repeat(32),
+            payload.len() as u64,
+            None,
+        );
+        backend
+            .put_reference("bucket", "deltas", &payload, &meta)
+            .await
+            .expect("put reference");
+
+        let dest = tmp.path().join("spool_ref.bin");
+        let n = backend
+            .get_reference_to_file("bucket", "deltas", &dest)
+            .await
+            .expect("reference to file");
+        assert_eq!(n, payload.len() as u64);
+        let back = fs::read(&dest).await.expect("read dest");
+        assert_eq!(
+            back, payload,
+            "materialised reference must be byte-identical"
+        );
+
+        // dest pre-existing (e.g. a pre-created spool temp) must be overwritten,
+        // not error.
+        let n2 = backend
+            .get_reference_to_file("bucket", "deltas", &dest)
+            .await
+            .expect("reference to file over existing dest");
+        assert_eq!(n2, payload.len() as u64);
+
+        // Missing reference → NotFound (not a silent empty file).
+        let err = backend
+            .get_reference_to_file("bucket", "absent", &dest)
+            .await
+            .expect_err("missing reference must error");
+        assert!(matches!(err, StorageError::NotFound(_)));
     }
 }

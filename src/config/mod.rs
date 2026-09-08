@@ -2,6 +2,7 @@
 
 //! Configuration for DeltaGlider Proxy S3 server
 
+pub mod advisories;
 mod env;
 mod expansion;
 
@@ -41,6 +42,24 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         name: "DGP_LOG_LEVEL",
         description: "Log level filter (overridden by RUST_LOG)",
         example: "deltaglider_proxy=debug,tower_http=debug",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_LOG_FORMAT",
+        description: "Log output format: 'text' (default, human-readable) or 'json' (one JSON object per line, greppable with jq). Startup-only — not hot-reloadable.",
+        example: "json",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_LOG_RING_SIZE",
+        description: "Max entries in the in-memory log ring powering the admin GUI log viewer (default: 2000).",
+        example: "2000",
+        category: "Server",
+    },
+    EnvVarEntry {
+        name: "DGP_LOG_RING_LEVEL",
+        description: "Minimum severity captured into the GUI log ring/stream (error|warn|info|debug|trace; default: info). Independent of the stdout log level.",
+        example: "info",
         category: "Server",
     },
     EnvVarEntry {
@@ -256,6 +275,12 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Security",
     },
     EnvVarEntry {
+        name: "DGP_TRUSTED_PROXY_CIDRS",
+        description: "Comma-separated CIDRs of trusted reverse proxies; XFF honored only from these peers (prevents aws:SourceIp / admission source_ip spoofing)",
+        example: "10.0.0.0/8,192.168.1.5",
+        category: "Security",
+    },
+    EnvVarEntry {
         name: "DGP_SESSION_TTL_HOURS",
         description: "Admin session TTL in hours (default: 4)",
         example: "4",
@@ -347,8 +372,44 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
     },
     EnvVarEntry {
         name: "DGP_CODEC_TIMEOUT_SECS",
-        description: "xdelta3 subprocess timeout in seconds (default: 60)",
+        description: "xdelta3 subprocess timeout in seconds for the buffered path (default: 60)",
         example: "60",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_CODEC_STALL_SECS",
+        description: "Streaming codec: kill xdelta3 if no stdout progress for this long (default: 30)",
+        example: "30",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_CODEC_ABSOLUTE_SECS",
+        description: "Streaming codec: absolute ceiling for one op, regardless of progress (default: 7200)",
+        example: "7200",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_SPOOL_DIR",
+        description: "Directory for streaming codec spool files (default: system temp dir)",
+        example: "/var/lib/deltaglider/spool",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_SPOOL_MAX_BYTES",
+        description: "Byte budget for concurrent spool files; acquirers back-pressure when full (default: 16 GiB)",
+        example: "17179869184",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_SPOOL_THRESHOLD_BYTES",
+        description: "Delta GETs larger than this reconstruct to a spool file + stream (default: max_object_size)",
+        example: "104857600",
+        category: "Delta Engine",
+    },
+    EnvVarEntry {
+        name: "DGP_SPOOL_ACQUIRE_TIMEOUT_SECS",
+        description: "Max wait for spool budget before a spooled GET fails with SlowDown (default: 120)",
+        example: "120",
         category: "Delta Engine",
     },
     EnvVarEntry {
@@ -1827,6 +1888,16 @@ impl Config {
             &self.event_delivery,
         ));
 
+        // Cross-field advisories — "this combination is suspicious" checks that a
+        // single field can't reveal (rate-limit/trust-proxy collapse, stale IAM
+        // templates, etc). Non-fatal; rendered alongside the warnings above.
+        let env = advisories::EnvView::from_env();
+        warnings.extend(
+            advisories::advisories(self, &env)
+                .iter()
+                .map(|a| a.render()),
+        );
+
         warnings
     }
 
@@ -2653,6 +2724,9 @@ mod tests {
             "DGP_CONFIG",                            // config::load()
             "DGP_DEBUG_HEADERS",                     // api::handlers::debug_headers_enabled()
             "DGP_TRUST_PROXY_HEADERS",               // rate_limiter::trust_proxy_headers()
+            "DGP_LOG_FORMAT",                        // startup::init_tracing() (text|json)
+            "DGP_LOG_RING_SIZE",                     // logs::ring_capacity()
+            "DGP_LOG_RING_LEVEL",                    // logs::ring_min_level()
             "DGP_SESSION_TTL_HOURS",                 // session::default_session_ttl()
             "DGP_MPU_LARGE_SPOOL_DIR",               // main multipart disk profile
             "DGP_MPU_MAX_PART_BYTES",                // multipart::MultipartIngress
@@ -2669,19 +2743,26 @@ mod tests {
             "DGP_CORS_PERMISSIVE",                   // demo::ui_router()
             "DGP_REQUEST_TIMEOUT_SECS",              // startup::build_s3_router()
             "DGP_CODEC_TIMEOUT_SECS",                // deltaglider::codec::codec_timeout()
-            "DGP_RATE_LIMIT_MAX_ATTEMPTS",           // rate_limiter::default_auth()
-            "DGP_RATE_LIMIT_WINDOW_SECS",            // rate_limiter::default_auth()
-            "DGP_RATE_LIMIT_LOCKOUT_SECS",           // rate_limiter::default_auth()
-            "DGP_REPLAY_WINDOW_SECS",                // api::auth replay detection
-            "DGP_SECURE_COOKIES",                    // api::admin::auth::secure_cookies()
-            "DGP_STREAM_COPY_THRESHOLD",             // transfer_plan::stream_copy_threshold()
-            "DGP_MULTIPART_PART_SIZE",               // transfer_plan::multipart_part_size()
-            "DGP_UPLOAD_CONCURRENCY",                // transfer_plan::upload_concurrency()
-            "DGP_REPLICATION_TRANSFERS",             // transfer_plan::transfers()
-            "DGP_S3_READ_TIMEOUT_SECS",              // storage::s3::build_client()
-            "DGP_S3_CONNECT_TIMEOUT_SECS",           // storage::s3::build_client()
+            "DGP_CODEC_STALL_SECS",                  // deltaglider::codec::codec_stall_timeout()
+            "DGP_CODEC_ABSOLUTE_SECS",               // deltaglider::codec::codec_absolute_ceiling()
+            "DGP_SPOOL_DIR",                         // deltaglider::spool::SpoolDir::from_env()
+            "DGP_SPOOL_MAX_BYTES",                   // deltaglider::spool::SpoolDir::from_env()
+            "DGP_SPOOL_THRESHOLD_BYTES",             // engine::retrieve::spool_threshold()
+            "DGP_SPOOL_ACQUIRE_TIMEOUT_SECS", // engine::retrieve::reconstruct_delta_to_spool()
+            "DGP_RATE_LIMIT_MAX_ATTEMPTS",    // rate_limiter::default_auth()
+            "DGP_RATE_LIMIT_WINDOW_SECS",     // rate_limiter::default_auth()
+            "DGP_RATE_LIMIT_LOCKOUT_SECS",    // rate_limiter::default_auth()
+            "DGP_REPLAY_WINDOW_SECS",         // api::auth replay detection
+            "DGP_SECURE_COOKIES",             // api::admin::auth::secure_cookies()
+            "DGP_STREAM_COPY_THRESHOLD",      // transfer_plan::stream_copy_threshold()
+            "DGP_MULTIPART_PART_SIZE",        // transfer_plan::multipart_part_size()
+            "DGP_UPLOAD_CONCURRENCY",         // transfer_plan::upload_concurrency()
+            "DGP_REPLICATION_TRANSFERS",      // transfer_plan::transfers()
+            "DGP_S3_READ_TIMEOUT_SECS",       // storage::s3::build_client()
+            "DGP_S3_CONNECT_TIMEOUT_SECS",    // storage::s3::build_client()
             "DGP_S3_OPERATION_ATTEMPT_TIMEOUT_SECS", // storage::s3::build_client()
-            "DGP_S3_STALL_GRACE_SECS",               // storage::s3::build_client()
+            "DGP_S3_STALL_GRACE_SECS",        // storage::s3::build_client()
+            "DGP_TRUSTED_PROXY_CIDRS",        // rate_limiter::trusted_proxy_cidrs()
         ];
         for name in &registry_names {
             if used_outside_from_env.contains(name) {
@@ -3205,6 +3286,39 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
                 .iter()
                 .any(|w| w.contains("unconfigured-xyz-42") && w.contains("DGP_BACKEND_")),
             "aes mode with no key must produce env-var hint, got {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_check_surfaces_stale_iam_template_advisory() {
+        // End-to-end wiring proof: a user whose permission uses the stale bare
+        // `${username}` (removed in the breaking ${iam:username} rename) must
+        // surface as a check() warning at save/lint time — the footgun that's
+        // silently denying the `xperi` user in prod.
+        let mut cfg = Config {
+            iam_users: vec![crate::iam::DeclarativeUser {
+                name: "xperi".into(),
+                access_key_id: "AKXPERI".into(),
+                secret_access_key: "s".into(),
+                enabled: true,
+                groups: vec![],
+                permissions: vec![crate::iam::types::Permission {
+                    id: 0,
+                    effect: "Allow".into(),
+                    actions: vec!["write".into()],
+                    resources: vec!["scrap/customers/${username}/*".into()],
+                    conditions: None,
+                }],
+            }],
+            ..Config::default()
+        };
+        let warnings = cfg.check();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("xperi") && w.contains("${iam:username}")),
+            "stale ${{username}} template must surface as a check() advisory, got {:?}",
             warnings
         );
     }

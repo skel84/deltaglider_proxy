@@ -54,6 +54,17 @@ export function parentPrefix(prefix: string): string {
   return idx === -1 ? '' : trimmed.slice(0, idx + 1);
 }
 
+/** Compact relative time from an ISO string against an explicit `now` (so a
+ *  caller ticking `now` re-renders live). e.g. "5s ago", "3m ago", "2h ago". */
+export function relativeTime(iso: string, now: Date): string {
+  const d = Math.floor((now.getTime() - new Date(iso).getTime()) / 1000);
+  if (d < 0) return 'just now';
+  if (d < 60) return `${d}s ago`;
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+}
+
 /** Format a date as relative time, e.g. "6 hours ago" */
 export function timeAgo(date: Date): string {
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000);

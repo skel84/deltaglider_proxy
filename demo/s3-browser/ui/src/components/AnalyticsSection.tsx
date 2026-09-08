@@ -33,7 +33,8 @@ import { Button } from 'antd';
 import { CaretRightOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import { listBuckets } from '../s3client';
-import type { AdminConfig } from '../adminApi';
+import { getBucketUsage } from '../adminApi';
+import type { AdminConfig, BucketUsage } from '../adminApi';
 import {
   getAllBucketScans,
   startBucketScan,
@@ -92,6 +93,11 @@ export default function AnalyticsSection({ config }: Props) {
   const [scans, setScans] = useState<Record<string, BucketScanResult>>({});
   const [scansLoaded, setScansLoaded] = useState(false);
   const [allBuckets, setAllBuckets] = useState<string[]>([]);
+  // O(1) running counters, keyed by bucket. Seeds the fleet rows instantly on
+  // load so the dashboard shows real sizes without waiting for a scan; a live
+  // scan still overrides while it runs, and a completed cached scan takes
+  // precedence (it's the same ground truth the counter is reconciled against).
+  const [counters, setCounters] = useState<Record<string, BucketUsage>>({});
   const [liveProgress, setLiveProgress] = useState<BucketScanProgress | null>(
     null,
   );
@@ -159,7 +165,18 @@ export default function AnalyticsSection({ config }: Props) {
       }
     });
     listBuckets()
-      .then(bs => setAllBuckets(bs.map(b => b.name)))
+      .then(bs => {
+        const names = bs.map(b => b.name);
+        setAllBuckets(names);
+        // Seed instant O(1) sizes for every bucket (best-effort; 403 → skip).
+        names.forEach(name => {
+          getBucketUsage(name)
+            .then(u => {
+              if (u) setCounters(prev => ({ ...prev, [name]: u }));
+            })
+            .catch(() => {});
+        });
+      })
       .catch(() => setAllBuckets([]));
     const id = window.setInterval(refreshScans, 30_000);
     return () => window.clearInterval(id);
@@ -282,17 +299,18 @@ export default function AnalyticsSection({ config }: Props) {
   const bucketRows: BucketRow[] = useMemo(() => {
     const rows: BucketRow[] = allBuckets.map(name => {
       const cached = scans[name];
+      const counter = counters[name];
       const isScanning = liveProgress?.bucket === name;
-      // While a bucket is being scanned, prefer the LIVE counters so
-      // the user sees numbers ticking up rather than yesterday's
-      // cached totals.
+      // Precedence: LIVE scan (ticking) > completed cached scan (ground truth)
+      // > O(1) running counter (instant, inline-maintained) > 0. The counter
+      // means the row shows a real size immediately, before any scan runs.
       const useLive = isScanning && liveProgress;
       const totalOriginal = useLive
         ? liveProgress!.original_bytes
-        : (cached?.total_original_bytes ?? 0);
+        : (cached?.total_original_bytes ?? counter?.logical_bytes ?? 0);
       const totalStored = useLive
         ? liveProgress!.stored_bytes
-        : (cached?.total_stored_bytes ?? 0);
+        : (cached?.total_stored_bytes ?? counter?.stored_bytes ?? 0);
       // Route through the canonical scope-savings helper so per-bucket
       // rows share cap + clamp with every other surface. Pre-routing
       // this had its own uncapped formula → a deltaspace with 99.95%
@@ -303,7 +321,7 @@ export default function AnalyticsSection({ config }: Props) {
       const savingsPercent = scope.pctOneDecimal;
       const objectCount = useLive
         ? liveProgress!.objects
-        : (cached?.total_objects ?? 0);
+        : (cached?.total_objects ?? counter?.object_count ?? 0);
       return {
         bucket: name,
         totalOriginal,
@@ -318,7 +336,7 @@ export default function AnalyticsSection({ config }: Props) {
     });
     rows.sort((a, b) => b.totalOriginal - a.totalOriginal);
     return rows;
-  }, [allBuckets, scans, liveProgress]);
+  }, [allBuckets, scans, liveProgress, counters]);
 
   const totalOriginal = bucketRows.reduce((s, b) => s + b.totalOriginal, 0);
   const totalStored = bucketRows.reduce((s, b) => s + b.totalStored, 0);

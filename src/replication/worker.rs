@@ -29,6 +29,7 @@
 
 use super::planner::{normalize_prefix, plan_batch};
 use super::state_store::{current_unix_seconds, FailureInsert, RunTotals};
+use crate::background::RunLease;
 use crate::config_db::ConfigDb;
 use crate::config_sections::ReplicationRule;
 use crate::deltaglider::DynEngine;
@@ -36,7 +37,7 @@ use crate::event_outbox::{EventKind, EventSource, NewEvent};
 use crate::job_loop::Pager;
 use crate::metrics::{bump_peak, Metrics};
 use crate::transfer::{
-    copy_object_with_retries, ObjectTransferRequest, TransferProvenance,
+    copy_object_with_retries, CopyStrategy, ObjectTransferRequest, TransferProvenance,
     REPLICATION_RULE_METADATA_KEY,
 };
 use futures::stream::StreamExt;
@@ -94,13 +95,6 @@ pub struct RunOutcome {
     /// Terminal status string (goes into `replication_run_history.status`).
     pub status: String,
     pub totals: RunTotals,
-}
-
-#[derive(Debug, Clone)]
-pub struct RunLease {
-    pub owner: String,
-    pub ttl_secs: i64,
-    pub heartbeat_secs: i64,
 }
 
 /// Per-run concurrency knobs (Phase B+). `transfers` = concurrent objects
@@ -342,6 +336,8 @@ pub async fn run_rule(
             totals.objects_skipped += res.objects_skipped;
             totals.bytes_copied += res.bytes_copied;
             totals.errors += res.errors;
+            totals.delta_passthrough += res.delta_passthrough;
+            totals.bytes_egress_saved += res.bytes_egress_saved;
             if res.had_error {
                 had_any_error = true;
             }
@@ -408,11 +404,18 @@ pub async fn run_rule(
         }
     }
 
-    // Final status: any failure (fatal OR per-object) → "failed".
-    // Pre-fix the status was only "failed" when EVERY copy errored,
-    // which silently lied to dashboards on partial-failure runs (M1).
-    let status = if hit_fatal_error || had_any_error {
+    // Final status, three-way:
+    // - "failed": a FATAL error (couldn't list source), OR the sweep errored
+    //   AND copied NOTHING — it accomplished nothing reliable.
+    // - "completed_with_errors": the sweep made PARTIAL progress — it copied
+    //   some objects but ≥1 errored (e.g. a transient destination 500). The run
+    //   still copied everything else; flagging it "failed" cried wolf on
+    //   99.99%-good runs and buried real fatal failures in the noise.
+    // - "succeeded": clean pass, zero errors.
+    let status = if hit_fatal_error || (had_any_error && totals.objects_copied == 0) {
         "failed".to_string()
+    } else if had_any_error {
+        "completed_with_errors".to_string()
     } else {
         "succeeded".to_string()
     };
@@ -438,6 +441,10 @@ pub async fn run_rule(
         }
         db.replication_finish_run(run_id, &rule.name, &status, finished_at, totals, next_due)?;
     }
+    // Settle barrier: bump AFTER the terminal row is written so a test polling
+    // the run-version sees the settled run. The single chokepoint all scheduled
+    // runs pass through.
+    super::state_store::bump_replication_run_version();
 
     info!(
         "Replication run finished: rule='{}' status={} scanned={} copied={} skipped={} deleted={} errors={} bytes={}",
@@ -466,6 +473,9 @@ struct PerObjectResult {
     errors: i64,
     had_error: bool,
     event: Option<NewEvent>,
+    // Fast-path attribution for the successful copy (zero otherwise).
+    delta_passthrough: i64,
+    bytes_egress_saved: i64,
 }
 
 /// Copy one object: poison-skip check → bounded copy → record/clear the
@@ -540,6 +550,12 @@ async fn copy_one_object(
             let bytes_copied = outcome.bytes_copied;
             out.objects_copied = 1;
             out.bytes_copied = bytes_copied as i64;
+            // Only the fast path is counted; bytes_egress_saved is computed once
+            // on the outcome (non-zero only for DeltaPassthrough).
+            out.bytes_egress_saved = outcome.bytes_egress_saved as i64;
+            if outcome.strategy == CopyStrategy::DeltaPassthrough {
+                out.delta_passthrough = 1;
+            }
             {
                 let db = db.lock().await;
                 db.replication_clear_object_failure(rule_name, src_key)?;
@@ -557,6 +573,8 @@ async fn copy_one_object(
                     "destination_bucket": dst_bucket,
                     "destination_key": dest_key,
                     "content_length": bytes_copied,
+                    "strategy": outcome.strategy.as_str(),
+                    "source_storage_type": outcome.source_storage_label,
                 }),
             ));
         }
@@ -864,7 +882,7 @@ async fn run_delete_pass(
                     if matches!(s3_err, crate::api::S3Error::NoSuchKey(_)) {
                         // Source missing → replicate the deletion.
                         match engine.delete(&rule.destination.bucket, dest_key).await {
-                            Ok(()) => {
+                            Ok(_) => {
                                 totals.objects_deleted += 1;
                             }
                             Err(de) => {
@@ -999,6 +1017,7 @@ mod tests {
             objects_deleted: 0,
             bytes_copied: 1234,
             errors: 2,
+            ..Default::default()
         };
         db.replication_update_run_progress(run_id, totals).unwrap();
 

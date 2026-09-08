@@ -665,7 +665,7 @@ impl s3s::S3 for DeltaGliderS3Service {
         {
             // Only a REAL delete (Ok) emits an event — a NotFound deleted
             // nothing, so there's nothing for replication to mirror.
-            Ok(()) => {
+            Ok(_) => {
                 self.emit_object_event(
                     crate::event_outbox::EventKind::ObjectDeleted,
                     &input.bucket,
@@ -698,7 +698,7 @@ impl s3s::S3 for DeltaGliderS3Service {
         for obj in input.delete.objects {
             let key = obj.key.trim_start_matches('/').to_string();
             match self.state.engine.load().delete(&input.bucket, &key).await {
-                Ok(()) => {
+                Ok(_) => {
                     if crate::replication::event_consumer::is_user_object_key(&key) {
                         delete_events.push(crate::event_outbox::NewEvent::new(
                             crate::event_outbox::EventKind::ObjectDeleted,
@@ -792,16 +792,48 @@ impl s3s::S3 for DeltaGliderS3Service {
         .await?;
         let content_type = input.content_type;
         let user_metadata = input.metadata.unwrap_or_default();
-        let result = engine
-            .store(
-                &input.bucket,
-                &input.key,
-                &data,
-                content_type,
-                user_metadata,
-            )
-            .await
-            .map_err(engine_error_to_s3s)?;
+        // Large delta-eligible objects: route through the streaming spool store so
+        // the delta encode + ratio decision run with BOUNDED memory (Phase 4).
+        // The body is already collected here (SigV4 payload-hash verification needs
+        // it); spool it to disk and hand the streaming store a seekable file. The
+        // remaining memory win — streaming the body BEFORE hash-verify — needs
+        // SigV4 streaming-payload support and is tracked as Phase 4.1.
+        let result = if data.len() as u64 > engine.spool_store_threshold()
+            && engine.is_delta_eligible_key(&input.key)
+        {
+            let spool = engine
+                .spool_acquire(data.len() as u64)
+                .await
+                .map_err(engine_error_to_s3s)?;
+            tokio::fs::write(spool.path(), &data).await.map_err(|e| {
+                engine_error_to_s3s(crate::deltaglider::EngineError::Storage(
+                    crate::storage::StorageError::from(e),
+                ))
+            })?;
+            engine
+                .store_spooled_delta(
+                    &input.bucket,
+                    &input.key,
+                    &spool,
+                    data.len() as u64,
+                    content_type,
+                    user_metadata,
+                    None,
+                )
+                .await
+                .map_err(engine_error_to_s3s)?
+        } else {
+            engine
+                .store(
+                    &input.bucket,
+                    &input.key,
+                    &data,
+                    content_type,
+                    user_metadata,
+                )
+                .await
+                .map_err(engine_error_to_s3s)?
+        };
         self.emit_object_event(
             crate::event_outbox::EventKind::ObjectCreated,
             &input.bucket,
@@ -1380,7 +1412,7 @@ async fn recursive_delete_prefix_s3s(
                 }
             }
             match engine.delete(bucket, obj_key).await {
-                Ok(()) | Err(crate::deltaglider::EngineError::NotFound(_)) => {
+                Ok(_) | Err(crate::deltaglider::EngineError::NotFound(_)) => {
                     deleted = deleted.saturating_add(1);
                 }
                 Err(e) => return Err(engine_error_to_s3s(e)),
@@ -1676,7 +1708,23 @@ fn engine_error_to_s3s(err: impl Into<crate::api::S3Error>) -> s3s::S3Error {
         crate::api::S3Error::SlowDown(_) => s3s::s3_error!(SlowDown),
         crate::api::S3Error::InvalidArgument(msg) => s3s::s3_error!(InvalidArgument, "{}", msg),
         crate::api::S3Error::InvalidRequest(msg) => s3s::s3_error!(InvalidRequest, "{}", msg),
-        crate::api::S3Error::NoSuchUpload(_) => s3s::s3_error!(NoSuchUpload),
+        crate::api::S3Error::NoSuchUpload(id) => {
+            // Multipart upload state is in-memory and PER-INSTANCE. Behind a
+            // non-sticky load balancer, an UploadPart/Complete that lands on a
+            // different node than CreateMultipartUpload sees no such upload —
+            // indistinguishable, to the client, from a genuinely-missing id. The
+            // proxy can't tell the two apart, so we don't warn (would spam
+            // single-instance logs on legitimate retries-after-abort), but we DO
+            // enrich the client-visible message so an operator behind an LB has a
+            // pointer instead of a bare NoSuchUpload. debug-level for diagnosis.
+            tracing::debug!("NoSuchUpload for upload_id={id} (multipart state is per-instance)");
+            s3s::s3_error!(
+                NoSuchUpload,
+                "the upload id is unknown to this instance; multipart upload state is \
+                 per-instance — behind a load balancer, pin multipart requests to one \
+                 node (sticky sessions)"
+            )
+        }
         crate::api::S3Error::InvalidPart(msg) => s3s::s3_error!(InvalidPart, "{}", msg),
         crate::api::S3Error::InvalidPartOrder => s3s::s3_error!(InvalidPartOrder),
         crate::api::S3Error::InvalidBucketName(msg) => {
@@ -2436,6 +2484,7 @@ mod tests {
                 metrics: Arc::new(crate::metrics::Metrics::new()),
                 usage_scanner: Arc::new(crate::usage_scanner::UsageScanner::new()),
                 config_db: None,
+                bucket_usage: None,
                 form_post_replay: Default::default(),
                 maintenance_gate: Arc::new(crate::maintenance::gate::MaintenanceGate::new()),
                 maintenance_notify: Default::default(),
@@ -2538,6 +2587,7 @@ mod tests {
             metrics: Arc::new(crate::metrics::Metrics::new()),
             usage_scanner: Arc::new(crate::usage_scanner::UsageScanner::new()),
             config_db: None,
+            bucket_usage: None,
             form_post_replay: Default::default(),
             maintenance_gate: Arc::new(crate::maintenance::gate::MaintenanceGate::new()),
             maintenance_notify: Default::default(),
@@ -2610,6 +2660,62 @@ mod tests {
                 .code(),
             &s3s::S3ErrorCode::BadDigest
         );
+    }
+
+    #[test]
+    fn parse_copy_range_truth_table() {
+        use s3s::S3ErrorCode::{InvalidArgument, InvalidRange};
+        // Valid inclusive ranges.
+        assert_eq!(parse_copy_range("bytes=0-9", 10).unwrap(), (0, 9));
+        assert_eq!(parse_copy_range("bytes=0-0", 10).unwrap(), (0, 0)); // single byte
+        assert_eq!(parse_copy_range("bytes=3-7", 10).unwrap(), (3, 7));
+        assert_eq!(parse_copy_range("bytes=9-9", 10).unwrap(), (9, 9)); // last byte
+                                                                        // Out-of-bounds → InvalidRange.
+        assert_eq!(
+            parse_copy_range("bytes=5-3", 10).unwrap_err().code(),
+            &InvalidRange // start > end
+        );
+        assert_eq!(
+            parse_copy_range("bytes=0-10", 10).unwrap_err().code(),
+            &InvalidRange // end == len (end >= len)
+        );
+        assert_eq!(
+            parse_copy_range("bytes=0-0", 0).unwrap_err().code(),
+            &InvalidRange // empty object: end >= len for any range
+        );
+        // Malformed → InvalidArgument.
+        for bad in [
+            "0-9",
+            "bytes=",
+            "bytes=5",
+            "bytes=a-9",
+            "bytes=0-b",
+            "bytes=-",
+        ] {
+            assert_eq!(
+                parse_copy_range(bad, 10).unwrap_err().code(),
+                &InvalidArgument,
+                "expected InvalidArgument for {bad:?}"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn parse_copy_range_accepts_iff_in_bounds(
+            start in 0usize..200, end in 0usize..200, len in 0usize..200,
+        ) {
+            let header = format!("bytes={start}-{end}");
+            let r = parse_copy_range(&header, len);
+            if start <= end && end < len {
+                proptest::prop_assert_eq!(r.unwrap(), (start, end));
+            } else {
+                // start > end OR end >= len → always InvalidRange (never Ok).
+                let is_range_err =
+                    matches!(r.as_ref().map_err(|e| e.code()), Err(&s3s::S3ErrorCode::InvalidRange));
+                proptest::prop_assert!(is_range_err, "expected InvalidRange, got {:?}", r);
+            }
+        }
     }
 
     #[test]

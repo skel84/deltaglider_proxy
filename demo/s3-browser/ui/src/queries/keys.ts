@@ -52,12 +52,14 @@ export const qk = {
   health: () => ['health'] as const,
   prefixUsage: (bucket: string, prefix: string) =>
     ['prefix-usage', bucket, prefix] as const,
+  bucketUsage: (bucket: string) => ['bucket-usage', bucket] as const,
 
   // ── Jobs (replication / lifecycle / reencrypt / migrate) ────────
   jobs: {
     list: () => ['jobs'] as const,
     runs: (id: string) => ['jobs', 'runs', id] as const,
     failures: (id: string) => ['jobs', 'failures', id] as const,
+    verify: (rule: string) => ['jobs', 'verify', rule] as const,
   },
   // Per-bucket busy banner (session-light endpoint).
   maintenance: {

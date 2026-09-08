@@ -32,6 +32,8 @@ Failed auth attempts add an artificial delay to responses before the lockout thr
 
 Rate limiting requires a client IP. The proxy reads `X-Forwarded-For` or `X-Real-IP` headers only when `DGP_TRUST_PROXY_HEADERS=true`; the default is `false`, so direct-to-internet deployments are protected against IP spoofing out of the box. `DGP_TRUST_PROXY_HEADERS=true` is appropriate only behind a trusted reverse proxy (nginx, Caddy, ALB) that injects these headers.
 
+> **Failure mode behind a proxy.** If the proxy sits behind a reverse proxy and `DGP_TRUST_PROXY_HEADERS` stays `false`, every request appears to originate from the proxy's own IP. All clients then share **one** rate-limit bucket, so a single busy client exhausts it and **locks out everyone** with `503 SlowDown`. Set `DGP_TRUST_PROXY_HEADERS=true` behind any trusted proxy; the save-time config advisories flag the rate-limit-on + trust-off combination.
+
 For direct-to-internet deployments without trusted headers, the rate limiter receives no IP and is effectively a no-op for those requests; SigV4 signature verification and the replay cache still apply. The admission chain's `source_ip_list` predicates use axum `ConnectInfo` (wired at startup) and continue to work in the direct case; the rate limiter does not consume `ConnectInfo`.
 
 ## Codec semaphore

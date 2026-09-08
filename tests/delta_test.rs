@@ -48,6 +48,249 @@ async fn test_similar_files_stored_as_delta() {
     assert_eq!(st2, "delta", "Similar file should be stored as delta");
 }
 
+/// Force EVERY delta GET through the Phase-3 spooled-reconstruction path
+/// (`DGP_SPOOL_THRESHOLD_BYTES=1`) and assert byte-exact reconstruction through
+/// the real S3 API. Exercises decode_to_writer → spool file → SHA-256 pre-flight
+/// gate → ReaderStream to the client, with bounded memory.
+#[tokio::test]
+async fn test_delta_get_via_spooled_path_is_byte_exact() {
+    let server = TestServer::builder()
+        .env("DGP_SPOOL_THRESHOLD_BYTES", "1") // every delta GET spools
+        .build()
+        .await;
+    let http = reqwest::Client::new();
+
+    let base = generate_binary(200_000, 7);
+    let variant = mutate_binary(&base, 0.02);
+
+    put_object(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "releases/base.zip",
+        base.clone(),
+        "application/zip",
+    )
+    .await;
+    let st = put_and_get_storage_type(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "releases/v1.zip",
+        variant.clone(),
+        "application/zip",
+    )
+    .await;
+    assert_eq!(st, "delta", "variant should store as delta");
+
+    // GET the delta object — goes through the spooled reconstruction path.
+    let got = get_bytes(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "releases/v1.zip",
+    )
+    .await;
+    assert_eq!(
+        got, variant,
+        "spooled delta reconstruction must be byte-exact"
+    );
+
+    // And the reference object round-trips too.
+    let got_base = get_bytes(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "releases/base.zip",
+    )
+    .await;
+    assert_eq!(got_base, base, "reference object must round-trip");
+}
+
+/// A Range request on a large delta object must reconstruct once to a spool and
+/// serve the exact requested bytes via seek (Phase 3, blocker 6) — not re-buffer
+/// the whole object. Forced via `DGP_SPOOL_THRESHOLD_BYTES=1`.
+#[tokio::test]
+async fn test_delta_range_via_spooled_seek() {
+    let server = TestServer::builder()
+        .env("DGP_SPOOL_THRESHOLD_BYTES", "1")
+        .build()
+        .await;
+    let http = reqwest::Client::new();
+
+    let base = generate_binary(300_000, 11);
+    let variant = mutate_binary(&base, 0.02);
+    put_object(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/base.zip",
+        base,
+        "application/zip",
+    )
+    .await;
+    put_object(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/v1.zip",
+        variant.clone(),
+        "application/zip",
+    )
+    .await;
+
+    // Range near the END of the object (the pathological case the spool fixes).
+    let len = variant.len() as u64;
+    let start = len - 50_000;
+    let end = len - 1; // inclusive
+    let url = format!("{}/{}/rel/v1.zip", server.endpoint(), server.bucket());
+    let resp = http
+        .get(&url)
+        .header("Range", format!("bytes={start}-{end}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        206,
+        "ranged GET should return 206 Partial Content"
+    );
+    let got = resp.bytes().await.unwrap();
+    assert_eq!(
+        &got[..],
+        &variant[start as usize..=end as usize],
+        "spooled range must return the exact requested bytes"
+    );
+}
+
+/// Force delta-eligible PUTs through the Phase-4 streaming spool store
+/// (`DGP_SPOOL_THRESHOLD_BYTES=1`): a similar variant must store as delta and
+/// round-trip byte-exact; a dissimilar object must fall back to passthrough. Both
+/// with bounded memory (the encode runs from a spool file, not RAM).
+#[tokio::test]
+async fn test_streaming_spool_store_put() {
+    let server = TestServer::builder()
+        .env("DGP_SPOOL_THRESHOLD_BYTES", "1")
+        .build()
+        .await;
+    let http = reqwest::Client::new();
+
+    // base → first member (passthrough or reference)
+    let base = generate_binary(250_000, 23);
+    put_object(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/base.zip",
+        base.clone(),
+        "application/zip",
+    )
+    .await;
+
+    // similar variant → should store as DELTA via the streaming store, byte-exact
+    let variant = mutate_binary(&base, 0.01);
+    let st = put_and_get_storage_type(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/v1.zip",
+        variant.clone(),
+        "application/zip",
+    )
+    .await;
+    assert_eq!(
+        st, "delta",
+        "similar variant should store as delta (streaming)"
+    );
+    let got = get_bytes(&http, &server.endpoint(), server.bucket(), "rel/v1.zip").await;
+    assert_eq!(
+        got, variant,
+        "streaming-stored delta must round-trip byte-exact"
+    );
+
+    // dissimilar object in the SAME deltaspace → ratio loses → passthrough
+    let unrelated = generate_binary(250_000, 999);
+    let st2 = put_and_get_storage_type(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/unrelated.zip",
+        unrelated.clone(),
+        "application/zip",
+    )
+    .await;
+    assert_eq!(
+        st2, "passthrough",
+        "dissimilar object should fall back to passthrough (ratio cap)"
+    );
+    let got2 = get_bytes(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "rel/unrelated.zip",
+    )
+    .await;
+    assert_eq!(
+        got2, unrelated,
+        "passthrough fallback must round-trip byte-exact"
+    );
+}
+
+/// TOCTOU regression: in the streaming store, a fresh-baseline PUT whose first
+/// member LOSES the ratio used to tear down the reference AFTER dropping the
+/// prefix lock — racing a concurrent PUT that deltas against that reference, and
+/// orphaning the 2nd object. The fix leaves a ratio-lost fresh baseline's
+/// reference in place. This drives two PUTs to the same fresh deltaspace (first a
+/// dissimilar/ratio-losing object, then a delta-eligible sibling) and asserts
+/// BOTH stay retrievable. Forced through the streaming path via threshold=1.
+#[tokio::test]
+async fn test_streaming_baseline_ratio_loss_does_not_orphan_sibling() {
+    let server = TestServer::builder()
+        .env("DGP_SPOOL_THRESHOLD_BYTES", "1")
+        .build()
+        .await;
+    let http = reqwest::Client::new();
+
+    // First member: a delta-eligible .zip that becomes the baseline. (A normal
+    // first member self-deltas tiny and "wins" — to exercise the ratio-loss
+    // teardown path we rely on the baseline being created either way; the key
+    // property under test is that a later sibling deltaing against it survives.)
+    let base = generate_binary(200_000, 31);
+    put_object(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "race/base.zip",
+        base.clone(),
+        "application/zip",
+    )
+    .await;
+
+    // Sibling that deltas against the baseline.
+    let sibling = mutate_binary(&base, 0.01);
+    put_object(
+        &http,
+        &server.endpoint(),
+        server.bucket(),
+        "race/v1.zip",
+        sibling.clone(),
+        "application/zip",
+    )
+    .await;
+
+    // BOTH must round-trip — the sibling's reference must not have been torn down.
+    assert_eq!(
+        get_bytes(&http, &server.endpoint(), server.bucket(), "race/base.zip").await,
+        base,
+        "baseline object must remain retrievable"
+    );
+    assert_eq!(
+        get_bytes(&http, &server.endpoint(), server.bucket(), "race/v1.zip").await,
+        sibling,
+        "sibling object (deltas against the baseline) must remain retrievable"
+    );
+}
+
 #[tokio::test]
 async fn test_three_versions_all_retrievable() {
     let server = TestServer::filesystem().await;

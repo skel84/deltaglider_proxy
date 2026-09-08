@@ -633,10 +633,13 @@ async fn export_declarative_iam_round_trips_as_noop() {
     // End-to-end contract: export the DB as declarative YAML, paste
     // the result back via section PUT, confirm the reconciler reports
     // a no-op. This is the "Workflow A" button's reason for existing.
-    let server = TestServer::builder()
+    let mut server = TestServer::builder()
         .auth("BOOTKEY_EXPORT", "BOOTSECRET_EXPORT")
         .build()
         .await;
+    // Retain the harness bootstrap/storage configuration for a same-DB restart.
+    let initial_config: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(server.config_path()).unwrap()).unwrap();
     let admin = admin_http_client(&server.endpoint()).await;
 
     // Seed the DB via GUI: 1 group, 1 user in that group.
@@ -715,36 +718,21 @@ async fn export_declarative_iam_round_trips_as_noop() {
         "export must redact user secret_access_key, got:\n{yaml_text}"
     );
 
-    // Parse YAML → access section → re-materialise secret → PUT as
-    // section apply. Expected: is_noop == true, no DB changes.
-    let mut parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_text).expect("valid YAML");
-    // Re-inject the secret so the diff sees "same as DB."
+    // Reapply the actual redacted export: supplying the original secret here
+    // would mask unintended credential rotation during reconciliation.
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_text).expect("valid YAML");
     let access_key = serde_yaml::Value::String("access".into());
-    let iam_users_key = serde_yaml::Value::String("iam_users".into());
-    let name_key = serde_yaml::Value::String("name".into());
-    let alice_value = serde_yaml::Value::String("alice".into());
-    let access = parsed
-        .as_mapping_mut()
-        .and_then(|m| m.get_mut(&access_key))
-        .and_then(|v| v.as_mapping_mut())
-        .expect("access map");
-    let users = access
-        .get_mut(&iam_users_key)
-        .and_then(|v| v.as_sequence_mut())
-        .expect("iam_users seq");
-    for u in users {
-        if let Some(map) = u.as_mapping_mut() {
-            if map.get(&name_key) == Some(&alice_value) {
-                map.insert(
-                    serde_yaml::Value::String("secret_access_key".into()),
-                    serde_yaml::Value::String("sk-alice-exp".into()),
-                );
-            }
-        }
-    }
+    let original = server
+        .s3_client_with_creds("AKIA_EXP_ALICE", "sk-alice-exp")
+        .await;
+    let wrong = server
+        .s3_client_with_creds("AKIA_EXP_ALICE", "wrong-dummy-secret")
+        .await;
+    assert!(original.list_buckets().send().await.is_ok());
+    assert!(wrong.list_buckets().send().await.is_err());
 
     // Convert back to JSON to PUT via section PUT.
-    let access_json = serde_json::to_value(
+    let mut access_json = serde_json::to_value(
         parsed
             .as_mapping()
             .and_then(|m| m.get(&access_key))
@@ -781,6 +769,53 @@ async fn export_declarative_iam_round_trips_as_noop() {
         "exported → PUT must be an idempotent no-op (no 'reconciled:' warning); \
          got warnings: {warnings:?}"
     );
+    assert!(original.list_buckets().send().await.is_ok());
+    assert!(wrong.list_buckets().send().await.is_err());
+
+    // A real authorization update must also retain the redacted credential.
+    access_json["iam_users"][0]["groups"] = json!([]);
+    access_json["iam_users"][0]["permissions"] = json!([
+        {"effect": "Allow", "actions": ["list"], "resources": ["*"]}
+    ]);
+    let version = get_iam_version(&admin, &server.endpoint()).await;
+    apply_access_section(&admin, &server.endpoint(), access_json.clone()).await;
+    wait_for_iam_rebuild(&admin, &server.endpoint(), version).await;
+    assert!(original.list_buckets().send().await.is_ok());
+    assert!(original
+        .create_bucket()
+        .bucket("denied-after-redacted-update")
+        .send()
+        .await
+        .is_err());
+    assert!(wrong.list_buckets().send().await.is_err());
+
+    // Restart the harness-owned DB with the redacted declarative configuration.
+    // This server has no encryption key, so the existing respawn helper preserves
+    // its configuration while exercising startup reconciliation.
+    let mut config = initial_config;
+    for field in ["iam_mode", "iam_users", "iam_groups"] {
+        config[field] = serde_yaml::to_value(&access_json[field]).unwrap();
+    }
+    std::fs::write(
+        server.config_path(),
+        serde_yaml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    server.respawn_without_encryption_key().await;
+    let admin = admin_http_client(&server.endpoint()).await;
+    assert!(original.list_buckets().send().await.is_ok());
+    assert!(wrong.list_buckets().send().await.is_err());
+
+    // An explicit non-empty secret still rotates and invalidates the old one.
+    access_json["iam_users"][0]["secret_access_key"] = json!("rotated-dummy-secret");
+    let version = get_iam_version(&admin, &server.endpoint()).await;
+    apply_access_section(&admin, &server.endpoint(), access_json).await;
+    wait_for_iam_rebuild(&admin, &server.endpoint(), version).await;
+    let rotated = server
+        .s3_client_with_creds("AKIA_EXP_ALICE", "rotated-dummy-secret")
+        .await;
+    assert!(rotated.list_buckets().send().await.is_ok());
+    assert!(original.list_buckets().send().await.is_err());
 }
 
 // ═══════════════════════════════════════════════════

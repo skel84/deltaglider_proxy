@@ -48,6 +48,9 @@ pub struct RunRecord {
     pub bytes_copied: i64,
     pub errors: i64,
     pub status: String,
+    // Fast-path run stats (v17).
+    pub delta_passthrough: i64,
+    pub bytes_egress_saved: i64,
 }
 
 /// A per-object failure row.
@@ -88,6 +91,11 @@ pub struct RunTotals {
     pub objects_deleted: i64,
     pub bytes_copied: i64,
     pub errors: i64,
+    // Fast-path run stats (v17). `delta_passthrough` = objects that shipped
+    // their `.delta` verbatim; `bytes_egress_saved` = Σ(logical − delta). Other
+    // strategy counts are derivable (objects_copied − delta_passthrough).
+    pub delta_passthrough: i64,
+    pub bytes_egress_saved: i64,
 }
 
 pub fn current_unix_seconds() -> i64 {
@@ -95,6 +103,33 @@ pub fn current_unix_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonic counters bumped when a replication run settles (scheduled path) or
+/// an event-driven drain advances its cursor (event path). Mirror
+/// `PARITY_VERSION` / `IAM_VERSION` — let integration tests poll
+/// `GET …/jobs/replication-run-version` / `…/replication-event-version` for a
+/// deterministic barrier instead of sleeping. Process-local (one per proxy).
+static REPLICATION_RUN_VERSION: AtomicU64 = AtomicU64::new(0);
+static REPLICATION_EVENT_VERSION: AtomicU64 = AtomicU64::new(0);
+
+// ponytail: REPLICATION_RUN_VERSION ships ahead of its first consumer — it's the
+// convention-aligned scheduled-run barrier (mirrors PARITY_VERSION) for the next
+// scheduled-run test that would otherwise reach for sleep. The event-driven sibling
+// below already has a consumer (wait_for_replication_event).
+pub fn bump_replication_run_version() -> u64 {
+    REPLICATION_RUN_VERSION.fetch_add(1, Ordering::SeqCst) + 1
+}
+pub fn current_replication_run_version() -> u64 {
+    REPLICATION_RUN_VERSION.load(Ordering::SeqCst)
+}
+pub fn bump_replication_event_version() -> u64 {
+    REPLICATION_EVENT_VERSION.fetch_add(1, Ordering::SeqCst) + 1
+}
+pub fn current_replication_event_version() -> u64 {
+    REPLICATION_EVENT_VERSION.load(Ordering::SeqCst)
 }
 
 impl ConfigDb {
@@ -132,6 +167,13 @@ impl ConfigDb {
             if !known.contains(existing.as_str()) {
                 let n = self.conn.execute(
                     "DELETE FROM replication_state WHERE rule_name = ?",
+                    params![existing],
+                )?;
+                // Drop the rule's parity object-cache AND result row too —
+                // otherwise they're orphaned forever (both keyed by rule_name).
+                self.parity_cache_clear(&existing)?;
+                self.conn.execute(
+                    "DELETE FROM replication_parity WHERE rule_name = ?",
                     params![existing],
                 )?;
                 removed += n;
@@ -318,14 +360,16 @@ impl ConfigDb {
     ) -> Result<(), ConfigDbError> {
         self.conn.execute(
             "UPDATE replication_run_history
-                SET finished_at     = ?,
-                    objects_scanned = ?,
-                    objects_copied  = ?,
-                    objects_skipped = ?,
-                    objects_deleted = ?,
-                    bytes_copied    = ?,
-                    errors          = ?,
-                    status          = ?
+                SET finished_at        = ?,
+                    objects_scanned    = ?,
+                    objects_copied     = ?,
+                    objects_skipped    = ?,
+                    objects_deleted    = ?,
+                    bytes_copied       = ?,
+                    errors             = ?,
+                    status             = ?,
+                    delta_passthrough  = ?,
+                    bytes_egress_saved = ?
               WHERE id = ?",
             params![
                 finished_at,
@@ -336,6 +380,8 @@ impl ConfigDb {
                 totals.bytes_copied,
                 totals.errors,
                 status,
+                totals.delta_passthrough,
+                totals.bytes_egress_saved,
                 run_id
             ],
         )?;
@@ -370,12 +416,14 @@ impl ConfigDb {
     ) -> Result<(), ConfigDbError> {
         self.conn.execute(
             "UPDATE replication_run_history
-                SET objects_scanned = ?,
-                    objects_copied  = ?,
-                    objects_skipped = ?,
-                    objects_deleted = ?,
-                    bytes_copied    = ?,
-                    errors          = ?
+                SET objects_scanned    = ?,
+                    objects_copied     = ?,
+                    objects_skipped    = ?,
+                    objects_deleted    = ?,
+                    bytes_copied       = ?,
+                    errors             = ?,
+                    delta_passthrough  = ?,
+                    bytes_egress_saved = ?
               WHERE id = ?
                 AND status = 'running'",
             params![
@@ -385,6 +433,8 @@ impl ConfigDb {
                 totals.objects_deleted,
                 totals.bytes_copied,
                 totals.errors,
+                totals.delta_passthrough,
+                totals.bytes_egress_saved,
                 run_id,
             ],
         )?;
@@ -586,7 +636,8 @@ impl ConfigDb {
         let mut stmt = self.conn.prepare(
             "SELECT id, rule_name, triggered_by, started_at, finished_at,
                     objects_scanned, objects_copied, objects_skipped, objects_deleted,
-                    bytes_copied, errors, status
+                    bytes_copied, errors, status,
+                    delta_passthrough, bytes_egress_saved
              FROM replication_run_history
              WHERE rule_name = ?
              ORDER BY started_at DESC
@@ -607,11 +658,418 @@ impl ConfigDb {
                     bytes_copied: r.get(9)?,
                     errors: r.get(10)?,
                     status: r.get(11)?,
+                    delta_passthrough: r.get(12)?,
+                    bytes_egress_saved: r.get(13)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    // ── Parity per-object logical-metadata cache (v18) ────────────────────────
+    // The expensive part of a parity audit is recovering each DELTA object's
+    // LOGICAL (sha256, size, etag) — only a per-object HEAD gives it, since the
+    // lite LIST carries the delta-blob size/etag. This cache stores that logical
+    // metadata keyed by the DEST-namespace key so a re-verify (and the first
+    // verify of anything the replication worker copied) is HEAD-free.
+
+    /// Bulk-lookup cached logical metadata for `dest_keys` under a rule.
+    /// Returns only the keys present in the cache (a miss → HEAD needed).
+    pub fn parity_cache_get_many(
+        &self,
+        rule: &str,
+        side: ParitySide,
+        dest_keys: &[&str],
+    ) -> Result<std::collections::HashMap<String, ParityCacheEntry>, ConfigDbError> {
+        let mut out = std::collections::HashMap::new();
+        if dest_keys.is_empty() {
+            return Ok(out);
+        }
+        let side = side.as_str();
+        for chunk in dest_keys.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT dest_key, sha256, size, etag, stored_etag
+                 FROM replication_parity_objects
+                 WHERE rule_name = ? AND side = ? AND dest_key IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 2);
+            binds.push(&rule);
+            binds.push(&side);
+            for k in chunk {
+                binds.push(k);
+            }
+            let rows = stmt.query_map(binds.as_slice(), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    ParityCacheEntry {
+                        sha256: r.get(1)?,
+                        size: r.get::<_, i64>(2)? as u64,
+                        etag: r.get(3)?,
+                        stored_etag: r.get(4)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (k, v) = row?;
+                out.insert(k, v);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Batch-upsert logical metadata for objects on ONE side of a rule (one
+    /// transaction). Source and dest are SEPARATE rows (the `side` discriminator)
+    /// — they must never share a cache row even when keys coincide (whole-bucket
+    /// mirror where source.prefix == dest.prefix), or a source read would get the
+    /// dest's metadata and vice versa (a structural false "in sync").
+    pub fn parity_cache_put_many(
+        &mut self,
+        rule: &str,
+        side: ParitySide,
+        entries: &[(String, ParityCacheEntry)],
+        now: i64,
+    ) -> Result<(), ConfigDbError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let side = side.as_str();
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO replication_parity_objects
+                    (rule_name, side, dest_key, sha256, size, etag, stored_etag, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(rule_name, side, dest_key) DO UPDATE SET
+                    sha256 = excluded.sha256,
+                    size = excluded.size,
+                    etag = excluded.etag,
+                    stored_etag = excluded.stored_etag,
+                    updated_at = excluded.updated_at",
+            )?;
+            for (key, e) in entries {
+                stmt.execute(rusqlite::params![
+                    rule,
+                    side,
+                    key,
+                    e.sha256,
+                    e.size as i64,
+                    e.etag,
+                    e.stored_etag,
+                    now
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drop the entire parity cache for a rule (both sides). Called on rule
+    /// removal (orphan cleanup).
+    pub fn parity_cache_clear(&self, rule: &str) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "DELETE FROM replication_parity_objects WHERE rule_name = ?",
+            [rule],
+        )?;
+        Ok(())
+    }
+
+    /// Prune cache rows for a rule whose `dest_key` was NOT seen in the last
+    /// (complete) scan — bounds growth to the live object set and evicts
+    /// stale rows for deleted objects. Called only after a NON-truncated scan
+    /// (a truncated scan didn't see every key, so it can't safely prune).
+    /// `ponytail`: local diagnostic cache — keep it bounded; a future move to a
+    /// separate local-only DB would also keep it out of the HA config-sync blob.
+    pub fn parity_cache_retain(
+        &mut self,
+        rule: &str,
+        side: ParitySide,
+        live_dest_keys: &[String],
+    ) -> Result<usize, ConfigDbError> {
+        let side = side.as_str();
+        // Build a temp set of live keys, delete everything else for (rule, side).
+        let tx = self.conn.transaction()?;
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS _parity_live (k TEXT PRIMARY KEY);
+             DELETE FROM _parity_live;",
+        )?;
+        {
+            let mut ins = tx.prepare("INSERT OR IGNORE INTO _parity_live (k) VALUES (?)")?;
+            for k in live_dest_keys {
+                ins.execute([k])?;
+            }
+        }
+        let removed = tx.execute(
+            "DELETE FROM replication_parity_objects
+             WHERE rule_name = ? AND side = ?
+               AND dest_key NOT IN (SELECT k FROM _parity_live)",
+            rusqlite::params![rule, side],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    // ── Parity RESULT cache + background-job lease (v19) ──────────────────────
+
+    /// Load the cached parity result row for a rule (status + last outcome).
+    pub fn parity_result_load(&self, rule: &str) -> Result<Option<ParityResultRow>, ConfigDbError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT status, scanned_at, progress_scanned, outcome_json, last_error
+                 FROM replication_parity WHERE rule_name = ?",
+                [rule],
+                |r| {
+                    Ok(ParityResultRow {
+                        status: r.get(0)?,
+                        scanned_at: r.get(1)?,
+                        progress_scanned: r.get(2)?,
+                        outcome_json: r.get(3)?,
+                        last_error: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Mark a rule's parity audit as RUNNING (clears the prior outcome's error,
+    /// keeps the last outcome_json visible while the new scan runs).
+    pub fn parity_result_set_running(&self, rule: &str, now: i64) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "INSERT INTO replication_parity (rule_name, status, progress_scanned, updated_at)
+             VALUES (?, 'running', 0, ?)
+             ON CONFLICT(rule_name) DO UPDATE SET
+                status = 'running', progress_scanned = 0, last_error = NULL, updated_at = ?",
+            params![rule, now, now],
+        )?;
+        Ok(())
+    }
+
+    /// Update the live progress counter of a running parity audit.
+    /// `ponytail`: the audit doesn't yet call this per-page — the scan is now
+    /// metadata-only + cache-warm (seconds), so the UI shows a spinner, not a
+    /// live count. This is the hook for a future streaming-progress pass; the UI
+    /// already degrades gracefully (it only renders the count when > 0).
+    pub fn parity_result_progress(
+        &self,
+        rule: &str,
+        scanned: i64,
+        now: i64,
+    ) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "UPDATE replication_parity SET progress_scanned = ?, updated_at = ?
+             WHERE rule_name = ?",
+            params![scanned, now, rule],
+        )?;
+        Ok(())
+    }
+
+    /// Persist a COMPLETED parity audit (the serialized outcome + verdict).
+    pub fn parity_result_done(
+        &self,
+        rule: &str,
+        in_sync: bool,
+        outcome_json: &str,
+        now: i64,
+    ) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "INSERT INTO replication_parity
+                (rule_name, status, scanned_at, in_sync, outcome_json, last_error, updated_at)
+             VALUES (?, 'done', ?, ?, ?, NULL, ?)
+             ON CONFLICT(rule_name) DO UPDATE SET
+                status = 'done', scanned_at = ?, in_sync = ?,
+                outcome_json = ?, last_error = NULL, updated_at = ?",
+            params![
+                rule,
+                now,
+                in_sync as i64,
+                outcome_json,
+                now,
+                now,
+                in_sync as i64,
+                outcome_json,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a parity audit FAILED with the error message.
+    pub fn parity_result_failed(
+        &self,
+        rule: &str,
+        error: &str,
+        now: i64,
+    ) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "INSERT INTO replication_parity (rule_name, status, last_error, updated_at)
+             VALUES (?, 'failed', ?, ?)
+             ON CONFLICT(rule_name) DO UPDATE SET
+                status = 'failed', last_error = ?, updated_at = ?",
+            params![rule, error, now, error, now],
+        )?;
+        Ok(())
+    }
+
+    /// Request cancellation: flip a RUNNING audit to 'cancelling'. The scan loop
+    /// polls this between pages and bails. No-op (returns false) if the row isn't
+    /// currently running. Returns true if a running audit was signalled.
+    pub fn parity_request_cancel(&self, rule: &str, now: i64) -> Result<bool, ConfigDbError> {
+        let n = self.conn.execute(
+            "UPDATE replication_parity SET status = 'cancelling', updated_at = ?
+             WHERE rule_name = ? AND status = 'running'",
+            params![now, rule],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Settle a cancelled audit to its terminal 'cancelled' state.
+    pub fn parity_result_cancelled(&self, rule: &str, now: i64) -> Result<(), ConfigDbError> {
+        self.conn.execute(
+            "UPDATE replication_parity
+             SET status = 'cancelled', last_error = NULL, updated_at = ?
+             WHERE rule_name = ?",
+            params![now, rule],
+        )?;
+        Ok(())
+    }
+
+    /// Try to acquire the parity background-job lease for a rule.
+    pub fn parity_try_acquire_lease(
+        &self,
+        rule: &str,
+        owner: &str,
+        now: i64,
+        ttl_secs: i64,
+    ) -> Result<bool, ConfigDbError> {
+        // Ensure a row exists so the lease UPDATE has a target.
+        self.conn.execute(
+            "INSERT OR IGNORE INTO replication_parity (rule_name, updated_at) VALUES (?, ?)",
+            params![rule, now],
+        )?;
+        job_store::try_acquire_leader_lease(
+            &self.conn,
+            "replication_parity",
+            "rule_name",
+            &rule,
+            owner,
+            now,
+            ttl_secs,
+        )
+    }
+
+    /// Renew the parity lease this owner still holds (heartbeat during a long
+    /// scan). Returns false if the owner lost it (lapsed / taken) — the caller
+    /// should then stop, since another owner may have started a fresh scan.
+    pub fn parity_renew_lease(
+        &self,
+        rule: &str,
+        owner: &str,
+        now: i64,
+        ttl_secs: i64,
+    ) -> Result<bool, ConfigDbError> {
+        job_store::renew_leader_lease(
+            &self.conn,
+            "replication_parity",
+            "rule_name",
+            &rule,
+            owner,
+            now,
+            ttl_secs,
+        )
+    }
+
+    /// Release the parity lease this owner holds.
+    pub fn parity_release_lease(&self, rule: &str, owner: &str) -> Result<(), ConfigDbError> {
+        job_store::release_leader_lease(
+            &self.conn,
+            "replication_parity",
+            "rule_name",
+            &rule,
+            owner,
+        )?;
+        Ok(())
+    }
+
+    /// Boot reconcile: mark any in-flight row ('running' OR 'cancelling') failed
+    /// (a previous process died mid-audit) AND clear its lease UNCONDITIONALLY.
+    /// A process restart means the holding process is gone, so the lease is dead
+    /// even if it hasn't expired — leaving it would block re-verify for the full
+    /// TTL; and a row stuck at 'cancelling' would make the UI poll forever.
+    /// Returns rows reconciled.
+    pub fn parity_reconcile_on_boot(&self) -> Result<usize, ConfigDbError> {
+        let now = current_unix_seconds();
+        let n = self.conn.execute(
+            "UPDATE replication_parity
+             SET status = 'failed',
+                 last_error = 'proxy restarted mid-audit',
+                 leader_instance_id = NULL,
+                 leader_expires_at = NULL,
+                 updated_at = ?
+             WHERE status IN ('running', 'cancelling')",
+            params![now],
+        )?;
+        // Also clear any other stale (expired) leases on non-running rows.
+        job_store::clear_stale_leases(&self.conn, "replication_parity", now)?;
+        Ok(n)
+    }
+
+    /// Cheap status-only read for the per-page cancel check — avoids loading the
+    /// (possibly large) outcome_json just to compare the status string.
+    pub fn parity_status(&self, rule: &str) -> Result<Option<String>, ConfigDbError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT status FROM replication_parity WHERE rule_name = ?",
+                [rule],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+}
+
+/// The cached parity result row (the background-job state the UI polls).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityResultRow {
+    pub status: String,
+    pub scanned_at: Option<i64>,
+    pub progress_scanned: i64,
+    pub outcome_json: Option<String>,
+    pub last_error: Option<String>,
+}
+
+/// Which side of a replication rule a cached parity entry describes. Source and
+/// dest rows are kept distinct so a whole-bucket mirror (source.prefix ==
+/// dest.prefix) can't collide them into one row → false "in sync".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParitySide {
+    Source,
+    Dest,
+}
+
+impl ParitySide {
+    fn as_str(self) -> &'static str {
+        match self {
+            ParitySide::Source => "src",
+            ParitySide::Dest => "dst",
+        }
+    }
+}
+
+/// Cached logical metadata for one object (what a parity compare needs), plus
+/// `stored_etag` — the etag/md5 of the STORED blob as the lite LIST reports it
+/// (delta-blob etag for a delta object; the real etag for passthrough). It is
+/// the cheap CONTENT-VERSION token: a cache hit is only trusted when the current
+/// lite `stored_etag` still matches, so an in-place overwrite (new bytes → new
+/// stored etag) misses the cache and is re-read instead of reporting stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityCacheEntry {
+    pub sha256: Option<String>,
+    pub size: u64,
+    pub etag: Option<String>,
+    pub stored_etag: Option<String>,
 }
 
 #[cfg(test)]
@@ -733,6 +1191,7 @@ mod tests {
             objects_deleted: 0,
             bytes_copied: 1024,
             errors: 0,
+            ..Default::default()
         };
         db.replication_finish_run(id, "r", "succeeded", 300, totals, 900)
             .unwrap();
@@ -914,5 +1373,244 @@ mod tests {
         let db = db();
         let got = db.replication_object_failures_for_keys("r", &[]).unwrap();
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn parity_result_lifecycle_running_then_done() {
+        let db = db();
+        assert!(
+            db.parity_result_load("r").unwrap().is_none(),
+            "idle = no row"
+        );
+        db.parity_result_set_running("r", 100).unwrap();
+        let row = db.parity_result_load("r").unwrap().unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(row.progress_scanned, 0);
+
+        db.parity_result_progress("r", 4200, 110).unwrap();
+        assert_eq!(
+            db.parity_result_load("r")
+                .unwrap()
+                .unwrap()
+                .progress_scanned,
+            4200
+        );
+
+        db.parity_result_done("r", true, "{\"in_sync\":true}", 120)
+            .unwrap();
+        let row = db.parity_result_load("r").unwrap().unwrap();
+        assert_eq!(row.status, "done");
+        assert_eq!(row.scanned_at, Some(120));
+        assert_eq!(row.outcome_json.as_deref(), Some("{\"in_sync\":true}"));
+        assert!(row.last_error.is_none());
+
+        db.parity_result_failed("r", "boom", 130).unwrap();
+        let row = db.parity_result_load("r").unwrap().unwrap();
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn parity_cancel_flow_running_to_cancelled() {
+        let db = db();
+        // Cancelling an idle audit is a no-op.
+        assert!(!db.parity_request_cancel("r", 100).unwrap());
+        db.parity_result_set_running("r", 100).unwrap();
+        // Now a running audit can be signalled.
+        assert!(db.parity_request_cancel("r", 110).unwrap());
+        assert_eq!(
+            db.parity_result_load("r").unwrap().unwrap().status,
+            "cancelling"
+        );
+        // The scan settles it.
+        db.parity_result_cancelled("r", 120).unwrap();
+        let row = db.parity_result_load("r").unwrap().unwrap();
+        assert_eq!(row.status, "cancelled");
+        assert!(row.last_error.is_none());
+        // Cancelling a non-running (cancelled) row is again a no-op.
+        assert!(!db.parity_request_cancel("r", 130).unwrap());
+    }
+
+    #[test]
+    fn parity_lease_serialises_and_boot_reconcile_clears_running() {
+        let db = db();
+        assert!(db
+            .parity_try_acquire_lease("r", "owner-a", 100, 60)
+            .unwrap());
+        // A second owner can't take a live lease.
+        assert!(!db
+            .parity_try_acquire_lease("r", "owner-b", 110, 60)
+            .unwrap());
+        db.parity_result_set_running("r", 110).unwrap();
+
+        // Boot reconcile: stale-lease clear + mark a 'running' row failed.
+        let n = db.parity_reconcile_on_boot().unwrap();
+        assert_eq!(n, 1, "the running audit is reconciled to failed");
+        assert_eq!(
+            db.parity_result_load("r").unwrap().unwrap().status,
+            "failed"
+        );
+
+        db.parity_release_lease("r", "owner-a").unwrap();
+        // After release a fresh owner can acquire.
+        assert!(db
+            .parity_try_acquire_lease("r", "owner-c", 200, 60)
+            .unwrap());
+    }
+
+    #[test]
+    fn parity_cache_round_trips_and_isolates_by_rule() {
+        let mut db = db();
+        let e = |sha: Option<&str>, size: u64, etag: Option<&str>| ParityCacheEntry {
+            sha256: sha.map(str::to_string),
+            size,
+            etag: etag.map(str::to_string),
+            stored_etag: Some("blob-etag".to_string()),
+        };
+        let src = ParitySide::Source;
+        db.parity_cache_put_many(
+            "r1",
+            src,
+            &[
+                ("a/x.zip".into(), e(Some("sha-a"), 100, Some("etag-a"))),
+                ("a/y.zip".into(), e(None, 50, Some("etag-y-2"))),
+            ],
+            1000,
+        )
+        .unwrap();
+        // Different rule must not see r1's entries.
+        db.parity_cache_put_many(
+            "r2",
+            src,
+            &[("a/x.zip".into(), e(Some("other"), 9, None))],
+            1000,
+        )
+        .unwrap();
+
+        let got = db
+            .parity_cache_get_many("r1", src, &["a/x.zip", "a/y.zip", "missing"])
+            .unwrap();
+        assert_eq!(got.len(), 2, "only the two present keys, not the miss");
+        assert_eq!(got["a/x.zip"], e(Some("sha-a"), 100, Some("etag-a")));
+        assert_eq!(
+            got["a/x.zip"].stored_etag.as_deref(),
+            Some("blob-etag"),
+            "the content-version token round-trips"
+        );
+        assert_eq!(got["a/y.zip"].size, 50);
+        assert_eq!(
+            db.parity_cache_get_many("r2", src, &["a/x.zip"]).unwrap()["a/x.zip"].size,
+            9
+        );
+    }
+
+    #[test]
+    fn parity_cache_source_and_dest_never_collide() {
+        // The structural false-"in-sync" guard: same rule + same key on both
+        // sides (a whole-bucket mirror) must keep SEPARATE rows. If source read
+        // dest's logical metadata they'd always "match".
+        let mut db = db();
+        let mk = |sha: &str| ParityCacheEntry {
+            sha256: Some(sha.into()),
+            size: 1,
+            etag: None,
+            stored_etag: Some("blob".into()),
+        };
+        db.parity_cache_put_many("r", ParitySide::Source, &[("k".into(), mk("SRC"))], 1)
+            .unwrap();
+        db.parity_cache_put_many("r", ParitySide::Dest, &[("k".into(), mk("DST"))], 1)
+            .unwrap();
+        assert_eq!(
+            db.parity_cache_get_many("r", ParitySide::Source, &["k"])
+                .unwrap()["k"]
+                .sha256
+                .as_deref(),
+            Some("SRC")
+        );
+        assert_eq!(
+            db.parity_cache_get_many("r", ParitySide::Dest, &["k"])
+                .unwrap()["k"]
+                .sha256
+                .as_deref(),
+            Some("DST"),
+            "dest row must be distinct from the source row"
+        );
+    }
+
+    #[test]
+    fn parity_cache_retain_prunes_deleted_and_respects_side() {
+        let mut db = db();
+        let mk = ParityCacheEntry {
+            sha256: None,
+            size: 1,
+            etag: None,
+            stored_etag: None,
+        };
+        let s = ParitySide::Source;
+        db.parity_cache_put_many(
+            "r",
+            s,
+            &[("keep".into(), mk.clone()), ("gone".into(), mk.clone())],
+            1,
+        )
+        .unwrap();
+        // Dest side has its own "gone" — must NOT be pruned by a source retain.
+        db.parity_cache_put_many("r", ParitySide::Dest, &[("gone".into(), mk.clone())], 1)
+            .unwrap();
+
+        let removed = db
+            .parity_cache_retain("r", s, &["keep".to_string()])
+            .unwrap();
+        assert_eq!(removed, 1, "only the source 'gone' row is pruned");
+        assert!(db
+            .parity_cache_get_many("r", s, &["gone"])
+            .unwrap()
+            .is_empty());
+        assert!(!db
+            .parity_cache_get_many("r", s, &["keep"])
+            .unwrap()
+            .is_empty());
+        assert!(
+            !db.parity_cache_get_many("r", ParitySide::Dest, &["gone"])
+                .unwrap()
+                .is_empty(),
+            "dest side untouched by a source-side retain"
+        );
+    }
+
+    #[test]
+    fn parity_cache_upsert_overwrites_logical_metadata() {
+        let mut db = db();
+        let mk = |size| ParityCacheEntry {
+            sha256: Some("h".into()),
+            size,
+            etag: None,
+            stored_etag: None,
+        };
+        let s = ParitySide::Source;
+        db.parity_cache_put_many("r", s, &[("k".into(), mk(10))], 1)
+            .unwrap();
+        db.parity_cache_put_many("r", s, &[("k".into(), mk(20))], 2)
+            .unwrap();
+        let got = db.parity_cache_get_many("r", s, &["k"]).unwrap();
+        assert_eq!(got["k"].size, 20, "second write wins");
+    }
+
+    #[test]
+    fn parity_cache_clear_and_empty_get() {
+        let mut db = db();
+        let e = ParityCacheEntry {
+            sha256: None,
+            size: 1,
+            etag: None,
+            stored_etag: None,
+        };
+        let s = ParitySide::Source;
+        db.parity_cache_put_many("r", s, &[("k".into(), e)], 1)
+            .unwrap();
+        db.parity_cache_clear("r").unwrap();
+        assert!(db.parity_cache_get_many("r", s, &["k"]).unwrap().is_empty());
+        // Empty key list short-circuits without a query.
+        assert!(db.parity_cache_get_many("r", s, &[]).unwrap().is_empty());
     }
 }

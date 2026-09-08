@@ -5,7 +5,7 @@
 use crate::types::FileMetadata;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::{self, BoxStream};
+use futures::stream::BoxStream;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -122,6 +122,26 @@ pub trait StorageBackend: Send + Sync {
     /// Get the reference file for a deltaspace
     async fn get_reference(&self, bucket: &str, prefix: &str) -> Result<Vec<u8>, StorageError>;
 
+    /// Materialise the reference file at `dest` as a seekable local file, WITHOUT
+    /// heap-loading it — the streaming codec (`encode_from_reader` /
+    /// `decode_to_writer`) needs the reference as a file xdelta3 can mmap, and a
+    /// multi-GB reference must never be buffered in RAM (adversarial blocker 10).
+    ///
+    /// Returns the number of bytes written. The default impl falls back to
+    /// `get_reference` + write (fine for small references / backends that don't
+    /// override); the filesystem backend hardlinks (near-zero) and the S3 backend
+    /// streams the GET body to the file.
+    async fn get_reference_to_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        dest: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        let data = self.get_reference(bucket, prefix).await?;
+        tokio::fs::write(dest, &data).await?;
+        Ok(data.len() as u64)
+    }
+
     /// Store a reference file with its metadata
     async fn put_reference(
         &self,
@@ -130,6 +150,22 @@ pub trait StorageBackend: Send + Sync {
         data: &[u8],
         metadata: &FileMetadata,
     ) -> Result<(), StorageError>;
+
+    /// Store a reference whose data is on a local file, WITHOUT heap-loading it
+    /// (review M1.4: the streaming baseline path must not read a multi-GB first
+    /// member into RAM). Default reads the file then delegates to `put_reference`
+    /// (correct for any backend); the filesystem backend hardlinks and S3 streams
+    /// the upload from the file — mirrors `get_reference_to_file`.
+    async fn put_reference_from_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        source_path: &std::path::Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        let data = tokio::fs::read(source_path).await?;
+        self.put_reference(bucket, prefix, &data, metadata).await
+    }
 
     /// Store/update reference metadata without rewriting reference data.
     async fn put_reference_metadata(
@@ -263,32 +299,27 @@ pub trait StorageBackend: Send + Sync {
 
     // === Streaming operations ===
 
-    /// Stream a passthrough file's contents without buffering the entire file in memory.
-    /// Default implementation falls back to `get_passthrough()` and wraps in a single-chunk stream.
+    /// Stream a passthrough file's contents without buffering the entire file in
+    /// memory. REQUIRED (no default) — a buffering default would silently defeat
+    /// the memory bound for large objects on a backend that forgot to override
+    /// it. The type system enforces every backend provides a real streaming read
+    /// (this used to be a buffering default guarded by a grep conformance test).
     async fn get_passthrough_stream(
         &self,
         bucket: &str,
         prefix: &str,
         filename: &str,
-    ) -> Result<BoxStream<'static, Result<Bytes, StorageError>>, StorageError> {
-        let data = self.get_passthrough(bucket, prefix, filename).await?;
-        Ok(Box::pin(stream::once(async { Ok(Bytes::from(data)) })))
-    }
+    ) -> Result<BoxStream<'static, Result<Bytes, StorageError>>, StorageError>;
 
-    /// Stream a byte range of a passthrough file without buffering the entire object.
-    /// Default falls back to the full stream (caller will handle slicing).
+    /// Stream a byte range of a passthrough file without buffering the entire
+    /// object. REQUIRED (no default) — same memory-bound rationale as
+    /// [`get_passthrough_stream`](Self::get_passthrough_stream): a buffering
+    /// fallback would fetch the whole object first, defeating the bound a ranged
+    /// GET promises (the E2 invariant). Backends with native range reads (S3,
+    /// filesystem, the EncryptingBackend chunked wrapper) implement it directly;
+    /// a backend with no native range support must still provide an explicit
+    /// (even if full-stream) impl so the choice is VISIBLE, not silently inherited.
     ///
-    /// E2 security/hygiene invariant: EVERY production backend MUST
-    /// override this method with a native range read. The default is
-    /// present only so unit-test spies don't need to implement it; it
-    /// defeats the memory bound ranged GETs are supposed to provide by
-    /// fetching the whole object first. A grep-based conformance test
-    /// in `traits.rs::tests::every_backend_overrides_range` guards the
-    /// invariant for in-tree backends.
-    ///
-    /// Backends that support native range reads (S3, filesystem, and
-    /// the EncryptingBackend wrapper which peels chunks selectively)
-    /// override this.
     /// Returns `(stream, content_length)` where `content_length` is the number of
     /// bytes in the range (0 signals "full stream, not a range").
     async fn get_passthrough_stream_range(
@@ -296,15 +327,9 @@ pub trait StorageBackend: Send + Sync {
         bucket: &str,
         prefix: &str,
         filename: &str,
-        _start: u64,
-        _end: u64, // inclusive
-    ) -> Result<(BoxStream<'static, Result<Bytes, StorageError>>, u64), StorageError> {
-        // Default: fall back to full stream (caller will handle slicing)
-        let stream = self
-            .get_passthrough_stream(bucket, prefix, filename)
-            .await?;
-        Ok((stream, 0)) // 0 signals "full stream, not range"
-    }
+        start: u64,
+        end: u64, // inclusive
+    ) -> Result<(BoxStream<'static, Result<Bytes, StorageError>>, u64), StorageError>;
 
     /// Store a passthrough file from pre-split chunks without assembling into a contiguous buffer.
     /// Default implementation collects chunks and delegates to `put_passthrough()`.
@@ -898,96 +923,3 @@ macro_rules! impl_storage_backend_for_box {
 }
 
 impl_storage_backend_for_box!();
-
-#[cfg(test)]
-mod tests {
-    //! E2 conformance: the default `get_passthrough_stream_range` impl
-    //! on the trait is a correctness fallback (buffers the full object)
-    //! and MUST be overridden by every production backend that wants
-    //! the memory bound a ranged GET is supposed to provide.
-    //!
-    //! The grep-based test below walks the `src/storage/` tree, picks
-    //! every `impl StorageBackend for <ConcreteType>` block, and asserts
-    //! it contains a `get_passthrough_stream_range` definition.
-    //!
-    //! False positives are possible (a test-only spy is also a concrete
-    //! impl) but a missing override is guaranteed to fail — which is
-    //! the direction we care about.
-
-    use std::path::PathBuf;
-
-    #[test]
-    fn every_backend_overrides_range() {
-        // Collect all .rs files under src/storage/.
-        fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_dir() {
-                        walk(&p, out);
-                    } else if p.extension().map(|e| e == "rs").unwrap_or(false) {
-                        out.push(p);
-                    }
-                }
-            }
-        }
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("storage");
-        let mut files = Vec::new();
-        walk(&root, &mut files);
-        assert!(!files.is_empty(), "expected storage files at {:?}", root);
-
-        // For each `impl StorageBackend for X {` block, extract it and
-        // assert it contains a `get_passthrough_stream_range` definition.
-        // This is a lightweight lexer — good enough for the in-tree check.
-        for path in &files {
-            let text = std::fs::read_to_string(path).expect("read src file");
-            let marker = "impl StorageBackend for ";
-            let mut offset = 0;
-            while let Some(idx) = text[offset..].find(marker) {
-                let start = offset + idx;
-                // Find the opening `{` of the impl block.
-                let brace_start = match text[start..].find('{') {
-                    Some(b) => start + b,
-                    None => break,
-                };
-                // Walk to matching close-brace.
-                let mut depth = 1;
-                let mut i = brace_start + 1;
-                let bytes = text.as_bytes();
-                while i < bytes.len() && depth > 0 {
-                    match bytes[i] as char {
-                        '{' => depth += 1,
-                        '}' => depth -= 1,
-                        _ => {}
-                    }
-                    i += 1;
-                }
-                let block = &text[brace_start..i];
-                // Header gives us the concrete type name (for assertion msg).
-                let header_end = brace_start;
-                let header = text[start..header_end]
-                    .trim_end()
-                    .strip_prefix(marker)
-                    .unwrap_or("")
-                    .trim();
-
-                assert!(
-                    block.contains("fn get_passthrough_stream_range"),
-                    "{}:{} impl StorageBackend for {} is missing a \
-                     `get_passthrough_stream_range` override. The default \
-                     fallback buffers the entire object and defeats the \
-                     memory bound a ranged GET promises. See the doc comment \
-                     on `StorageBackend::get_passthrough_stream_range` for \
-                     the E2 invariant.",
-                    path.display(),
-                    text[..start].lines().count() + 1,
-                    header,
-                );
-
-                offset = i;
-            }
-        }
-    }
-}

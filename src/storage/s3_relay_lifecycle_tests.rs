@@ -50,6 +50,7 @@ fn relay_adapter(
         metrics: Arc::new(crate::metrics::Metrics::new()),
         usage_scanner: Arc::new(crate::usage_scanner::UsageScanner::new()),
         config_db: None,
+        bucket_usage: None,
         form_post_replay: Default::default(),
         maintenance_gate: Arc::new(crate::maintenance::gate::MaintenanceGate::new()),
         maintenance_notify: Default::default(),

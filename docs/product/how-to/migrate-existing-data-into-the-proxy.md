@@ -67,7 +67,9 @@ Use this when you want the version history itself stored as deltas. The proxy re
 4. Spot-check the savings on the stats endpoint before cutting over:
 
    ```bash
-   curl https://s3.acme.example/_/stats?metadata=true
+   curl https://s3.acme.example/_/stats
+   # per bucket, with the running counter:
+   curl https://s3.acme.example/_/stats?bucket=releases
    ```
 
 ## Cut clients over

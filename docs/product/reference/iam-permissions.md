@@ -73,7 +73,7 @@ Resource strings and string condition values accept identity templates:
 
 Template facts:
 
-- The `iam:` prefix is mandatory; a bare `${username}` is rejected. The prefix distinguishes request-time identity substitution from the `${env:NAME}` load-time config expansion.
+- The `iam:` prefix is mandatory; a bare `${username}` is **not** substituted. The prefix distinguishes request-time identity substitution from the `${env:NAME}` load-time config expansion. A stale bare `${username}` leaves a literal, unmatchable resource pattern — so the rule matches nothing and the user is **silently denied**. The save-time config advisories flag this; see [Config advisories](configuration.md#config-advisories).
 - Templates are stored raw in the DB/YAML and expanded when the in-memory IAM index is built, after group permissions are merged into each member user.
 - Identity values are percent-encoded before substitution: a username `dana/team*` becomes `dana%2Fteam%2A`, so it cannot inject path separators or wildcards.
 - Unknown templates are rejected by user/group API validation and by declarative IAM apply.

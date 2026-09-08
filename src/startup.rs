@@ -45,9 +45,32 @@ pub fn init_tracing(cli: &Cli) -> reload::Handle<EnvFilter, tracing_subscriber::
         });
 
     let (filter_layer, reload_handle) = reload::Layer::new(initial_filter);
+
+    // Log FORMAT is a startup-only choice (it can't hot-reload like the level):
+    // DGP_LOG_FORMAT=json emits one JSON object per line (greppable with `jq` —
+    // every span field becomes a key), else the human-readable text format.
+    // Boxed so both arms share one registry-build site.
+    use tracing_subscriber::Layer;
+    let json_format = std::env::var("DGP_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    let fmt_layer = if json_format {
+        tracing_subscriber::fmt::layer().json().boxed()
+    } else {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(std::io::stdout().is_terminal())
+            .boxed()
+    };
+
+    // 3rd layer: capture events (at the DGP_LOG_RING_LEVEL floor, default INFO)
+    // into the in-process ring + broadcast that power the admin GUI log viewer
+    // (GET /_/api/admin/logs[/stream]). Gated by the global EnvFilter above, so a
+    // hot level change affects it too; its own floor keeps per-request debug spam
+    // out of the ring.
     tracing_subscriber::registry()
         .with(filter_layer)
-        .with(tracing_subscriber::fmt::layer().with_ansi(std::io::stdout().is_terminal()))
+        .with(fmt_layer)
+        .with(deltaglider_proxy::logs::LogCaptureLayer::new())
         .init();
 
     reload_handle
@@ -734,6 +757,16 @@ pub fn init_config_db(
                     warn!("Failed to reconcile replication runtime state on boot: {err}");
                 }
             }
+            // Clear a parity audit left 'running' by a crashed process + its lease.
+            match db.parity_reconcile_on_boot() {
+                Ok(count) if count > 0 => {
+                    warn!("Reconciled {count} parity audit(s) left running by a previous process");
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!("Failed to reconcile parity audit state on boot: {err}");
+                }
+            }
             match db.lifecycle_reconcile_on_boot() {
                 Ok(count) if count > 0 => {
                     warn!("Reconciled {count} lifecycle run(s) left running by a previous process");
@@ -976,17 +1009,22 @@ pub async fn init_config_sync(
 
     // Try to download a newer version from S3
     match sync.download_if_newer().await {
-        Ok(true) => {
-            reopen_and_rebuild_iam(
+        Ok(Some(dl)) => {
+            let applied = reopen_and_rebuild_iam(
                 config_db,
                 admin_password_hash,
                 iam_state,
                 external_auth,
+                &dl.temp_path,
                 "startup",
             )
             .await;
+            // Commit the ETag only on a successful merge so a failure retries.
+            if applied {
+                sync.commit_downloaded_etag(dl.etag).await;
+            }
         }
-        Ok(false) => {
+        Ok(None) => {
             info!("Config DB S3 sync: local copy is current");
         }
         Err(e) => {
@@ -1023,17 +1061,21 @@ pub fn spawn_config_sync_poll(
         loop {
             tick.tick().await;
             match sync.poll_and_sync().await {
-                Ok(true) => {
-                    reopen_and_rebuild_iam(
+                Ok(Some(dl)) => {
+                    let applied = reopen_and_rebuild_iam(
                         &db_arc,
                         &password_hash,
                         &iam,
                         &ext_auth,
+                        &dl.temp_path,
                         "periodic poll",
                     )
                     .await;
+                    if applied {
+                        sync.commit_downloaded_etag(dl.etag).await;
+                    }
                 }
-                Ok(false) => {
+                Ok(None) => {
                     tracing::debug!("Config DB S3 sync poll: no changes");
                 }
                 Err(e) => {

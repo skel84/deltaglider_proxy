@@ -5,7 +5,7 @@
 //! `POST /_/api/admin/jobs/replication:<rule>/{run-now,pause,resume}`.
 //! Listing, runs, and failures live in the jobs module.
 
-use super::AdminState;
+use super::{trigger_config_sync, AdminState};
 use crate::config_sections::{ReplicationConfig, ReplicationRule};
 use crate::replication;
 use axum::extract::{Path, State};
@@ -193,30 +193,113 @@ pub async fn run_now(
     }))
 }
 
-/// Audit source↔destination parity for a rule (read-only). Gated ONLY on
-/// rule existence — auditing a disabled rule before enabling it is valid.
-/// No lease, no maintenance-gate: it only lists metadata.
+/// The poll envelope for the parity audit (a background job). `status` is
+/// idle | running | done | failed. `outcome` is the last completed verdict
+/// (kept while a new scan runs). The frontend polls `GET verify`.
+#[derive(serde::Serialize)]
+pub struct ParityStatusResponse {
+    pub status: String,
+    pub progress_scanned: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanned_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<replication::ParityOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+fn parity_status_from_row(
+    row: Option<crate::replication::ParityResultRow>,
+) -> ParityStatusResponse {
+    let Some(row) = row else {
+        return ParityStatusResponse {
+            status: "idle".into(),
+            progress_scanned: 0,
+            scanned_at: None,
+            outcome: None,
+            error: None,
+        };
+    };
+    let outcome = row
+        .outcome_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str(j).ok());
+    ParityStatusResponse {
+        status: row.status,
+        progress_scanned: row.progress_scanned,
+        scanned_at: row.scanned_at,
+        outcome,
+        error: row.last_error,
+    }
+}
+
+/// POST: kick off a parity audit as a BACKGROUND job and return immediately
+/// (202). If an audit is already running, just report its status. The result
+/// is persisted server-side so it survives navigation + restart; poll
+/// `GET verify`. Gated only on rule existence (auditing a disabled rule is
+/// valid). Idempotent under the lease — a second POST won't double-scan.
 pub async fn verify(
     Path(name): Path<String>,
     State(state): State<Arc<AdminState>>,
-) -> Result<Json<replication::ParityOutcome>, (StatusCode, String)> {
+) -> Result<(StatusCode, Json<ParityStatusResponse>), (StatusCode, String)> {
     let (_repl, rule) = snapshot_and_find_rule(&state, &name).await?;
+    let Some(db_arc) = state.config_db.clone() else {
+        // No config DB → fall back to a synchronous in-request audit (dev/no-DB).
+        let engine = state.s3_state.engine.load().clone();
+        let outcome = replication::parity_audit(
+            &engine,
+            &rule,
+            replication::parity::MAX_PARITY_OBJECTS,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        return Ok((
+            StatusCode::OK,
+            Json(ParityStatusResponse {
+                status: "done".into(),
+                progress_scanned: outcome.source_objects as i64,
+                scanned_at: Some(outcome.scanned_at),
+                outcome: Some(outcome),
+                error: None,
+            }),
+        ));
+    };
 
-    info!("Replication verify via admin API: rule='{}'", name);
+    let owner = format!("verify:{}", uuid::Uuid::new_v4());
+    // Acquire the lease; if someone else holds it, just report current status.
+    let now = crate::replication::current_unix_seconds();
+    let acquired = {
+        let db = db_arc.lock().await;
+        db.parity_try_acquire_lease(&rule.name, &owner, now, PARITY_LEASE_TTL_SECS)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    if !acquired {
+        // Someone else holds the lease → a scan IS in flight. Report 'running'
+        // even if the winner hasn't written its set_running row yet (a small
+        // race window) — otherwise the loser would see 'idle' and never poll.
+        let row = {
+            let db = db_arc.lock().await;
+            db.parity_result_load(&rule.name).ok().flatten()
+        };
+        let mut resp = parity_status_from_row(row);
+        if resp.status == "idle" || resp.status == "failed" {
+            resp.status = "running".to_string();
+        }
+        return Ok((StatusCode::ACCEPTED, Json(resp)));
+    }
 
-    let engine = state.s3_state.engine.load().clone();
-    // Pass the DB mutex so the audit can join the per-object failure ledger.
-    // parity_audit locks it ONLY for the synchronous tail query, never across
-    // its listing awaits. A None DB still yields a correct (ledger-less) diff.
-    let outcome = replication::parity_audit(
-        &engine,
-        &rule,
-        replication::parity::MAX_PARITY_OBJECTS,
-        state.config_db.as_deref(),
-    )
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    {
+        let db = db_arc.lock().await;
+        let _ = db.parity_result_set_running(&rule.name, now);
+    }
+    // Push the encrypted DB so a peer instance sees the lease + 'running' before
+    // its 5-min poll — without this, both could acquire the same rule's lease and
+    // double-scan within the sync lag. No-op when sync is unconfigured.
+    trigger_config_sync(&state);
 
+    info!("Replication verify (background) started: rule='{}'", name);
     crate::audit::audit_log(
         "replication_verify",
         "admin",
@@ -226,8 +309,173 @@ pub async fn verify(
         &rule.source.prefix,
     );
 
-    Ok(Json(outcome))
+    // In-process cancel flag for a fast (lock-free) abort. Registered for the
+    // duration of the scan; removed on settle. The durable 'cancelling' DB row
+    // stays the cross-instance / post-restart signal.
+    let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut map = state.parity_cancels.lock().unwrap();
+        map.insert(rule.name.clone(), cancel_flag.clone());
+    }
+
+    // Detach the audit. It persists its own result + releases the lease.
+    // ponytail: this one-shot detached + select-heartbeat + catch_unwind + settle
+    // orchestration is the ONLY instance of its shape (lease primitives are already
+    // shared via config_db::job_store; maintenance is a different poll-loop shape).
+    // Don't extract a BackgroundJob driver until a genuine 2nd one-shot task lands.
+    let engine = state.s3_state.engine.load().clone();
+    let rule_clone = rule.clone();
+    let db_for_task = db_arc.clone();
+    let cancels = state.parity_cancels.clone();
+    tokio::spawn(async move {
+        // Catch a panic in the audit so the lease + 'running' status are ALWAYS
+        // settled — otherwise a panicked task would leave the lease stuck for the
+        // full TTL and the UI polling a never-ending 'running' forever.
+        let audit = std::panic::AssertUnwindSafe(replication::parity_audit(
+            &engine,
+            &rule_clone,
+            replication::parity::MAX_PARITY_OBJECTS,
+            Some(&db_for_task),
+            Some(replication::parity::ParityProgress {
+                db: &db_for_task,
+                rule: &rule_clone.name,
+                cancel: &cancel_flag,
+            }),
+        ));
+        let audit = futures::FutureExt::catch_unwind(audit);
+        // Heartbeat: renew the lease every TTL/3 so a scan that runs longer than
+        // the TTL doesn't let a concurrent POST acquire + double-scan. The ticker
+        // is cancelled (dropped) the moment the audit completes via select!.
+        let heartbeat = async {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(
+                (PARITY_LEASE_TTL_SECS / 3).max(1) as u64,
+            ));
+            tick.tick().await; // immediate first tick — skip
+            loop {
+                tick.tick().await;
+                let now = crate::replication::current_unix_seconds();
+                let db = db_for_task.lock().await;
+                if !db
+                    .parity_renew_lease(&rule_clone.name, &owner, now, PARITY_LEASE_TTL_SECS)
+                    .unwrap_or(false)
+                {
+                    break; // lost the lease — stop renewing
+                }
+            }
+        };
+        let result = tokio::select! {
+            r = audit => match r {
+                Ok(r) => r,
+                Err(_) => Err("parity audit panicked".to_string()),
+            },
+            _ = heartbeat => Err("parity audit lease lost".to_string()),
+        };
+        let now = crate::replication::current_unix_seconds();
+        let db = db_for_task.lock().await;
+        // Honour a cancel that landed in the final window (after the audit's
+        // last in-scan check but before this terminal write): if the row is
+        // 'cancelling', settle it 'cancelled' rather than overwriting with
+        // 'done'. Read under the held lock so it's atomic with the write.
+        let cancel_pending = matches!(
+            db.parity_status(&rule_clone.name).ok().flatten(),
+            Some(s) if s == "cancelling"
+        );
+        match result {
+            Ok(_) if cancel_pending => {
+                let _ = db.parity_result_cancelled(&rule_clone.name, now);
+            }
+            // Persist 'failed' (not a hollow 'done') if the outcome won't
+            // serialize — a 'done' with empty outcome_json reads as no result.
+            Ok(outcome) => match serde_json::to_string(&outcome) {
+                Ok(json) => {
+                    let _ = db.parity_result_done(&rule_clone.name, outcome.in_sync, &json, now);
+                }
+                Err(e) => {
+                    let _ = db.parity_result_failed(
+                        &rule_clone.name,
+                        &format!("could not serialize parity result: {e}"),
+                        now,
+                    );
+                }
+            },
+            Err(e) if e == replication::parity::CANCELLED => {
+                let _ = db.parity_result_cancelled(&rule_clone.name, now);
+            }
+            Err(e) => {
+                let _ = db.parity_result_failed(&rule_clone.name, &e, now);
+            }
+        }
+        let _ = db.parity_release_lease(&rule_clone.name, &owner);
+        drop(db);
+        // Bump AFTER the terminal row is written, so a test polling parity-version
+        // that sees the new count also sees the settled row.
+        replication::parity::bump_parity_version();
+        // Deregister this run's cancel flag (only if it's still ours — a new run
+        // may have replaced it). Removing a flag the registry no longer points to
+        // is harmless; guard on identity to avoid evicting a successor's flag.
+        let mut map = cancels.lock().unwrap();
+        if map
+            .get(&rule_clone.name)
+            .is_some_and(|f| Arc::ptr_eq(f, &cancel_flag))
+        {
+            map.remove(&rule_clone.name);
+        }
+    });
+
+    // Return the (now 'running') status immediately.
+    let row = {
+        let db = db_arc.lock().await;
+        db.parity_result_load(&rule.name).ok().flatten()
+    };
+    Ok((StatusCode::ACCEPTED, Json(parity_status_from_row(row))))
 }
+
+/// GET: poll the current parity audit status / last result (server-side, so it
+/// survives navigation + restart). No scan is started here.
+pub async fn verify_status(
+    Path(name): Path<String>,
+    State(state): State<Arc<AdminState>>,
+) -> Result<Json<ParityStatusResponse>, (StatusCode, String)> {
+    let _ = snapshot_and_find_rule(&state, &name).await?;
+    let row = match &state.config_db {
+        Some(db_arc) => {
+            let db = db_arc.lock().await;
+            db.parity_result_load(&name).ok().flatten()
+        }
+        None => None,
+    };
+    Ok(Json(parity_status_from_row(row)))
+}
+
+/// POST: request cancellation of a running parity audit. Flips the row to
+/// 'cancelling'; the background scan polls this between LIST pages and bails,
+/// settling the row to 'cancelled'. Returns the current status either way
+/// (idempotent — cancelling an idle/done audit is a no-op).
+pub async fn verify_cancel(
+    Path(name): Path<String>,
+    State(state): State<Arc<AdminState>>,
+) -> Result<Json<ParityStatusResponse>, (StatusCode, String)> {
+    let _ = snapshot_and_find_rule(&state, &name).await?;
+    // Fast in-process signal: a local scan checks this every page without a lock.
+    if let Some(flag) = state.parity_cancels.lock().unwrap().get(&name) {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let row = match &state.config_db {
+        Some(db_arc) => {
+            let db = db_arc.lock().await;
+            let now = crate::replication::current_unix_seconds();
+            // Durable signal — survives restart + reaches another instance.
+            let _ = db.parity_request_cancel(&name, now);
+            db.parity_result_load(&name).ok().flatten()
+        }
+        None => None,
+    };
+    Ok(Json(parity_status_from_row(row)))
+}
+
+/// Background-job lease TTL for a parity audit. Long enough to cover a large
+/// scan; a crash clears it on the next boot reconcile.
+const PARITY_LEASE_TTL_SECS: i64 = 1800;
 
 /// Check whether a rule with the given name exists in the live config.
 /// M1 fix: previously pause/resume called `replication_ensure_state`

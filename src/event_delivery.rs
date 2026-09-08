@@ -88,6 +88,12 @@ impl Default for HttpWebhookDeliveryClient {
         // per-URL validate_outbound_url(_, UrlKind::Webhook) checks below.
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Close the DNS-rebinding gap: a webhook hostname that resolves to a
+            // metadata/private address fails closed at connect time (the
+            // literal-IP validate_outbound_url check can't see DNS).
+            .dns_resolver(std::sync::Arc::new(
+                crate::security::SsrfGuardedResolver::new(crate::security::UrlKind::Webhook),
+            ))
             .build()
             .unwrap_or_default();
         Self {

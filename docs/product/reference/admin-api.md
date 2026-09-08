@@ -139,6 +139,8 @@ Legacy JSON-only import path is still supported for pre-v0.8.4 scripts.
 |---|---|---|
 | `POST` | `/_/api/admin/usage/scan` | Trigger a prefix-size scan |
 | `GET` | `/_/api/admin/usage` | Read the cached usage tree |
+| `GET` | `/_/api/admin/usage/bucket/:bucket` | O(1) running usage counter for one bucket: `{object_count, logical_bytes, stored_bytes, savings_percentage, last_scan_at, never_scanned}`. Maintained inline on every PUT/DELETE — no scan. Per-instance; approximate across a fleet. |
+| `POST` | `/_/api/admin/usage/refresh?bucket=X` | Uncapped full scan of the bucket → overwrite the counter with ground truth. The one remaining O(n) path; reconciles drift or seeds a never-scanned bucket. Returns the refreshed counter row. |
 | `GET` | `/_/api/admin/deltaspace/savings` | Per-prefix reference-aware delta savings (30s in-memory cache) |
 | `GET` | `/_/api/admin/diagnostics/delta-efficiency` | Cached delta-efficiency report for a bucket's deltaspaces |
 | `POST` | `/_/api/admin/diagnostics/delta-efficiency/scan` | Trigger a delta-efficiency scan |
@@ -147,6 +149,8 @@ Legacy JSON-only import path is still supported for pre-v0.8.4 scripts.
 | `POST` | `/_/api/admin/diagnostics/scan/start` / `/stop` | Start / stop a background integrity scan |
 | `GET` | `/_/api/admin/diagnostics/scan/stream` | SSE stream of live scan progress |
 | `GET` | `/_/api/admin/audit[?limit=N]` | Snapshot of the in-memory audit ring, newest first. Bounded (default 500, override `DGP_AUDIT_RING_SIZE`). Stdout `tracing::info!` is still the long-term audit source. |
+| `GET` | `/_/api/admin/logs[?level=&target=&q=&limit=N]` | Filtered backlog of the in-memory operational-log ring (INFO+ floor), newest first. Bounded (`DGP_LOG_RING_SIZE`, default 2000). |
+| `GET` | `/_/api/admin/logs/stream[?level=&target=&q=]` | Live tail of operational logs via server-sent events, same filters as the backlog. |
 | `GET` | `/_/api/admin/event-outbox[?status=failed&limit=N&offset=N&sort=occurred_at&order=desc]` | Paged durable object-event outbox rows plus status counts. Delivery is background-only; delivered rows default to 24h/10,000-row retention; see [event-outbox.md](event-outbox.md). |
 | `POST` | `/_/api/admin/event-outbox/:id/requeue` | Requeue a single failed outbox row for re-delivery |
 | `POST` | `/_/api/admin/event-outbox/requeue` | Bulk-requeue failed outbox rows |
@@ -205,6 +209,9 @@ untouched. The gate engages at job creation and lifts when the job finishes
 | `DGP_MAX_TOTAL_MULTIPART_BYTES` | `max_object_size × max_uploads / 4` | Global in-flight byte cap across all multipart uploads. Protects against the C3 DoS pattern where many uploads accumulate without completing. Reject with `SlowDown` when exceeded. |
 | `DGP_MULTIPART_IDLE_TTL_HOURS` | `24` | Idle-TTL for incomplete multipart uploads. The periodic sweeper drops uploads with no UploadPart activity for this long (excluding uploads currently being completed). |
 | `DGP_AUDIT_RING_SIZE` | `500` | In-memory audit ring capacity. |
+| `DGP_LOG_RING_SIZE` | `2000` | In-memory operational-log ring capacity (backs the admin Logs viewer). |
+| `DGP_LOG_RING_LEVEL` | `info` | Minimum severity captured into the operational-log ring/stream (`error`/`warn`/`info`/`debug`/`trace`). Independent of the stdout log level. |
+| `DGP_LOG_FORMAT` | `text` | Stdout log format: `text` (human-readable) or `json` (one JSON object per line, `jq`-greppable). Startup-only. |
 | `DGP_SESSION_TTL_HOURS` | `4` | Admin session cookie lifetime. |
 
 ## Keyboard shortcuts (app-wide)
@@ -238,4 +245,4 @@ Session-protected (reveals per-bucket sizes):
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/_/stats` | Aggregate storage stats, 10s server-side cache |
+| `GET` | `/_/stats` | Aggregate storage stats from the O(1) per-bucket counter (no scan, no object cap). 10s cache on the all-buckets aggregate; `?bucket=NAME` reads one bucket uncached. |
