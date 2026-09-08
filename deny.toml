@@ -2,13 +2,10 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+unmaintained = "all"
 yanked = "warn"
-notice = "warn"
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -23,7 +20,11 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
 ]
-copyleft = "deny"
+
+# The workspace itself is GPL-3.0-only; dependencies retain the allow-list above.
+[[licenses.exceptions]]
+name = "deltaglider_proxy"
+allow = ["GPL-3.0-only"]
 
 [bans]
 multiple-versions = "warn"
