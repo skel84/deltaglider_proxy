@@ -3587,19 +3587,25 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
         drop(guard);
     }
 
-    /// Test-only RAII guard that sets an env var on construction and
-    /// unsets it on drop. Prevents one test from polluting another when
-    /// they exercise environment-driven behavior.
+    /// Serializes these process-environment tests and restores their prior
+    /// value before releasing the lock, including during unwinding.
     struct EnvGuard {
         key: &'static str,
         prior: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
             let prior = std::env::var(key).ok();
             std::env::set_var(key, value);
-            Self { key, prior }
+            Self {
+                key,
+                prior,
+                _lock: lock,
+            }
         }
     }
 
