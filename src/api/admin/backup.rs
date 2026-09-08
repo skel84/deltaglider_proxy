@@ -250,27 +250,6 @@ fn import_fail(
     BackupImportError::new(status, stage, Some(context), Some(detail))
 }
 
-fn config_apply_error_detail(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body).trim().to_string();
-    if text.is_empty() {
-        return "config apply failed without a response body".to_string();
-    }
-
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| {
-            v.get("error")
-                .and_then(|e| e.as_str())
-                .map(str::to_string)
-                .or_else(|| {
-                    v.get("message")
-                        .and_then(|e| e.as_str())
-                        .map(str::to_string)
-                })
-        })
-        .unwrap_or(text)
-}
-
 /// Hex-encoded SHA-256 of a byte slice. Used in three places in this
 /// module (manifest write on export, manifest verify on import) so
 /// it lives at module scope instead of as a closure repeated at each
@@ -1227,20 +1206,21 @@ async fn import_zip_full_backup(
                     "Full-backup import: applying config.yaml"
                 );
                 let req = crate::api::admin::ConfigDocumentRequest { yaml: yaml_str };
-                let State(state_for_apply) = State(state.clone());
-                let resp = crate::api::admin::apply_config_doc(
-                    State(state_for_apply),
-                    headers.clone(),
-                    Json(req),
-                )
-                .await
-                .into_response();
-                let status = resp.status();
+                // Call the apply pipeline DIRECTLY (typed result) — no self-HTTP
+                // round-trip + response-body re-parse (retired the v0.9 TODO).
+                let (status, result) =
+                    crate::api::admin::apply_config_inner(&state, &headers, req).await;
                 if !status.is_success() {
-                    let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
-                        .await
-                        .unwrap_or_default();
-                    let detail = config_apply_error_detail(&body);
+                    // The persist-failure arm (500) carries its detail in
+                    // `warnings`, not `error` — fall back so that message isn't
+                    // lost (the old self-HTTP path surfaced it via the raw body).
+                    let detail = result.error.unwrap_or_else(|| {
+                        if result.warnings.is_empty() {
+                            "config apply failed without a detail".to_string()
+                        } else {
+                            result.warnings.join("; ")
+                        }
+                    });
                     tracing::error!(
                         "Full-backup import: apply config.yaml → HTTP {}: {}",
                         status,
@@ -1895,20 +1875,6 @@ pub struct ImportResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn config_apply_error_detail_prefers_json_error() {
-        let body = br#"{"applied":false,"error":"backend path is not writable"}"#;
-        assert_eq!(
-            config_apply_error_detail(body),
-            "backend path is not writable"
-        );
-    }
-
-    #[test]
-    fn config_apply_error_detail_falls_back_to_text() {
-        assert_eq!(config_apply_error_detail(b"plain failure"), "plain failure");
-    }
 
     #[test]
     fn import_mode_accepts_explicit_scopes() {

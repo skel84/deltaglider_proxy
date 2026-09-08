@@ -128,7 +128,7 @@ Exercise both sides of every condition:
 
 1. Run an allowed request from a matching IP / prefix — expect success.
 2. Run the same request from a non-matching IP (or a wider LIST prefix) — expect `AccessDenied`.
-3. Check **Settings → Diagnostics → Audit**: the denial appears with the user, action, and path.
+3. Check **Settings → Observability → Audit**: the denial appears with the user, action, and path.
 
 ## Related
 

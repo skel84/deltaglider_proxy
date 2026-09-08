@@ -97,6 +97,11 @@
       "order": 70
     },
     {
+      "path": "how-to/view-live-logs",
+      "group": "Guides: deploy & operate",
+      "order": 75
+    },
+    {
       "path": "how-to/trace-requests",
       "group": "Guides: deploy & operate",
       "order": 80

@@ -15,14 +15,13 @@
  * have no dirty state, just live progress + cancel.
  */
 import { useCallback, useMemo, useState } from 'react';
-import { Alert, Button, Dropdown, Progress, Space, Spin, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Dropdown, Space, Spin, Tag, Typography, message } from 'antd';
 import {
   CaretRightOutlined,
   EyeOutlined,
   PauseOutlined,
   PlusOutlined,
   StopOutlined,
-  SyncOutlined,
 } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import type { LifecycleConfig, ReplicationConfig, StorageSectionBody } from '../../adminApi';
@@ -34,18 +33,18 @@ import {
   jobStatusTone,
   kindLabel,
   mergeDraftRules,
-  progressLabel,
   triggerLabel,
 } from '../../jobsView';
 import { qk } from '../../queries/keys';
 import { useJobs } from '../../queries/jobs';
+import TimeAgo from '../TimeAgo';
+import RecordList, { type RecordColumn } from './RecordList';
+import OutcomeMeter from './OutcomeMeter';
 import { useSectionEditor } from '../../useSectionEditor';
 import { useApplyHandler } from '../../useDirtySection';
 import { useCardStyles } from '../shared-styles';
-import { useColors } from '../../ThemeContext';
 import ApplyDialog from '../ApplyDialog';
 import StickyDirtyBar from '../StickyDirtyBar';
-import SectionHeader from '../SectionHeader';
 import ReencryptProposalModal from '../ReencryptProposalModal';
 import MigrateBucketModal from '../MigrateBucketModal';
 import JobDrawer from './JobDrawer';
@@ -87,7 +86,6 @@ const ACTION_META: Record<
 };
 
 export default function JobsPanel({ onSessionExpired }: Props) {
-  const colors = useColors();
   const { cardStyle, inputRadius } = useCardStyles();
   const qc = useQueryClient();
   const [messageApi, msgCtx] = message.useMessage();
@@ -214,7 +212,11 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       } else {
         messageApi.success(ACTION_META[action].done ?? `${ACTION_META[action].label} OK`);
       }
+      // Refresh the list AND this job's runs/failures tables — a resume/run-now
+      // starts a new run that the open drawer's Runs/Failures tabs must show.
       qc.invalidateQueries({ queryKey: qk.jobs.list() });
+      qc.invalidateQueries({ queryKey: qk.jobs.runs(row.id) });
+      qc.invalidateQueries({ queryKey: qk.jobs.failures(row.id) });
     } catch (e) {
       messageApi.error(e instanceof Error ? e.message : `${action} failed`);
     } finally {
@@ -247,16 +249,17 @@ export default function JobsPanel({ onSessionExpired }: Props) {
     },
   };
 
-  const columns = [
+  const columns: RecordColumn<JobDisplayRow>[] = [
     {
-      title: 'Job',
       key: 'job',
-      render: (_: unknown, d: JobDisplayRow) => (
-        <Space size={8}>
+      label: 'Job',
+      track: 'minmax(0,1.4fr)',
+      render: (d) => (
+        <Space size={8} wrap>
           <Tag color={d.row.kind === 'replication' ? 'blue' : d.row.kind === 'lifecycle' ? 'purple' : 'gold'}>
             {kindLabel(d.row.kind)}
           </Tag>
-          <Text strong style={{ fontFamily: 'var(--font-mono)', fontSize: 13, whiteSpace: 'nowrap' }}>
+          <Text strong style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>
             {d.row.name}
           </Text>
           {d.draft && <Tag color="warning">draft — not applied</Tag>}
@@ -265,10 +268,11 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       ),
     },
     {
-      title: 'Scope',
       key: 'scope',
-      render: (_: unknown, d: JobDisplayRow) => (
-        <Text type="secondary" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, wordBreak: 'normal' }}>
+      label: 'Scope',
+      track: 'minmax(0,1.2fr)',
+      render: (d) => (
+        <Text type="secondary" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, wordBreak: 'break-word' }}>
           {d.row.scope.bucket}
           {d.row.scope.prefix ? `/${d.row.scope.prefix}` : ''}
           {d.row.scope.target ? ` → ${d.row.scope.target}` : ''}
@@ -276,41 +280,39 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       ),
     },
     {
-      title: 'Trigger',
       key: 'trigger',
-      width: 110,
-      render: (_: unknown, d: JobDisplayRow) => (
+      label: 'Trigger',
+      track: 'max-content',
+      render: (d) => (
         <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
           {triggerLabel(d.row.trigger)}
         </Text>
       ),
     },
     {
-      title: 'Status',
       key: 'status',
-      width: 220,
-      render: (_: unknown, d: JobDisplayRow) => {
+      label: 'Status',
+      track: 'minmax(0,1.4fr)',
+      render: (d) => {
         const live = d.row.trigger === 'oneoff' && (d.row.status === 'running' || d.row.status === 'cancelling' || d.row.status === 'queued');
         return (
-          <div>
-            <Tag color={jobStatusTone(d.row)}>{jobStatusLabel(d.row)}</Tag>
-            {live && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
-                <Progress
-                  percent={d.row.percent ?? 100}
-                  status="active"
-                  showInfo={d.row.percent != null}
-                  size="small"
-                  strokeColor={colors.ACCENT_AMBER}
-                  style={{ margin: 0, width: 120 }}
-                />
-                <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-                  {progressLabel(d.row)}
-                </Text>
-              </div>
+          <div style={{ minWidth: 0 }}>
+            {live ? (
+              <OutcomeMeter
+                scanned={d.row.progress.processed + d.row.progress.skipped + d.row.progress.failed}
+                copied={d.row.progress.processed}
+                errors={d.row.progress.failed}
+                skipped={d.row.progress.skipped}
+                status={d.row.status}
+                percent={d.row.percent ?? null}
+              />
+            ) : (
+              <Tag color={jobStatusTone(d.row)} style={{ margin: 0 }}>
+                {jobStatusLabel(d.row)}
+              </Tag>
             )}
             {!live && d.row.last_error && (
-              <Text type="danger" style={{ display: 'block', fontSize: 11, maxWidth: 200 }} ellipsis>
+              <Text type="danger" style={{ display: 'block', fontSize: 11, marginTop: 2 }} ellipsis title={d.row.last_error}>
                 {d.row.last_error}
               </Text>
             )}
@@ -319,25 +321,28 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       },
     },
     {
-      title: 'Last run',
       key: 'last',
-      width: 130,
-      render: (_: unknown, d: JobDisplayRow) => {
+      label: 'Last run',
+      track: 'max-content',
+      render: (d) => {
         const ts = d.row.last_run_at ?? d.row.finished_at ?? d.row.started_at;
         return (
-          // wordBreak normal: wrap at the date/time boundary, never mid-digit
-          <Text type="secondary" style={{ fontSize: 12, wordBreak: 'normal' }}>
-            {ts ? new Date(ts * 1000).toLocaleString() : '—'}
+          <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+            <TimeAgo ts={ts} />
           </Text>
         );
       },
     },
     {
-      title: '',
       key: 'actions',
-      width: 200,
-      render: (_: unknown, d: JobDisplayRow) =>
-        d.draft ? null : (
+      label: 'Actions',
+      track: 'max-content',
+      align: 'end',
+      hideLabelOnNarrow: true,
+      render: (d) =>
+        d.draft ? (
+          <span />
+        ) : (
           <Space size={4} onClick={(e) => e.stopPropagation()}>
             {availableActions(d.row).map((a) => (
               <Button
@@ -395,14 +400,14 @@ export default function JobsPanel({ onSessionExpired }: Props) {
       />
 
       <div style={cardStyle}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <SectionHeader
-              icon={<SyncOutlined />}
-              title="Jobs"
-              description={`Everything that runs in the background. ${displayRows.length} job${displayRows.length === 1 ? '' : 's'} — click one for its definition, runs, and failures.`}
-            />
-          </div>
+        {/* Lean toolbar — the page TabHeader already carries the "Jobs" title +
+            description, so this row is just the count + the action (no duplicate
+            heading). Keeps one header per screen and saves vertical space. */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            {displayRows.length} job{displayRows.length === 1 ? '' : 's'} — tap one for definition,
+            runs, and failures.
+          </Text>
           <Dropdown menu={newJobMenu} trigger={['click']}>
             <Button type="primary" icon={<PlusOutlined />}>
               New job
@@ -418,22 +423,15 @@ export default function JobsPanel({ onSessionExpired }: Props) {
             message={jobsQuery.error instanceof Error ? jobsQuery.error.message : 'Failed to load jobs'}
           />
         ) : (
-          <Table<JobDisplayRow>
-            style={{ marginTop: 16 }}
-            dataSource={displayRows}
-            columns={columns}
-            rowKey={(d) => d.row.id}
-            pagination={false}
-            size="small"
-            onRow={(d) => ({
-              onClick: () => setDrawerJobId(d.row.id),
-              style: { cursor: 'pointer' },
-            })}
-            locale={{
-              emptyText:
-                'No jobs yet. Use "New job" to add a replication or lifecycle rule, or start a one-off re-encrypt or migrate job.',
-            }}
-          />
+          <div style={{ marginTop: 16 }}>
+            <RecordList
+              rows={displayRows}
+              columns={columns}
+              rowKey={(d) => d.row.id}
+              onRowClick={(d) => setDrawerJobId(d.row.id)}
+              empty='No jobs yet. Use "New job" to add a replication or lifecycle rule, or start a one-off re-encrypt or migrate job.'
+            />
+          </div>
         )}
       </div>
 

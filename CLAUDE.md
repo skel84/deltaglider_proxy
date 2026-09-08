@@ -69,9 +69,10 @@ HTTP request (axum Router; cross-cutting layers: TraceLayer, body limit, timeout
       status.rs              /_/health, /_/stats
   → deltaglider/engine/      Orchestration split into submodules:
       mod.rs                 Core engine: route, compress, cache, metadata resolution, RetrieveResponse, validated_key
-      store.rs               PUT pipeline: delta encoding, migration, reference management
-      retrieve.rs            GET pipeline: delta reconstruction, streaming, range requests
-  → storage/traits.rs       StorageBackend trait (async_trait, object-safe)
+      store.rs               PUT pipeline: delta encoding, migration, reference management; `store_spooled_delta` (streaming PUT for objects > spool threshold)
+      retrieve.rs            GET pipeline: delta reconstruction, streaming, range requests; `reconstruct_delta_to_spool` (streaming GET)
+  → deltaglider/spool.rs    Quota'd temp space for streaming codec ops (SpoolDir byte-budget semaphore; `acquire_pair` for the deadlock-safe ref+out reservation; age-based startup orphan sweep). DGP_SPOOL_DIR/`_MAX_BYTES`/`_THRESHOLD_BYTES`/`_ACQUIRE_TIMEOUT_SECS`.
+  → storage/traits.rs       StorageBackend trait (async_trait, object-safe). `get_reference_to_file`/`put_reference_from_file` materialise the reference to/from a local file WITHOUT heap-loading it (filesystem hardlinks, S3 streams) — the bounded-memory backbone of the streaming-delta paths.
   → storage/filesystem.rs   Local filesystem impl (xattr metadata via xattr_meta.rs, list_objects_delegated)
   → storage/s3.rs           AWS S3/MinIO impl (S3 user metadata headers, S3Op enum, `classify_s3_error` + `classify_get_error` pure fns with unit-test coverage)
   → storage/encrypting.rs   At-rest encryption wrapper backend (per-backend AES key, dg-encryption-key-id metadata)
@@ -186,6 +187,48 @@ IAM users have ABAC permissions: `{ actions: ["read", "write", "delete", "list",
 
 Key files: `src/iam/` (types, permissions, middleware, keygen, declarative reconciler, `external_auth/` OAuth/OIDC; `bump_iam_version`/`current_iam_version` + `GET /_/api/admin/iam/version` power the deterministic rebuild barrier used by tests), `src/config_db/` (SQLCipher CRUD split into users/groups/auth_providers/declarative + `classify_sqlite_error` in mod.rs), `src/config_db_sync.rs` (S3 sync + `reopen_and_rebuild_iam`), `src/api/admin/` (auth, users CRUD, config, groups, external_auth, backup, scanner, audit, plus replication / lifecycle / event_outbox / backends / savings panels; `with_config_db()` in `mod.rs` wraps the "lock DB → run closure → log-and-500" boilerplate; `external_auth.rs` hosts `validate_mapping_rule` + the `EXT_AUTH_VERSION` counter), `src/api/admin/config/{document_level,field_level,section_level,password,trace}.rs` (section-level uses RFC 7396 merge-patch; `mod.rs` hosts `POST /api/admin/config/sync-now` — operator affordance for forcing an immediate pull from the sync bucket).
 
+## Multi-instance / HA contract (READ before deploying behind a load balancer)
+
+DGP is **single-instance production-ready**. Behind a load balancer it is
+**multi-instance for SOME planes only** — do NOT assume true round-robin HA. Run
+N instances behind a **sticky-session** LB, not naive round-robin, until the
+single-instance planes below are addressed.
+
+**Shared across instances (genuinely HA):**
+- IAM / OAuth providers / mapping rules — the encrypted SQLCipher DB synced via
+  `DGP_CONFIG_SYNC_BUCKET` (ETag-poll every 5 min → eventually consistent, ≤5min lag).
+- Background-job leadership — replication/lifecycle/maintenance/parity leases via
+  `config_db/job_store.rs` (so jobs don't double-run **once the lease row is
+  visible**; note the same 5-min sync lag applies to lease visibility).
+
+**Instance-LOCAL (NOT shared — break or degrade under non-sticky round-robin):**
+- **Admin/browser sessions** (`session.rs`, in-memory) — a cookie minted on node A
+  is invalid on B (intermittent 401s). Sticky sessions required for the admin GUI.
+- **Multipart uploads** (`multipart.rs`, in-memory) — UploadPart/Complete must hit
+  the SAME node as CreateMultipartUpload (else `NoSuchUpload`; the error message
+  now says so). Sticky-route multipart.
+- **Metadata cache** (`metadata_cache.rs`, 10-min TTL, local invalidate) — a
+  DELETE/PUT on A leaves B serving stale existence/size for up to 10 min.
+- **Rate limiter** (`rate_limiter.rs`, per-instance) — effective limit is N× the
+  configured cap across N nodes.
+- **Maintenance write-gate busy-set**, **delta-reference RMW lock**
+  (`engine/mod.rs` `prefix_locks`, in-process) — concurrent same-prefix PUTs on
+  two nodes can corrupt `reference.bin`. Single-writer per deltaspace assumed.
+
+**Hard prerequisites for any multi-instance deployment:**
+- **All instances MUST share the same `DGP_BOOTSTRAP_PASSWORD_HASH`** — it
+  encrypts the synced SQLCipher DB; a mismatch makes the synced DB unreadable on
+  the other node (`config_db_mismatch` then locks the S3 API + blocks sync).
+- The **filesystem** storage backend is per-node local disk — NOT shareable across
+  instances. Multi-instance needs a shared backend (S3/MinIO) or per-node buckets.
+- Config-apply on one instance does NOT propagate to others except via the IAM/DB
+  sync; YAML config itself is per-instance.
+
+See `docs/plan/architecture-ha-audit-2026-06-28.md` for the full analysis and the
+roadmap (audit Tiers A→C) toward true round-robin HA. `/_/health` is liveness-only
+(fast, no I/O); `/_/ready` does a real backend + config-DB probe (503 when not
+ready) — point LB readiness checks at `/_/ready`.
+
 ## Frontend (demo/s3-browser/ui)
 
 React 18 + TypeScript + Ant Design 6 + Recharts. Path-based routing (`/_/browse`, `/_/upload`, `/_/metrics`, `/_/docs/configuration`, `/_/admin/users`). Custom `usePathRouter` hook (no react-router dependency). `NavigationContext` provides `navigate()` and `subPath` to child components. Embedded in the Rust binary via `rust-embed` and served under `/_/` on the same port as the S3 API (e.g., `http://localhost:9000/_/`). The `/_/` prefix is safe because `_` is not a valid S3 bucket name character. Single-port architecture: no separate UI port.
@@ -251,3 +294,7 @@ Anti-patterns we've fought recently — don't reintroduce them:
 ## Architecture Decisions (DO NOT CHANGE)
 
 - **xdelta3 CLI subprocess**: The codec shells out to `xdelta3` via `std::process::Command`. This is intentional and non-negotiable. Do NOT replace with FFI bindings, Rust crates, or in-process libraries. The CLI approach ensures exact compatibility with deltas created by the original DeltaGlider Python toolchain, avoids linking C code into the binary, and keeps the codec trivially debuggable (`xdelta3` can be run standalone on any delta file). The subprocess overhead is acceptable for our workload.
+
+- **Streaming codec (bounded memory for any object size)**: alongside the buffered `encode`/`decode` (`&[u8] → Vec<u8>`, small-object path), the codec has streaming entry points `encode_from_reader` / `decode_to_writer` (source = caller-owned seekable file, input streamed via stdin, output to a `Write` sink). Driven by `pipe_streaming` (bounded 256KiB chunks, not `read_to_end`) with a STALL-based watchdog (`ProgressClock` — kill on no-progress for `DGP_CODEC_STALL_SECS`, plus an absolute ceiling), NOT the buffered path's wall-clock timeout. Large delta GETs decode to a spool file then stream it (integrity verified BEFORE the first byte); large PUTs encode from a spool with cap-and-abort ratio decision. Memory is bounded by the pump (xdelta3 mmaps the source — measured 73MB RSS on a 2.5GB decode), never the object size. See `docs/plan/streaming-delta-any-size.md`.
+
+  **Streaming-subprocess review checklist** (these are the failure modes an adversarial x-ray of this code found — check them on any change here): (1) STALL watchdog must tick on BOTH stdin writes and stdout reads (a sparse-output encode false-stalls otherwise); (2) spool reservations that need two files at once use `acquire_pair` (two sequential `acquire`s deadlock when 2×size > budget); (3) any path that holds the per-deltaspace prefix lock must DROP it before calling another `store_*` method that re-acquires it (re-entrant deadlock); (4) streaming output must be CAPPED at the expected size (the buffered path's decompression-bomb guard); (5) the SHA-256 integrity gate must run BEFORE the first response byte ships (decode-to-spool, not pipe-to-client); (6) every `?`/early-return must release the spool budget + codec permit (RAII `Spool`/permit drop covers this — keep it).

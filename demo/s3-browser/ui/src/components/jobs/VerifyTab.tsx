@@ -9,7 +9,8 @@
  * Owns its own state via a useMutation (no poll, no auto-run on mount); it does
  * NOT touch the editable Definition form.
  */
-import { Alert, Button, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Tag, Typography } from 'antd';
+import RecordList from './RecordList';
 import {
   CaretRightOutlined,
   CheckOutlined,
@@ -17,9 +18,14 @@ import {
   SafetyCertificateOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
-import type { FindingKind, ParityFinding, ParityOutcome, Verifier } from '../../adminApi';
+import type { ParityFinding, ParityOutcome, Verifier } from '../../adminApi';
 import { conflictPolicyLabel, fixActionMeta, parityKindMeta, rerunVerdictMeta } from '../../jobsView';
-import { useRunReplicationNow, useVerifyParity } from '../../queries/jobs';
+import {
+  useCancelVerify,
+  useParityStatus,
+  useRunReplicationNow,
+  useStartVerify,
+} from '../../queries/jobs';
 import { useColors } from '../../ThemeContext';
 import { timeAgo } from '../../utils';
 
@@ -54,17 +60,83 @@ function toneFor(o: ParityOutcome): Tone {
 
 export default function VerifyTab({ ruleName }: Props) {
   const c = useColors();
-  const verify = useVerifyParity();
+  // Server-side status: instant cached verdict on mount (survives navigation +
+  // restart), polls while a scan runs. `start` POSTs to kick one off.
+  const status = useParityStatus(ruleName);
+  const start = useStartVerify(ruleName);
+  const cancel = useCancelVerify(ruleName);
   const runNow = useRunReplicationNow();
-  const data = verify.data;
 
-  const run = () => verify.mutate(ruleName);
+  const s = status.data;
+  const cancelling = s?.status === 'cancelling' || cancel.isPending;
+  const running = s?.status === 'running' || cancelling || start.isPending;
+  const outcome = s?.outcome;
+
+  const run = () => start.mutate();
+  const onCancel = () => cancel.mutate();
   // The one executable per-finding fix: run the rule, then re-verify.
-  const onRunNow = () =>
-    runNow.mutate(ruleName, { onSuccess: () => verify.mutate(ruleName) });
+  const onRunNow = () => runNow.mutate(ruleName, { onSuccess: () => start.mutate() });
 
-  // ── idle ──────────────────────────────────────────────────────────────────
-  if (verify.isIdle && !data) {
+  // ── first load (no server state yet) ───────────────────────────────────────
+  if (status.isLoading) {
+    return <LoadingBlock c={c} label="Loading verification status…" />;
+  }
+
+  // ── running with NO prior result → live progress + cancel ──────────────────
+  if (running && !outcome) {
+    return (
+      <LoadingBlock
+        c={c}
+        label={cancelling ? 'Cancelling…' : 'Comparing source and destination…'}
+        scanned={s?.progress_scanned}
+        onCancel={cancelling ? undefined : onCancel}
+      />
+    );
+  }
+
+  // ── cancelled (and no prior result to show) ───────────────────────────────
+  if (s?.status === 'cancelled' && !outcome) {
+    return (
+      <div style={{ padding: '8px 4px' }}>
+        <Alert
+          type="info"
+          showIcon
+          message="Verification cancelled"
+          description="The parity audit was cancelled before it finished."
+          style={{ borderRadius: 8, marginBottom: 16 }}
+        />
+        <Button
+          type="primary"
+          icon={<SafetyCertificateOutlined />}
+          onClick={run}
+          loading={start.isPending}
+        >
+          Run verification
+        </Button>
+      </div>
+    );
+  }
+
+  // ── failed (and no prior result to show) ───────────────────────────────────
+  if (s?.status === 'failed' && !outcome) {
+    return (
+      <div style={{ padding: '8px 4px' }}>
+        <Alert
+          type="error"
+          showIcon
+          message="Verification failed"
+          description={s.error || 'The parity audit could not complete.'}
+          style={{ borderRadius: 8, marginBottom: 16 }}
+        />
+        <Button icon={<ReloadOutlined />} onClick={run} loading={start.isPending}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+
+  // ── idle, never run ────────────────────────────────────────────────────────
+  if (!outcome) {
     return (
       <div style={{ padding: '8px 4px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
@@ -77,44 +149,29 @@ export default function VerifyTab({ ruleName }: Props) {
           Verify that every object in the source exists on the destination with a matching checksum.
         </Text>
         <Text type="secondary" style={{ display: 'block', fontSize: 12.5, marginBottom: 18 }}>
-          Compares logical SHA-256 + size from metadata — no downloads.
+          Compares logical SHA-256 + size from metadata — no downloads. Runs in the background;
+          the result is saved, so you can leave this page and come back.
         </Text>
-        <Button type="primary" icon={<SafetyCertificateOutlined />} onClick={run}>
+        <Button
+          type="primary"
+          icon={<SafetyCertificateOutlined />}
+          onClick={run}
+          loading={start.isPending}
+        >
           Run verification
         </Button>
       </div>
     );
   }
 
-  // ── loading ───────────────────────────────────────────────────────────────
-  if (verify.isPending) {
-    return <LoadingBlock c={c} />;
-  }
-
-  // ── error ─────────────────────────────────────────────────────────────────
-  if (verify.isError) {
-    return (
-      <div style={{ padding: '8px 4px' }}>
-        <Alert
-          type="error"
-          showIcon
-          message="Verification failed"
-          description={verify.error?.message || 'The parity audit could not complete.'}
-          style={{ borderRadius: 8, marginBottom: 16 }}
-        />
-        <Button icon={<ReloadOutlined />} onClick={run}>
-          Retry
-        </Button>
-      </div>
-    );
-  }
-
-  // ── result ────────────────────────────────────────────────────────────────
-  if (!data) return <LoadingBlock c={c} />;
+  // ── result (cached verdict; may be re-verifying in the background) ─────────
   return (
     <ParityResult
-      outcome={data}
+      outcome={outcome}
+      reverifying={running}
+      reverifyScanned={running ? s?.progress_scanned : undefined}
       onReverify={run}
+      onCancelReverify={cancelling ? undefined : onCancel}
       onRunNow={onRunNow}
       runNowPending={runNow.isPending}
       c={c}
@@ -122,9 +179,18 @@ export default function VerifyTab({ ruleName }: Props) {
   );
 }
 
-function LoadingBlock({ c }: { c: ReturnType<typeof useColors> }) {
-  // LoadingState chrome (StatePlaceholders exports only LoadingState); the import
-  // would create a cycle of generic spinners, so reuse its visual contract inline.
+function LoadingBlock({
+  c,
+  label = 'Comparing source and destination…',
+  scanned,
+  onCancel,
+}: {
+  c: ReturnType<typeof useColors>;
+  label?: string;
+  scanned?: number;
+  /** When provided, shows a Cancel button (a running audit). */
+  onCancel?: () => void;
+}) {
   return (
     <div
       style={{
@@ -138,8 +204,21 @@ function LoadingBlock({ c }: { c: ReturnType<typeof useColors> }) {
     >
       <span className="dg-verify-spinner" aria-hidden />
       <Text type="secondary" style={{ fontSize: 12.5 }}>
-        Comparing source and destination…
+        {label}
       </Text>
+      {scanned != null && scanned > 0 && (
+        <Text type="secondary" style={{ fontSize: 12, color: c.TEXT_MUTED, fontVariantNumeric: 'tabular-nums' }}>
+          {scanned.toLocaleString()} objects scanned
+        </Text>
+      )}
+      <Text type="secondary" style={{ fontSize: 11.5, color: c.TEXT_MUTED }}>
+        Runs in the background — safe to navigate away.
+      </Text>
+      {onCancel && (
+        <Button size="small" onClick={onCancel} style={{ marginTop: 4 }}>
+          Cancel
+        </Button>
+      )}
       <style>{`
         .dg-verify-spinner {
           width: 28px; height: 28px; border-radius: 50%;
@@ -157,13 +236,22 @@ function LoadingBlock({ c }: { c: ReturnType<typeof useColors> }) {
 
 export function ParityResult({
   outcome,
+  reverifying,
+  reverifyScanned,
   onReverify,
+  onCancelReverify,
   onRunNow,
   runNowPending,
   c,
 }: {
   outcome: ParityOutcome;
+  /** A background re-verify is running — show a subtle badge + spin the button. */
+  reverifying?: boolean;
+  /** Live objects-scanned of the in-flight re-verify (for the badge). */
+  reverifyScanned?: number;
   onReverify: () => void;
+  /** Cancel the in-flight re-verify. Omitted (or while cancelling) = no button. */
+  onCancelReverify?: () => void;
   /** Executes the rule's run-now (the only executable fix). Omitted = disabled CTA. */
   onRunNow?: () => void;
   runNowPending?: boolean;
@@ -301,10 +389,20 @@ export function ParityResult({
           Checked {timeAgo(scannedDate)} · logical SHA-256 + size, from metadata
         </div>
 
-        <div style={{ marginTop: 18 }}>
-          <Button icon={<ReloadOutlined />} onClick={onReverify}>
-            {inSync ? 'Re-verify' : 'Verify again'}
+        <div style={{ marginTop: 18, display: 'flex', gap: 8, justifyContent: 'center', alignItems: 'center' }}>
+          <Button icon={<ReloadOutlined />} onClick={onReverify} loading={reverifying}>
+            {reverifying ? 'Re-verifying…' : inSync ? 'Re-verify' : 'Verify again'}
           </Button>
+          {reverifying && onCancelReverify && (
+            <Button size="small" onClick={onCancelReverify}>
+              Cancel
+            </Button>
+          )}
+          {reverifying && reverifyScanned != null && reverifyScanned > 0 && (
+            <Text type="secondary" style={{ fontSize: 12, color: c.TEXT_MUTED, fontVariantNumeric: 'tabular-nums' }}>
+              {reverifyScanned.toLocaleString()} scanned
+            </Text>
+          )}
         </div>
       </div>
 
@@ -452,51 +550,41 @@ function FindingsTable({
       <Text strong style={{ display: 'block', fontSize: 13.5, marginBottom: 8 }}>
         Differences
       </Text>
-      <Table<ParityFinding>
-        dataSource={rows}
+      <RecordList<ParityFinding>
+        rows={rows}
         rowKey={(f) => `${f.kind}:${f.key}`}
-        size="small"
-        pagination={false}
-        locale={{ emptyText: 'No sampled differences' }}
+        empty="No sampled differences"
         columns={[
           {
-            title: 'Object',
-            render: (_: unknown, f) => (
-              <Text
-                style={{
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 12,
-                  display: 'inline-block',
-                  maxWidth: 220,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  verticalAlign: 'bottom',
-                }}
-                title={f.key}
-              >
+            key: 'object',
+            label: 'Object',
+            track: 'minmax(0,2fr)',
+            render: (f) => (
+              <span className="dg-fail-text" style={{ fontFamily: 'var(--font-mono)' }} title={f.key}>
                 {f.key}
-              </Text>
+              </span>
             ),
           },
           {
-            title: 'Issue',
-            width: 140,
-            render: (_: unknown, f) => {
-              const kind: FindingKind = f.kind;
-              const meta = parityKindMeta(kind);
+            key: 'issue',
+            label: 'Issue',
+            track: 'max-content',
+            render: (f) => {
+              const meta = parityKindMeta(f.kind);
               return <Tag color={meta.color}>{meta.label}</Tag>;
             },
           },
           {
-            title: 'Why',
-            width: 250,
-            render: (_: unknown, f) => <WhyCell finding={f} c={c} />,
+            key: 'why',
+            label: 'Why',
+            track: 'minmax(0,1.5fr)',
+            render: (f) => <WhyCell finding={f} c={c} />,
           },
           {
-            title: 'Fix',
-            width: 230,
-            render: (_: unknown, f) => (
+            key: 'fix',
+            label: 'Fix',
+            track: 'minmax(0,1.5fr)',
+            render: (f) => (
               <FixCell finding={f} c={c} onRunNow={onRunNow} runNowPending={runNowPending} />
             ),
           },

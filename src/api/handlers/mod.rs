@@ -47,7 +47,10 @@ pub(crate) fn audit_log_s3(
     crate::audit::audit_log(action, user, "", headers, bucket, path);
 }
 
-pub use status::{get_stats, head_root, health_check, HealthResponse, StatsQuery, StatsResponse};
+pub use status::{
+    get_stats, head_root, health_check, readiness_check, HealthResponse, ReadinessResponse,
+    StatsQuery, StatsResponse,
+};
 
 // Re-export for use by metrics module
 pub(crate) use status::get_peak_rss_bytes;
@@ -58,6 +61,10 @@ pub struct AppState {
     pub multipart: Arc<MultipartStore>,
     pub metrics: Arc<Metrics>,
     pub usage_scanner: Arc<crate::usage_scanner::UsageScanner>,
+    /// Per-instance running bucket-size counter (O(1) reads; None in open-mode
+    /// dev when the usage DB couldn't be opened). Re-attached to the engine on
+    /// every rebuild so a config reload never drops the counter.
+    pub bucket_usage: Option<Arc<crate::bucket_usage::BucketUsage>>,
     pub config_db: Option<Arc<tokio::sync::Mutex<ConfigDb>>>,
     /// Replay cache for form-POST policy signatures. Keyed on the
     /// signature itself; value carries the policy's expiration `Instant`

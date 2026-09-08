@@ -21,6 +21,7 @@ import BucketsPanel from './BucketsPanel';
 import SetupWizard from './SetupWizard';
 import TracePanel from './TracePanel';
 import AuditLogPanel from './AuditLogPanel';
+import LogsPanel from './LogsPanel';
 import DeltaEfficiencyPanel from './DeltaEfficiencyPanel';
 import EventOutboxPanel from './EventOutboxPanel';
 import CommandPalette, {
@@ -474,6 +475,14 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         </>
       );
     }
+    if (adminPath === 'diagnostics/logs') {
+      return (
+        <>
+          {header}
+          <LogsPanel onSessionExpired={onSessionExpired} />
+        </>
+      );
+    }
     if (adminPath === 'diagnostics/delta-efficiency') {
       return (
         <>
@@ -890,6 +899,9 @@ export default function AdminPage({ onBack, onSessionExpired, subPath, accountMe
         <div
           style={{
             flex: 1,
+            // min-width:0 lets the flex pane shrink below content's intrinsic
+            // width — without it, wide rows force horizontal overflow on mobile.
+            minWidth: 0,
             overflow: 'auto',
           }}
         >

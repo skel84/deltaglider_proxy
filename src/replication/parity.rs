@@ -6,10 +6,12 @@
 //! an explicit verdict instead of inferring it from `status=succeeded`.
 //!
 //! The work splits into a PURE diff kernel (`compare_pair` / `diff_parity`)
-//! and an async driver (`parity_audit`) that lists both sides via the same
-//! `Pager` + `engine.list_objects(..., true)` the workers use. Parity is a
-//! metadata compare — `FileMetadata.file_sha256` is the LOGICAL hash even
-//! for delta-stored objects, so no downloads or reconstruction happen.
+//! and an async driver (`parity_audit`) that LITE-lists both sides (no
+//! per-object HEAD), then resolves each delta/eligible object's LOGICAL
+//! metadata from a persistent per-object cache (`replication_parity_objects`),
+//! HEADing only cache misses + changed objects. Parity is a metadata compare —
+//! `FileMetadata.file_sha256` is the LOGICAL hash even for delta-stored objects,
+//! so no downloads or reconstruction happen. A re-verify is HEAD-free.
 //!
 //! The one correctness trap: `FileMetadata::fallback()` leaves
 //! `file_sha256` empty for any object NOT written through this proxy (raw
@@ -20,7 +22,7 @@ use crate::config_db::ConfigDb;
 use crate::config_sections::{ConflictPolicy, ReplicationRule};
 use crate::deltaglider::DynEngine;
 use crate::types::FileMetadata;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tracing::warn;
 
@@ -29,7 +31,72 @@ use super::planner::{
     compile_rule_globs, normalize_prefix, rewrite_key, should_replicate, Decision,
 };
 use super::remediation::{analyze_finding, FindingFacts, Remediation};
-use super::state_store::ObjectFailure;
+use super::state_store::{ObjectFailure, ParityCacheEntry, ParitySide};
+
+/// Live-progress + cancel control for a background parity audit. The driver
+/// reports `objects scanned so far` into the parity row (throttled — every
+/// [`PROGRESS_EVERY_N_PAGES`] pages), and checks for cancellation. Cancel uses
+/// TWO signals: a fast in-process `AtomicBool` (no lock, checked every page)
+/// AND the durable `cancelling` DB row (checked at phase boundaries — covers a
+/// cancel from ANOTHER instance / after a restart, where the in-process flag is
+/// absent). Passing `None` runs without progress/cancel (no-DB fallback path).
+pub struct ParityProgress<'a> {
+    pub db: &'a tokio::sync::Mutex<ConfigDb>,
+    pub rule: &'a str,
+    /// In-process cancel flag set by this instance's `verify_cancel`.
+    pub cancel: &'a std::sync::atomic::AtomicBool,
+}
+
+/// Write progress to the DB once every N pages (not every page) — the global
+/// ConfigDb mutex is shared with the whole IAM/admin path, and the count is a
+/// spinner-grade estimate. `ponytail`: fixed N; lower it if live progress ever
+/// needs to be finer-grained.
+const PROGRESS_EVERY_N_PAGES: usize = 8;
+
+/// Sentinel error string an audit returns when cancelled, so the caller can
+/// settle the row as `cancelled` rather than `failed`. `ponytail`: a sentinel
+/// over a custom error enum — the audit's error channel is already `String`,
+/// and cancel is the single case that needs distinguishing.
+pub const CANCELLED: &str = "__parity_cancelled__";
+
+/// Monotonic counter bumped each time a background parity audit SETTLES
+/// (done/failed/cancelled). Mirrors `IAM_VERSION` — lets integration tests poll
+/// `GET …/jobs/parity-version` for a deterministic completion barrier instead of
+/// sleeping. Process-local (one per proxy), matching one-process-per-TestServer.
+static PARITY_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bump on settle. Call AFTER the terminal status row is written so a poller
+/// that sees the new version also sees the settled row.
+pub fn bump_parity_version() -> u64 {
+    PARITY_VERSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// Current settle count.
+pub fn current_parity_version() -> u64 {
+    PARITY_VERSION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+impl ParityProgress<'_> {
+    /// Fast in-process cancel check (no lock) — every page.
+    fn cancelled_local(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Cancel check at phase boundaries OUTSIDE the per-page loop (the
+    /// resolve/HEAD-burst tail can be slow on a cold cache). Checks the
+    /// in-process flag first (cheap), then the durable `cancelling` row (covers
+    /// a cancel from another instance / after a restart).
+    async fn check_cancel(&self) -> Result<(), String> {
+        if self.cancelled_local() {
+            return Err(CANCELLED.to_string());
+        }
+        let db = self.db.lock().await;
+        if matches!(db.parity_status(self.rule).ok().flatten(), Some(s) if s == "cancelling") {
+            return Err(CANCELLED.to_string());
+        }
+        Ok(())
+    }
+}
 
 /// Per-category sample cap surfaced to the UI (exact counts stay unbounded).
 pub const SAMPLE_CAP: usize = 100;
@@ -92,7 +159,7 @@ impl ObjState {
 }
 
 /// Which evidence proved a `Match` (or failed to, for a mismatch).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verifier {
     /// Strongest: logical SHA-256 + size compared on both sides.
@@ -104,7 +171,7 @@ pub enum Verifier {
 }
 
 /// The classification of one key across source and destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     Match,
@@ -114,7 +181,7 @@ pub enum FindingKind {
 }
 
 /// One per-key finding, carried in the bounded sample vecs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParityFinding {
     pub key: String,
     pub kind: FindingKind,
@@ -432,7 +499,7 @@ pub fn fold_actionable(diff: &ParityDiff) -> ActionableSummary {
 /// Sample-scoped tally of remediation verdicts across the annotated findings.
 /// Bounded by the per-category sample caps — NOT the exact diff totals (those
 /// stay in `ParityOutcome`'s count fields).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionableSummary {
     /// Re-run will fix it (`RerunVerdict::Yes`).
     pub rerun_fixes: u64,
@@ -447,7 +514,7 @@ pub struct ActionableSummary {
 }
 
 /// The serialized audit verdict consumed by the frontend.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParityOutcome {
     pub rule_name: String,
     pub source_bucket: String,
@@ -480,6 +547,202 @@ fn is_skippable_key(key: &str) -> bool {
     key.ends_with('/') || key.starts_with(".deltaglider/") || key.contains("/.deltaglider/")
 }
 
+/// True when the LITE list entry can't be trusted for parity and a logical
+/// resolution (cache or HEAD) is needed: a delta object (lite carries the
+/// delta-blob size/etag, not logical) or a delta-ELIGIBLE key (it MIGHT be
+/// delta-stored, so the lite size could be the delta size). A non-eligible
+/// passthrough object (a `.sha1` sidecar, an image) is stored verbatim — the
+/// lite size/etag ARE the truth, so no resolution is needed (the common case).
+fn needs_logical_resolution(engine: &DynEngine, key: &str, meta: &FileMetadata) -> bool {
+    meta.is_delta() || engine.is_delta_eligible_key(key)
+}
+
+/// Overlay logical (sha256, size, etag) onto the `ObjState` in `map` for `key`.
+fn apply_logical(map: &mut BTreeMap<String, ObjState>, map_key: &str, e: &ParityCacheEntry) {
+    if let Some(st) = map.get_mut(map_key) {
+        st.sha256 = e.sha256.clone();
+        st.size = e.size;
+        st.etag = e.etag.clone();
+        st.multipart_parts = e
+            .etag
+            .as_deref()
+            .and_then(|s| s.rsplit_once('-'))
+            .and_then(|(_, n)| n.parse::<u32>().ok());
+    }
+}
+
+/// A logical-metadata cache entry from a fresh HEAD. `stored_etag` is the
+/// CONTENT-VERSION token — the etag of the STORED blob (delta-blob for a delta
+/// object, the object etag for passthrough), captured from the lite list at
+/// resolve time and stamped here so the next verify can detect an overwrite.
+fn cache_entry_from_meta(m: &FileMetadata, stored_etag: Option<String>) -> ParityCacheEntry {
+    let sha256 = (!m.file_sha256.is_empty()).then(|| m.file_sha256.clone());
+    let etag = m
+        .multipart_etag
+        .clone()
+        .or_else(|| (!m.md5.is_empty()).then(|| m.md5.clone()));
+    ParityCacheEntry {
+        sha256,
+        size: m.file_size,
+        etag,
+        stored_etag,
+    }
+}
+
+/// The STORED-blob etag the lite list recorded for `map_key` (the content-version
+/// token). Read from the ObjState BEFORE any logical overlay.
+fn lite_stored_etag(map: &BTreeMap<String, ObjState>, map_key: &str) -> Option<String> {
+    map.get(map_key).and_then(|st| st.etag.clone())
+}
+
+/// A cache hit is only valid when the stored blob hasn't changed since it was
+/// cached: the cached `stored_etag` must equal the current lite `stored_etag`.
+/// A `None`/`None` pair (no etag either side) is treated as a MISS — we can't
+/// prove the object is unchanged, so we re-read rather than risk a stale verdict.
+fn cache_hit_fresh(cached: &ParityCacheEntry, lite_stored_etag: &Option<String>) -> bool {
+    matches!((&cached.stored_etag, lite_stored_etag), (Some(a), Some(b)) if a == b)
+}
+
+/// Resolve logical metadata for SOURCE keys queued for resolution: parity cache
+/// first (HEAD-free, but ONLY when the stored-etag still matches), then a bounded
+/// HEAD burst for the misses + the changed objects, persisting fresh results so
+/// the next verify is HEAD-free. `source` is keyed by the dest-namespace key.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_logical(
+    engine: &DynEngine,
+    rule: &ReplicationRule,
+    bucket: &str,
+    src_prefix: &str,
+    dst_prefix: &str,
+    raw_keys: &[String],
+    source: &mut BTreeMap<String, ObjState>,
+    failures: Option<&tokio::sync::Mutex<ConfigDb>>,
+) {
+    if raw_keys.is_empty() {
+        return;
+    }
+    let dest_keys: Vec<String> = raw_keys
+        .iter()
+        .filter_map(|k| rewrite_key(src_prefix, dst_prefix, k).ok())
+        .collect();
+    let cached = cache_get(failures, &rule.name, ParitySide::Source, &dest_keys).await;
+    // Trust a cache hit ONLY if the stored blob is unchanged; else HEAD it.
+    let mut miss_raw: Vec<&String> = Vec::new();
+    for raw in raw_keys {
+        let Ok(dk) = rewrite_key(src_prefix, dst_prefix, raw) else {
+            continue;
+        };
+        let lite = lite_stored_etag(source, &dk);
+        match cached.get(&dk) {
+            Some(e) if cache_hit_fresh(e, &lite) => apply_logical(source, &dk, e),
+            _ => miss_raw.push(raw),
+        }
+    }
+    let fresh = head_burst(engine, bucket, &miss_raw).await;
+    let mut to_cache: Vec<(String, ParityCacheEntry)> = Vec::new();
+    for (raw, meta) in fresh {
+        let Ok(dk) = rewrite_key(src_prefix, dst_prefix, &raw) else {
+            continue;
+        };
+        let stored = lite_stored_etag(source, &dk);
+        let e = cache_entry_from_meta(&meta, stored);
+        apply_logical(source, &dk, &e);
+        to_cache.push((dk, e));
+    }
+    cache_put(failures, &rule.name, ParitySide::Source, &to_cache).await;
+}
+
+/// Dest-side logical resolution: dest is keyed by its own raw key (== cache key).
+async fn resolve_logical_dest(
+    engine: &DynEngine,
+    rule: &ReplicationRule,
+    bucket: &str,
+    raw_keys: &[String],
+    dest: &mut BTreeMap<String, ObjState>,
+    failures: Option<&tokio::sync::Mutex<ConfigDb>>,
+) {
+    if raw_keys.is_empty() {
+        return;
+    }
+    let keys: Vec<String> = raw_keys.to_vec();
+    let cached = cache_get(failures, &rule.name, ParitySide::Dest, &keys).await;
+    let mut miss: Vec<&String> = Vec::new();
+    for k in raw_keys {
+        let lite = lite_stored_etag(dest, k);
+        match cached.get(k) {
+            Some(e) if cache_hit_fresh(e, &lite) => apply_logical(dest, k, e),
+            _ => miss.push(k),
+        }
+    }
+    let fresh = head_burst(engine, bucket, &miss).await;
+    let mut to_cache: Vec<(String, ParityCacheEntry)> = Vec::new();
+    for (k, meta) in fresh {
+        let stored = lite_stored_etag(dest, &k);
+        let e = cache_entry_from_meta(&meta, stored);
+        apply_logical(dest, &k, &e);
+        to_cache.push((k, e));
+    }
+    cache_put(failures, &rule.name, ParitySide::Dest, &to_cache).await;
+}
+
+/// Bounded-concurrent HEAD burst (the cache-miss path). Reuses the engine's
+/// per-object `head`; missing objects (raced deletes) are simply dropped.
+async fn head_burst(
+    engine: &DynEngine,
+    bucket: &str,
+    keys: &[&String],
+) -> Vec<(String, FileMetadata)> {
+    use futures::stream::StreamExt;
+    const HEAD_CONCURRENCY: usize = 50;
+    // Own the keys up front (avoids a `&&String` higher-ranked-lifetime tangle
+    // in the stream closure that propagates out as a non-Send future).
+    let owned: Vec<String> = keys.iter().map(|k| (*k).clone()).collect();
+    futures::stream::iter(owned.into_iter().map(|key| async move {
+        match engine.head(bucket, &key).await {
+            Ok(m) => Some((key, m)),
+            Err(_) => None,
+        }
+    }))
+    .buffer_unordered(HEAD_CONCURRENCY)
+    .filter_map(|x| async move { x })
+    .collect()
+    .await
+}
+
+async fn cache_get(
+    failures: Option<&tokio::sync::Mutex<ConfigDb>>,
+    rule: &str,
+    side: ParitySide,
+    keys: &[String],
+) -> HashMap<String, ParityCacheEntry> {
+    let Some(mutex) = failures else {
+        return HashMap::new();
+    };
+    let refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+    let db = mutex.lock().await;
+    db.parity_cache_get_many(rule, side, &refs)
+        .unwrap_or_default()
+}
+
+async fn cache_put(
+    failures: Option<&tokio::sync::Mutex<ConfigDb>>,
+    rule: &str,
+    side: ParitySide,
+    entries: &[(String, ParityCacheEntry)],
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let Some(mutex) = failures else {
+        return;
+    };
+    let now = super::current_unix_seconds();
+    let mut db = mutex.lock().await;
+    if let Err(e) = db.parity_cache_put_many(rule, side, entries, now) {
+        warn!("parity cache write failed for rule '{rule}': {e}");
+    }
+}
+
 /// Async driver: list both sides, diff, build the outcome.
 ///
 /// SOURCE is filtered through `should_replicate` so the audit covers
@@ -491,24 +754,47 @@ fn is_skippable_key(key: &str) -> bool {
 /// Paginate one bucket+prefix, feeding each object to `keep`. `keep` inserts
 /// (and returns `Ok(true)` if it consumed a slot, `Ok(false)` to skip). Caps
 /// at `max` kept objects. Returns `Ok(truncated)`.
+#[allow(clippy::too_many_arguments)]
 async fn scan_prefix(
     engine: &DynEngine,
     bucket: &str,
     prefix: &str,
     max: usize,
+    progress: Option<&ParityProgress<'_>>,
+    // Objects scanned on the OTHER side already — so the reported running total
+    // is cumulative across both side-scans, not reset per side.
+    base_scanned: usize,
     mut keep: impl FnMut(&str, &FileMetadata) -> Result<bool, String>,
-) -> Result<bool, String> {
+) -> Result<(bool, usize), String> {
     let mut kept = 0usize;
+    let mut seen = 0usize;
+    let mut page_idx = 0usize;
     let mut truncated = false;
     let mut pager = crate::job_loop::Pager::fresh();
     'pages: while pager.begin_page().is_some() {
+        // Fast cancel check EVERY page — in-process AtomicBool, no lock.
+        if let Some(p) = progress {
+            if p.cancelled_local() {
+                return Err(CANCELLED.to_string());
+            }
+            // Progress write is throttled (lock-bearing) — the count is a
+            // spinner-grade estimate, not worth the global-mutex churn per page.
+            if page_idx.is_multiple_of(PROGRESS_EVERY_N_PAGES) {
+                let db = p.db.lock().await;
+                let now = super::current_unix_seconds();
+                let _ = db.parity_result_progress(p.rule, (base_scanned + seen) as i64, now);
+            }
+        }
+        page_idx += 1;
         // Retry transient list errors (Hetzner 503 throttle on a long scan)
         // with backoff instead of failing the whole audit on one blip.
+        // LITE list (metadata=false) — no per-object HEAD; logical metadata for
+        // delta/eligible keys is resolved afterwards (cache, then HEAD on a miss).
         let page = {
             let mut attempt = 0u32;
             loop {
                 match engine
-                    .list_objects(bucket, prefix, None, PAGE_SIZE, pager.token(), true)
+                    .list_objects(bucket, prefix, None, PAGE_SIZE, pager.token(), false)
                     .await
                 {
                     Ok(p) => break p,
@@ -531,6 +817,7 @@ async fn scan_prefix(
                 truncated = true;
                 break 'pages;
             }
+            seen += 1;
             if keep(key, meta)? {
                 kept += 1;
             }
@@ -539,7 +826,13 @@ async fn scan_prefix(
             break;
         }
     }
-    Ok(truncated || pager.truncated_by_page_budget())
+    // Final report for this side so the dest scan starts from the right base.
+    if let Some(p) = progress {
+        let db = p.db.lock().await;
+        let now = super::current_unix_seconds();
+        let _ = db.parity_result_progress(p.rule, (base_scanned + seen) as i64, now);
+    }
+    Ok((truncated || pager.truncated_by_page_budget(), seen))
 }
 
 pub async fn parity_audit(
@@ -547,7 +840,9 @@ pub async fn parity_audit(
     rule: &ReplicationRule,
     max_objects: usize,
     failures: Option<&tokio::sync::Mutex<ConfigDb>>,
+    progress: Option<ParityProgress<'_>>,
 ) -> Result<ParityOutcome, String> {
+    let progress = progress.as_ref();
     let (inc, exc) = compile_rule_globs(rule).map_err(|e| e.to_string())?;
     let source_prefix = normalize_prefix(&rule.source.prefix);
     let dest_prefix = normalize_prefix(&rule.destination.prefix);
@@ -558,18 +853,27 @@ pub async fn parity_audit(
     // by the worker's raw source_key) can be looked up from a dest-namespace
     // finding even when source.prefix != destination.prefix.
     let mut dest_to_source: HashMap<String, String> = HashMap::new();
+    // Delta-eligible keys whose logical metadata wasn't in the lite list — these
+    // need a HEAD (unless the parity cache already has them). Collected per side
+    // as (storage_key, map_key) so we can write the resolved ObjState back.
+    let mut src_needs_logical: Vec<String> = Vec::new();
+    let mut dst_needs_logical: Vec<String> = Vec::new();
 
     // Each side gets its OWN budget (capped at max_objects) so a balanced large
     // mirror isn't spuriously truncated and a big source can't starve the dest
     // scan into emitting false 'missing' findings.
-    let src_truncated = scan_prefix(
+    //
+    // LITE list (metadata=false) — no per-object HEAD. For delta objects the
+    // lite list carries the DELTA-blob size/etag (not logical), so those keys
+    // are queued for logical resolution (cache first, HEAD only on a miss).
+    let (src_truncated, src_seen) = scan_prefix(
         engine,
         &rule.source.bucket,
         &source_prefix,
         max_objects,
+        progress,
+        0,
         |key, meta| {
-            // Keep only what replication would act on (dir markers, internal
-            // keys, glob excludes all filtered here).
             if !matches!(
                 should_replicate(key, meta, None, ConflictPolicy::SourceWins, &inc, &exc),
                 Decision::Copy { .. }
@@ -579,30 +883,69 @@ pub async fn parity_audit(
             let dest_key = rewrite_key(&rule.source.prefix, &rule.destination.prefix, key)
                 .map_err(|e| e.to_string())?;
             dest_to_source.insert(dest_key.clone(), key.to_string());
+            if needs_logical_resolution(engine, key, meta) {
+                src_needs_logical.push(key.to_string());
+            }
             source.insert(dest_key, ObjState::from_metadata(meta));
             Ok(true)
         },
     )
     .await?;
 
-    let dst_truncated = scan_prefix(
+    let (dst_truncated, _dst_seen) = scan_prefix(
         engine,
         &rule.destination.bucket,
         &dest_prefix,
         max_objects,
+        progress,
+        src_seen,
         |key, meta| {
             if is_skippable_key(key) {
                 return Ok(false);
             }
             let mut st = ObjState::from_metadata(meta);
-            // Resolve rule ownership now, while rule.name is in scope — the
-            // foreign-orphan discriminator for remediation.
             st.owned_by_rule = Some(event_consumer::owned_by_rule(meta, &rule.name));
+            if needs_logical_resolution(engine, key, meta) {
+                dst_needs_logical.push(key.to_string());
+            }
             dest.insert(key.to_string(), st);
             Ok(true)
         },
     )
     .await?;
+
+    // Resolve logical metadata for the delta-eligible keys: parity cache first
+    // (HEAD-free — the win), then a bounded HEAD burst for the misses, writing
+    // results back into the cache so the NEXT verify is HEAD-free too.
+    // The HEAD-burst tail can be the slow part on a cold cache, so honour a
+    // cancel at each resolve boundary (the per-page check above only covers
+    // listing).
+    if let Some(p) = progress {
+        p.check_cancel().await?;
+    }
+    resolve_logical(
+        engine,
+        rule,
+        &rule.source.bucket,
+        &rule.source.prefix,
+        &rule.destination.prefix,
+        &src_needs_logical,
+        &mut source,
+        failures,
+    )
+    .await;
+    if let Some(p) = progress {
+        p.check_cancel().await?;
+    }
+    resolve_logical_dest(
+        engine,
+        rule,
+        &rule.destination.bucket,
+        &dst_needs_logical,
+        &mut dest,
+        failures,
+    )
+    .await;
 
     let truncated = src_truncated || dst_truncated;
 
@@ -611,6 +954,26 @@ pub async fn parity_audit(
             "parity audit for rule '{}' hit the scan cap ({} objects) — result is partial",
             rule.name, max_objects
         );
+    }
+
+    // Prune cache rows for objects no longer present (deleted since last scan) —
+    // bounds growth + evicts stale rows. ONLY after a COMPLETE scan: a truncated
+    // scan didn't see every key, so it can't tell deleted from unscanned. Each
+    // side is pruned against ITS OWN live key set.
+    if !truncated {
+        if let Some(mutex) = failures {
+            let src_live: Vec<String> = source.keys().cloned().collect();
+            let dst_live: Vec<String> = dest.keys().cloned().collect();
+            let mut db = mutex.lock().await;
+            for (side, live) in [
+                (ParitySide::Source, &src_live),
+                (ParitySide::Dest, &dst_live),
+            ] {
+                if let Err(e) = db.parity_cache_retain(&rule.name, side, live) {
+                    warn!("parity cache prune failed for rule '{}': {e}", rule.name);
+                }
+            }
+        }
     }
 
     let source_objects = source.len() as u64;
@@ -696,6 +1059,41 @@ mod tests {
             created_at: None,
             owned_by_rule: None,
         }
+    }
+
+    // ─────────────── cache freshness guard (false-"in-sync" defence) ───────────
+
+    fn entry(stored: Option<&str>) -> ParityCacheEntry {
+        ParityCacheEntry {
+            sha256: Some("logical".into()),
+            size: 1,
+            etag: Some("logical-etag".into()),
+            stored_etag: stored.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn cache_hit_only_when_stored_etag_unchanged() {
+        // Same stored blob etag → trust the cache (the warm-path win).
+        assert!(cache_hit_fresh(
+            &entry(Some("blob-v1")),
+            &Some("blob-v1".into())
+        ));
+        // Overwritten in place → stored etag changed → MISS → re-HEAD.
+        // This is the false-"in-sync" defence: a changed object is never trusted.
+        assert!(!cache_hit_fresh(
+            &entry(Some("blob-v1")),
+            &Some("blob-v2".into())
+        ));
+    }
+
+    #[test]
+    fn cache_miss_when_either_etag_absent() {
+        // No etag either side → can't prove unchanged → MISS (re-read, don't risk
+        // a stale verdict).
+        assert!(!cache_hit_fresh(&entry(None), &None));
+        assert!(!cache_hit_fresh(&entry(None), &Some("x".into())));
+        assert!(!cache_hit_fresh(&entry(Some("x")), &None));
     }
 
     // ─────────────── compare_pair truth table ───────────────
@@ -789,6 +1187,25 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn check_cancel_honours_in_process_flag_without_a_db_hit() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let db = tokio::sync::Mutex::new(crate::config_db::ConfigDb::in_memory("t").unwrap());
+        let flag = AtomicBool::new(true);
+        let p = ParityProgress {
+            db: &db,
+            rule: "r",
+            cancel: &flag,
+        };
+        assert!(p.cancelled_local());
+        assert_eq!(p.check_cancel().await.unwrap_err(), CANCELLED);
+        // Cleared flag → local check is false (DB branch would run; here the row
+        // is absent so it returns Ok).
+        flag.store(false, Ordering::Relaxed);
+        assert!(!p.cancelled_local());
+        assert!(p.check_cancel().await.is_ok());
     }
 
     #[test]

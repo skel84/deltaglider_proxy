@@ -23,6 +23,23 @@
 //! with the GET/PUT/HEAD/DELETE handlers in `object.rs` — the only
 //! coupling is the dispatcher choosing between DeleteObjects and form
 //! upload at the top of `delete_objects`.
+//!
+//! ## Replay-guard blast-radius trade-off (documented)
+//!
+//! `form_post_replay_record` is now an idempotency/observability ledger, not a
+//! gate — it always allows. This MATCHES native AWS S3, which has no form-POST
+//! replay protection: a presigned POST is valid for as many policy-conforming
+//! uploads as fit within its expiration. The earlier guard capped a captured
+//! signature at ONE object; removing that cap widens the blast radius of a
+//! *leaked* signature to "any key matching the policy's `starts-with $key`, until
+//! `expiration`." We accept this because (a) it was breaking the legitimate
+//! AWS-intended batch pattern (the ROR CI uploads `.zip`/`.sha512`/`.sha1` under
+//! one signature), and (b) the policy's own conditions — `starts-with $key`,
+//! `content-length-range`, `expiration` — are re-validated on EVERY request
+//! (`validate_form_post_policy`) and are the real bound. A future tightening
+//! could re-impose the one-object cap ONLY for policies with an exact
+//! `{"key": "..."}` condition (where reuse genuinely is an attack) while leaving
+//! `starts-with` policies permissive; not done here.
 
 use super::object_helpers::{check_quota, enqueue_object_event};
 use super::{audit_log_s3, ensure_bucket_exists, AppState};
@@ -260,6 +277,9 @@ fn validate_form_post_policy(
     let expires_at = chrono::DateTime::parse_from_rfc3339(expiration)
         .map_err(|_| S3Error::InvalidArgument("Policy expiration is not valid RFC3339".into()))?;
     if Utc::now() > expires_at.with_timezone(&Utc) {
+        tracing::warn!(
+            "form-POST DENY | reason=policy_expired | bucket={bucket} key={key_field} expired_at={expiration}"
+        );
         return Err(S3Error::AccessDenied);
     }
 
@@ -364,6 +384,9 @@ fn validate_form_post_policy(
                         )
                     })?;
                 if file_len < min || file_len > max {
+                    tracing::warn!(
+                        "form-POST DENY | reason=content_length_range | bucket={bucket} key={key_field} file_len={file_len} range=[{min},{max}]"
+                    );
                     return Err(S3Error::AccessDenied);
                 }
             }
@@ -393,6 +416,9 @@ fn validate_form_post_policy(
                     actual.starts_with(expected)
                 };
                 if !matched {
+                    tracing::warn!(
+                        "form-POST DENY | reason=policy_condition_{op} | bucket={bucket} key={key_field} variable={variable} expected={expected} actual={actual}"
+                    );
                     return Err(S3Error::AccessDenied);
                 }
             }
@@ -530,6 +556,10 @@ fn authenticate_form_post(
 
     let (access_key, scope_date, scope_region) = parse_policy_scope(&credential)?;
     if !amz_date.starts_with(scope_date) {
+        tracing::warn!(
+            "form-POST DENY | reason=scope_date_mismatch | bucket={bucket} key={} amz_date={amz_date} scope_date={scope_date}",
+            parsed.resolved_key
+        );
         return Err(S3Error::AccessDenied);
     }
 
@@ -585,6 +615,11 @@ fn authenticate_form_post(
     // exactly 64 hex chars up front — this is a cheap, length-independent gate
     // (one length check + a fixed-shape scan) that closes the oracle.
     if signature.len() != 64 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+        tracing::warn!(
+            "form-POST DENY | reason=signature_bad_shape | bucket={bucket} key={} access_key={access_key} sig_len={}",
+            parsed.resolved_key,
+            signature.len()
+        );
         return Err(S3Error::SignatureDoesNotMatch);
     }
     let signing_key = derive_v4_signing_key(&secret_access_key, scope_date, scope_region);
@@ -595,6 +630,16 @@ fn authenticate_form_post(
     )
     .into();
     if !sig_matches {
+        // The computed HMAC over the policy doesn't match the client's signature.
+        // This is a SIGNING mismatch (wrong secret, wrong scope, or the client
+        // signed a different policy than it sent) — NOT a replay. Log enough to
+        // tell the two apart in prod (the prefixes only; never the full sig).
+        tracing::warn!(
+            "form-POST DENY | reason=signature_mismatch | bucket={bucket} key={} access_key={access_key} scope_date={scope_date} computed_prefix={} client_prefix={}",
+            parsed.resolved_key,
+            &computed_signature[..computed_signature.len().min(8)],
+            &signature[..signature.len().min(8)]
+        );
         return Err(S3Error::SignatureDoesNotMatch);
     }
 
@@ -617,6 +662,11 @@ fn authenticate_form_post(
     )?;
 
     if !auth_user.can(S3Action::Write, bucket, &parsed.resolved_key) {
+        tracing::warn!(
+            "form-POST DENY | reason=iam_no_write | bucket={bucket} key={} user={}",
+            parsed.resolved_key,
+            auth_user.access_key_id
+        );
         return Err(S3Error::AccessDenied);
     }
     Ok(Some(auth_user))
@@ -657,20 +707,17 @@ fn form_post_replay_ttl(
 /// slot for more than 24 h regardless of the policy's claimed expiry.
 const MAX_FORM_POST_REPLAY_TTL_SECS: u64 = 24 * 60 * 60;
 
-/// A live entry in the form-POST replay cache.
+/// A live entry in the form-POST idempotency ledger.
 ///
-/// `expiry` is the policy's expiration `Instant` (capped at 24 h);
-/// `fingerprint` identifies the (resolved key, body) that this signature
-/// first wrote. Re-sending the SAME signed request reproduces the same
-/// fingerprint — that's an idempotent retry and is allowed. Reusing the
-/// captured signature to write a DIFFERENT key or body yields a different
-/// fingerprint and is blocked as a replay (form-POST `key` is
-/// `starts-with ""`, so one signature would otherwise authorise writing
-/// to ANY key).
+/// `expiry` is the policy's expiration `Instant` (capped at 24 h), used only for
+/// TTL eviction. The entry is keyed by `(signature, fingerprint)` in the cache
+/// (see [`form_post_replay_cache_key`]), so distinct files under one signature
+/// are distinct entries and a resend of the same file just refreshes its expiry.
 #[derive(Clone, Copy, Debug)]
 pub struct ReplayEntry {
     pub expiry: std::time::Instant,
-    pub fingerprint: u64,
+    // The file fingerprint is encoded in the cache KEY (`{sig}:{fp}`), not stored
+    // here — the entry only needs its expiry for TTL eviction.
 }
 
 /// Stable fingerprint of the (resolved key, body) a form-POST writes.
@@ -774,53 +821,44 @@ fn enforce_form_post_replay(state: &Arc<AppState>, parsed: &ParsedFormPost) -> R
     let ttl = form_post_replay_ttl(policy_b64, now);
     let new_expiry = now_instant + ttl;
     let fingerprint = form_post_fingerprint(&parsed.resolved_key, &parsed.file_data);
-
-    if !form_post_replay_check(cache, &key, fingerprint, new_expiry, now_instant) {
-        tracing::warn!(
-            "SECURITY | event=form_post_replay_blocked | sig_prefix={}",
-            &key[..key.len().min(8)]
-        );
-        return Err(S3Error::SignatureDoesNotMatch);
-    }
+    form_post_replay_record(cache, &key, fingerprint, new_expiry);
     Ok(())
 }
 
-/// Decide whether a form-POST may proceed, given its signature `key`, the
-/// `(key, body)` `fingerprint`, the entry's `new_expiry`, and `now`.
-/// Mutates the cache to record the accepted attempt. Returns `true` to
-/// allow, `false` to block as a replay. Factored out of
-/// [`enforce_form_post_replay`] so the three-way decision is unit-testable
-/// against a bare `DashMap` without an `AppState`. The decision:
+/// Cache key for the replay guard: the request signature COMBINED with the
+/// `(key, body)` fingerprint. Keying on the pair is what distinguishes a true
+/// replay from a legitimate batch upload — see [`form_post_replay_record`].
+fn form_post_replay_cache_key(sig: &str, fingerprint: u64) -> String {
+    format!("{sig}:{fingerprint:016x}")
+}
+
+/// Record a form-POST attempt in the idempotency/observability ledger. There is
+/// no reject path: the ledger is keyed on `(signature, fingerprint)`, so a true
+/// replay (same sig + same body) just refreshes its entry, and a different file
+/// under the same signature (the AWS-intended `starts-with $key` batch pattern —
+/// the ROR CI uploads .zip/.sha512/.sha1 under one signature) is a distinct
+/// entry, NOT a rejection.
 ///
-/// No live entry → first use: insert and allow. Live entry with the SAME
-/// fingerprint → idempotent re-send of the same object (a CI retry or
-/// workflow re-run): refresh the expiry and allow, since the store is an
-/// overwrite with identical bytes. Live entry with a DIFFERENT fingerprint
-/// → the captured signature is being reused to write a different key/body:
-/// block it.
-fn form_post_replay_check(
+/// History: the guard used to key ONLY on the signature and 403 any reuse with a
+/// DIFFERENT `(key, body)` fingerprint, on the theory that a captured signature
+/// rewriting a different object is an attack. But two files of the SAME SIZE
+/// (every `.sha1` is 41 bytes, every `.sha512` is 129) signed in the same second
+/// get a byte-identical signature, so that "different fingerprint" was the
+/// LEGITIMATE batch case — and it 403'd intermittently. The policy's own
+/// conditions (`starts-with $key`, `content-length-range`, `expiration`) are
+/// re-validated on every request and are the real bound on a captured signature;
+/// the replay guard couldn't add to that without breaking the batch pattern.
+fn form_post_replay_record(
     cache: &dashmap::DashMap<String, ReplayEntry>,
     key: &str,
     fingerprint: u64,
     new_expiry: std::time::Instant,
-    now_instant: std::time::Instant,
-) -> bool {
-    let mut rejected = false;
+) {
+    let cache_key = form_post_replay_cache_key(key, fingerprint);
     cache
-        .entry(key.to_string())
-        .and_modify(|existing| {
-            if existing.expiry > now_instant && existing.fingerprint != fingerprint {
-                rejected = true;
-            } else {
-                existing.expiry = new_expiry;
-                existing.fingerprint = fingerprint;
-            }
-        })
-        .or_insert(ReplayEntry {
-            expiry: new_expiry,
-            fingerprint,
-        });
-    !rejected
+        .entry(cache_key)
+        .and_modify(|existing| existing.expiry = new_expiry)
+        .or_insert(ReplayEntry { expiry: new_expiry });
 }
 
 /// Run the full presigned-form-POST pipeline.
@@ -851,17 +889,43 @@ pub async fn handle_form_post_upload(
     // expiration window (hours to days).
     enforce_form_post_replay(state, &parsed)?;
     check_quota(state, bucket, parsed.file_data.len() as u64)?;
-    let result = state
-        .engine
-        .load()
-        .store(
-            bucket,
-            &parsed.resolved_key,
-            &parsed.file_data,
-            parsed.content_type.clone(),
-            parsed.user_metadata.clone(),
-        )
-        .await?;
+    let engine = state.engine.load();
+    let size = parsed.file_data.len() as u64;
+    // Large delta-eligible POST uploads: route through the streaming spool store
+    // (Phase 4) so the delta encode runs with bounded memory — same path the s3s
+    // PUT uses. (Like PUT, the body is already collected here for parsing; full
+    // streaming intake is Phase 4.1.)
+    let result = if size > engine.spool_store_threshold()
+        && engine.is_delta_eligible_key(&parsed.resolved_key)
+    {
+        let spool = engine.spool_acquire(size).await?;
+        tokio::fs::write(spool.path(), &parsed.file_data)
+            .await
+            .map_err(|e| {
+                crate::deltaglider::EngineError::Storage(crate::storage::StorageError::from(e))
+            })?;
+        engine
+            .store_spooled_delta(
+                bucket,
+                &parsed.resolved_key,
+                &spool,
+                size,
+                parsed.content_type.clone(),
+                parsed.user_metadata.clone(),
+                None,
+            )
+            .await?
+    } else {
+        engine
+            .store(
+                bucket,
+                &parsed.resolved_key,
+                &parsed.file_data,
+                parsed.content_type.clone(),
+                parsed.user_metadata.clone(),
+            )
+            .await?
+    };
     let storage_type = result.metadata.storage_info.label();
     enqueue_object_event(
         state,
@@ -1076,53 +1140,53 @@ mod tests {
             key.clone(),
             ReplayEntry {
                 expiry: now + std::time::Duration::from_secs(600),
-                fingerprint: 1,
             },
         );
-        // Replay attempt: the slot is live → reject path is taken.
+        // A freshly-inserted entry within its TTL must read as live (the
+        // expiry-window mechanic the replay ledger relies on).
         let live = cache
             .get(&key)
             .map(|v| v.expiry > std::time::Instant::now())
             .unwrap_or(false);
-        assert!(live, "cache must report the signature as still live");
+        assert!(live, "a within-TTL entry must report as still live");
     }
 
-    /// The fix's core invariant: a live signature re-sent for the SAME
-    /// (key, body) is ALLOWED (idempotent CI retry), while the same
-    /// signature reused for a DIFFERENT object is BLOCKED.
+    /// The fix's core invariant: ONE presigned signature may upload a BATCH of
+    /// distinct files (the AWS-intended `starts-with $key` pattern, used by the
+    /// ROR CI for `.zip`/`.sha512`/`.sha1`). Previously the guard 403'd the 2nd+
+    /// distinct file under a live signature; now every (sig, body) pair gets its
+    /// own ledger entry, and an exact resend stays idempotent.
     #[test]
-    fn form_post_replay_idempotent_resend_allowed_but_swap_blocked() {
+    fn form_post_replay_allows_batch_under_one_signature() {
         use std::time::{Duration, Instant};
         let cache: dashmap::DashMap<String, ReplayEntry> = dashmap::DashMap::new();
         let sig = "deadbeefcafef00d";
         let now = Instant::now();
         let exp = now + Duration::from_secs(3600);
-        let fp_a = form_post_fingerprint("ror/builds/1.70.2/universal/x.sha1", b"hash-a\n");
 
-        // First use of the signature: allowed.
+        // Two SAME-SIZE files (e.g. two .sha1, both 41 bytes) under one signing
+        // second get a byte-identical signature `sig` — the exact 403 trigger.
+        // Different bodies → different fingerprints → distinct ledger keys.
+        let fp_a = form_post_fingerprint("ror/builds/1.71/a.zip.sha1", b"aaaaaaaa\n");
+        let fp_b = form_post_fingerprint("ror/builds/1.71/b.zip.sha1", b"bbbbbbbb\n");
+        let fp_c = form_post_fingerprint("ror/builds/1.71/x.zip.sha512", b"sha512hash\n");
+
+        // A batch of 3 distinct files under ONE signature — the ledger records
+        // each without rejecting (the old guard 403'd the 2nd/3rd).
+        form_post_replay_record(&cache, sig, fp_a, exp);
+        form_post_replay_record(&cache, sig, fp_b, exp);
+        form_post_replay_record(&cache, sig, fp_c, exp);
+        // Exact resend (CI retry) refreshes its entry, does not add one.
+        form_post_replay_record(&cache, sig, fp_c, exp);
+
+        // Each distinct (sig, body) is its own entry — three files = three keys
+        // (NOT one key with rejections). This is the property that fixes the 403.
+        assert_eq!(cache.len(), 3, "one ledger entry per distinct (sig, body)");
         assert!(
-            form_post_replay_check(&cache, sig, fp_a, exp, now),
-            "first use of a fresh signature must be allowed"
-        );
-        // Same signature, SAME object (identical key+body) — the CI
-        // retry / workflow re-run case. MUST be allowed now (regression
-        // fix; previously 403'd).
-        assert!(
-            form_post_replay_check(&cache, sig, fp_a, exp, now),
-            "idempotent re-send of the same object must be allowed"
-        );
-        // Same live signature, DIFFERENT object — a captured-signature
-        // replay to write somewhere/something else. MUST be blocked.
-        let fp_b = form_post_fingerprint("attacker/evil.sh", b"#!/bin/sh\n");
-        assert!(
-            !form_post_replay_check(&cache, sig, fp_b, exp, now),
-            "reusing a signature for a different key/body must be blocked"
-        );
-        // And the legit object can still be re-sent after the blocked
-        // swap attempt (the block didn't overwrite the stored fingerprint).
-        assert!(
-            form_post_replay_check(&cache, sig, fp_a, exp, now),
-            "the original object must remain idempotently re-sendable"
+            cache.contains_key(&form_post_replay_cache_key(sig, fp_a))
+                && cache.contains_key(&form_post_replay_cache_key(sig, fp_b))
+                && cache.contains_key(&form_post_replay_cache_key(sig, fp_c)),
+            "same-signature, different-body files must each get a distinct key"
         );
     }
 
@@ -1164,7 +1228,6 @@ mod tests {
                 expiry: now
                     .checked_sub(std::time::Duration::from_secs(60))
                     .unwrap_or(now),
-                fingerprint: 0,
             },
         );
         // Prune: same `retain` shape the enforcer uses.

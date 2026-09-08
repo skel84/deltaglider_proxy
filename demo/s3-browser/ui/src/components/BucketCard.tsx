@@ -280,7 +280,11 @@ export default function BucketCard({
         style={{
           display: 'flex',
           alignItems: 'center',
+          // Wrap on narrow so the chip group drops below the name instead of
+          // overflowing (PRIVATE was clipped on mobile).
+          flexWrap: 'wrap',
           gap: 10,
+          rowGap: 6,
           padding: '10px 14px',
           cursor: 'pointer',
           minHeight: 42,
@@ -314,8 +318,20 @@ export default function BucketCard({
             {name}
           </Text>
         )}
-        <span style={{ flex: 1 }} />
-        <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>{chips}</span>
+        {/* Chips absorb remaining width and wrap internally; the group drops to
+            the next line on a narrow row instead of overflowing. */}
+        <span
+          style={{
+            flex: '1 1 auto',
+            minWidth: 0,
+            display: 'flex',
+            gap: 6,
+            flexWrap: 'wrap',
+            justifyContent: 'flex-end',
+          }}
+        >
+          {chips}
+        </span>
       </div>
 
       {/* ── Maintenance progress: visible on every render of the row ── */}

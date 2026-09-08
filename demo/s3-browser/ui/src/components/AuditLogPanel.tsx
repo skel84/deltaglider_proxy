@@ -31,6 +31,7 @@ import {
 } from '@ant-design/icons';
 import { useColors } from '../ThemeContext';
 import { fetchAudit, type AuditEntry } from '../adminApi';
+import { relativeTime } from '../utils';
 
 const { Text } = Typography;
 
@@ -58,21 +59,6 @@ function actionColour(action: string): string {
   if (action.startsWith('update') || action.startsWith('put')) return 'geekblue';
   if (action.startsWith('public_read')) return 'cyan';
   return 'default';
-}
-
-/**
- * Compact time-ago in the same row as the absolute timestamp.
- * Example: "2m ago". English-only; if/when we ship localisation,
- * this helper is the obvious swap point.
- */
-function relativeTime(iso: string, now: Date): string {
-  const t = new Date(iso).getTime();
-  const deltaSec = Math.floor((now.getTime() - t) / 1000);
-  if (deltaSec < 0) return 'just now';
-  if (deltaSec < 60) return `${deltaSec}s ago`;
-  if (deltaSec < 3600) return `${Math.floor(deltaSec / 60)}m ago`;
-  if (deltaSec < 86400) return `${Math.floor(deltaSec / 3600)}h ago`;
-  return `${Math.floor(deltaSec / 86400)}d ago`;
 }
 
 export default function AuditLogPanel({ onSessionExpired }: Props) {
@@ -144,11 +130,16 @@ export default function AuditLogPanel({ onSessionExpired }: Props) {
         // Width 1100: the 6-column table (time / action / user / ip /
         // bucket / target) needs more breathing room than the 960
         // form panels, otherwise Target/Path clips on common paths.
+        // width:100% + min-width:0 pin this to the pane width so the table's
+        // max-content scrolls within its card instead of ballooning the page.
+        width: '100%',
         maxWidth: 1100,
         margin: '0 auto',
         padding: 'clamp(16px, 3vw, 24px)',
         display: 'flex',
         flexDirection: 'column',
+        minWidth: 0,
+        boxSizing: 'border-box',
         gap: 16,
       }}
     >
@@ -212,14 +203,20 @@ export default function AuditLogPanel({ onSessionExpired }: Props) {
         style={{
           border: `1px solid ${colors.BORDER}`,
           borderRadius: 8,
-          overflow: 'hidden',
+          // width-capped so the inner grid's max-content scrolls WITHIN the card
+          // instead of widening the whole page on narrow.
+          width: '100%',
+          minWidth: 0,
+          overflowX: 'auto',
+          overflowY: 'hidden',
           background: colors.BG_CARD,
         }}
       >
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: '170px 150px 140px 120px 100px 1fr',
+            gridTemplateColumns: '170px 150px 140px 120px 100px minmax(120px, 1fr)',
+            width: 'max-content',
             gap: 0,
             padding: '10px 14px',
             borderBottom: `1px solid ${colors.BORDER}`,
@@ -256,7 +253,9 @@ export default function AuditLogPanel({ onSessionExpired }: Props) {
               key={`${e.timestamp}-${i}`}
               style={{
                 display: 'grid',
-                gridTemplateColumns: '170px 150px 140px 120px 100px 1fr',
+                gridTemplateColumns: '170px 150px 140px 120px 100px minmax(120px, 1fr)',
+                width: 'max-content',
+                minWidth: '100%',
                 gap: 0,
                 padding: '8px 14px',
                 borderBottom:

@@ -219,6 +219,14 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         // Usage scanner
         .route("/_/api/admin/usage/scan", post(admin::scan_usage))
         .route("/_/api/admin/usage", get(admin::get_usage))
+        .route(
+            "/_/api/admin/usage/bucket/:bucket",
+            get(admin::get_bucket_usage),
+        )
+        .route(
+            "/_/api/admin/usage/refresh",
+            post(admin::refresh_bucket_usage),
+        )
         // Per-prefix delta savings (reference-aware). Powers the SPA's
         // compression chip; backed by `src/api/admin/savings.rs` with a
         // 30s in-memory cache so casual click-throughs of a tree don't
@@ -285,6 +293,8 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         // (all admins see the same log so there's no per-identity
         // filtering to do at this layer).
         .route("/_/api/admin/audit", get(admin::get_audit))
+        .route("/_/api/admin/logs", get(admin::get_logs))
+        .route("/_/api/admin/logs/stream", get(admin::get_logs_stream))
         // Durable event outbox diagnostics and operator requeue controls.
         .route("/_/api/admin/event-outbox", get(admin::event_outbox_list))
         .route(
@@ -304,8 +314,36 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
             "/_/api/admin/jobs/reencrypt",
             post(admin::maintenance_start_reencrypt),
         )
+        // Literal siblings of /jobs/:id/* (1-deep, like reencrypt) — settle
+        // counters for deterministic test barriers (parity / scheduled run /
+        // event-driven drain).
+        .route(
+            "/_/api/admin/jobs/parity-version",
+            get(admin::job_parity_version),
+        )
+        .route(
+            "/_/api/admin/jobs/replication-run-version",
+            get(admin::job_replication_run_version),
+        )
+        .route(
+            "/_/api/admin/jobs/replication-event-version",
+            get(admin::job_replication_event_version),
+        )
         .route("/_/api/admin/jobs/:id/runs", get(admin::jobs_runs))
         .route("/_/api/admin/jobs/:id/failures", get(admin::jobs_failures))
+        // `verify` is a LITERAL segment handling BOTH GET (poll status) and POST
+        // (kick off the background audit). It must carry the POST too: a literal
+        // path segment shadows the `:action` param at this position, so routing
+        // POST through `:action` here would 405. pause/resume/run-now still go
+        // via `:action`.
+        .route(
+            "/_/api/admin/jobs/:id/verify",
+            get(admin::jobs_verify_status).post(admin::jobs_verify_start),
+        )
+        .route(
+            "/_/api/admin/jobs/:id/verify/cancel",
+            post(admin::jobs_verify_cancel),
+        )
         .route("/_/api/admin/jobs/:id/:action", post(admin::jobs_action))
         // Server-side bulk object operations. Replaces what the
         // browser used to do via @aws-sdk/client-s3. Handlers call the
@@ -378,6 +416,10 @@ pub fn ui_router(admin_state: Arc<AdminState>) -> Router {
         .route(
             "/_/health",
             get(deltaglider_proxy::api::handlers::health_check).with_state(s3_state.clone()),
+        )
+        .route(
+            "/_/ready",
+            get(deltaglider_proxy::api::handlers::readiness_check).with_state(s3_state.clone()),
         )
         .route(
             "/_/metrics",

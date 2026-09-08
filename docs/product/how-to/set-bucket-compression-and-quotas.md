@@ -95,7 +95,7 @@ Reads and lists keep working; every write is rejected.
    aws --endpoint-url https://s3.acme.example s3 cp probe.txt s3://db-archive/probe.txt
    ```
 
-4. Savings show up per bucket on the Metrics page and at `/_/stats?metadata=true`.
+4. Savings show up per bucket on the Metrics page and via the O(1) usage counter — `curl https://s3.acme.example/_/stats?bucket=db-archive` (or `GET /_/api/admin/usage/bucket/db-archive` for the full counter row). The counter is maintained inline on every write; if it ever drifts, reconcile with `POST /_/api/admin/usage/refresh?bucket=db-archive`.
 
 ## Related
 

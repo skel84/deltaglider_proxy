@@ -27,7 +27,11 @@ export default function TabHeader({ icon, title, description, saveModel }: Props
       style={{
         display: 'flex',
         alignItems: 'center',
+        // Wrap so the save-model badge drops below the title on a very narrow
+        // viewport instead of overflowing.
+        flexWrap: 'wrap',
         gap: 10,
+        rowGap: 6,
         padding: '12px 20px',
         borderBottom: `1px solid ${colors.BORDER}`,
         marginBottom: 0,

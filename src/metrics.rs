@@ -81,6 +81,7 @@ pub struct Metrics {
     pub replication_multipart_parts_total: IntCounter,
     pub replication_part_retries_total: IntCounter,
     pub replication_bytes_streamed_total: IntCounter,
+    pub replication_delta_passthrough_bytes_saved_total: IntCounter,
 }
 
 /// Set `peak` to `live`'s current value when it has risen above the prior
@@ -489,6 +490,14 @@ impl Metrics {
             )
             .unwrap()
         );
+        let replication_delta_passthrough_bytes_saved_total = register!(
+            registry,
+            IntCounter::new(
+                "deltaglider_replication_delta_passthrough_bytes_saved_total",
+                "Total egress bytes saved by shipping deltas verbatim (logical − delta size)",
+            )
+            .unwrap()
+        );
 
         Metrics {
             registry,
@@ -532,6 +541,7 @@ impl Metrics {
             replication_multipart_parts_total,
             replication_part_retries_total,
             replication_bytes_streamed_total,
+            replication_delta_passthrough_bytes_saved_total,
         }
     }
 }
@@ -569,6 +579,17 @@ pub fn classify_s3_operation(method: &str, path: &str) -> &'static str {
     }
 }
 
+/// Record the bounded request counter for paths that short-circuit before
+/// [`http_metrics_middleware`] can observe the response.
+pub fn record_http_request_total(metrics: &Metrics, method: &str, path: &str, status: StatusCode) {
+    let operation = classify_s3_operation(method, path);
+    let status = status.as_u16().to_string();
+    metrics
+        .http_requests_total
+        .with_label_values(&[method, status.as_str(), operation])
+        .inc();
+}
+
 /// Axum middleware that records HTTP request metrics.
 pub async fn http_metrics_middleware(
     State(state): State<Arc<AppState>>,
@@ -598,15 +619,9 @@ pub async fn http_metrics_middleware(
     let response = next.run(request).await;
     let duration = start.elapsed().as_secs_f64();
 
-    let status = response.status().as_u16().to_string();
-
-    // prometheus 0.14 widened `with_label_values` to a uniform-type
-    // slice: pass `&str` for every element, not a mix of `&String`
-    // (method/status are owned) and `&'static str` (operation).
-    metrics
-        .http_requests_total
-        .with_label_values(&[method.as_str(), status.as_str(), operation])
-        .inc();
+    // prometheus 0.14 widened `with_label_values` to a uniform-type slice:
+    // pass `&str` for every element.
+    record_http_request_total(metrics, method.as_str(), &path, response.status());
     metrics
         .http_request_duration_seconds
         .with_label_values(&[method.as_str(), operation])

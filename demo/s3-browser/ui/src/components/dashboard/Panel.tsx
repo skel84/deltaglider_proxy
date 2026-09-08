@@ -133,14 +133,19 @@ function PanelHeader({
         display: 'flex',
         alignItems: 'flex-start',
         justifyContent: 'space-between',
+        // Wrap so the actions toolbar drops below the title instead of
+        // overflowing on narrow (Re-scan-all was clipped on mobile).
+        flexWrap: 'wrap',
         gap: 12,
+        rowGap: 8,
         padding: '10px 14px',
         borderBottom: `1px solid ${colors.BORDER}`,
         background: 'transparent',
         flexShrink: 0,
       }}
     >
-      <div style={{ minWidth: 0, flex: 1 }}>
+      {/* flex-basis keeps the title on the row until there's no room. */}
+      <div style={{ minWidth: 0, flex: '1 1 180px' }}>
         <div
           style={{
             fontSize: 13,
@@ -174,7 +179,7 @@ function PanelHeader({
         )}
       </div>
       {actions && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', flexShrink: 0 }}>
           {actions}
         </div>
       )}

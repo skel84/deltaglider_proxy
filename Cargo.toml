@@ -1,6 +1,6 @@
 [package]
 name = "deltaglider_proxy"
-version = "1.5.2"
+version = "1.8.1"
 description = "S3-compatible proxy with transparent delta compression"
 license = "GPL-3.0-only"
 readme = "README.md"
@@ -68,7 +68,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "2"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 parking_lot = "0.12"
 dashmap = "6"
 moka = { version = "0.12", features = ["sync", "future"] }

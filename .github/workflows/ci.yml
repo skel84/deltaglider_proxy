@@ -361,10 +361,13 @@ jobs:
             --test migrate_job_test \
             --test quota_test \
             --test replication_test \
+            --test delta_passthrough_test \
             --test streaming_copy_test \
             --test large_object_e2e_test \
             --test parity_test \
             --test savings_test \
+            --test bucket_usage_test \
+            --test logs_test \
             --test admission_test \
             --test aws_chunked_upload_test \
             --test iam_list_scope_test \
@@ -534,6 +537,7 @@ jobs:
           npm run test:dropped-files
           npm run test:maintenance-status
           npm run test:jobs-view
+          npm run test:outcome-meter
           npm run test:admin-path-remap
           npm run test:destination-suggest
           npm run test:hero-number-size

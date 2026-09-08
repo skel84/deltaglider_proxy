@@ -12,7 +12,7 @@
 use super::parity::FindingKind;
 use super::state_store::ObjectFailure;
 use crate::config_sections::ConflictPolicy;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Inputs to the causal model, reconstructed per finding by the annotator.
 #[derive(Debug, Clone)]
@@ -32,7 +32,7 @@ pub struct FindingFacts<'a> {
 }
 
 /// The diagnosed cause of one finding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasonCode {
     NeverCopied,
@@ -46,7 +46,7 @@ pub enum ReasonCode {
 }
 
 /// Why a re-run would NOT help.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoReason {
     PolicySkipsExistingDest,
@@ -60,7 +60,7 @@ pub enum NoReason {
 }
 
 /// Why a re-run's outcome depends on unknowns.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConditionalReason {
     NewerWinsDependsOnTimestamps,
@@ -68,7 +68,7 @@ pub enum ConditionalReason {
 
 /// Tri-state verdict — never a bool — on whether re-running the rule fixes
 /// this finding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "verdict")]
 pub enum RerunVerdict {
     Yes,
@@ -78,7 +78,7 @@ pub enum RerunVerdict {
 
 /// The guided fix. Only `RunNow` is executable this iteration; the rest are
 /// instructional (see the frontend's `fixActionMeta`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action")]
 pub enum FixAction {
     RunNow,
@@ -91,7 +91,7 @@ pub enum FixAction {
 }
 
 /// The full remediation surfaced per finding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remediation {
     pub reason: ReasonCode,
     pub rerun_helps: RerunVerdict,

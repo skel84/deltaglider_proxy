@@ -396,6 +396,17 @@ impl StorageBackend for RoutingBackend {
         route_existing!(self, bucket, get_reference, prefix)
     }
 
+    async fn get_reference_to_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        dest: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        // Delegate to the routed backend's streaming impl (filesystem hardlink /
+        // S3 stream-to-file) rather than the buffering default.
+        route_existing!(self, bucket, get_reference_to_file, prefix, dest)
+    }
+
     async fn put_reference(
         &self,
         bucket: &str,
@@ -404,6 +415,23 @@ impl StorageBackend for RoutingBackend {
         metadata: &FileMetadata,
     ) -> Result<(), StorageError> {
         route_existing!(self, bucket, put_reference, prefix, data, metadata)
+    }
+
+    async fn put_reference_from_file(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        source_path: &std::path::Path,
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        route_existing!(
+            self,
+            bucket,
+            put_reference_from_file,
+            prefix,
+            source_path,
+            metadata
+        )
     }
 
     async fn put_reference_metadata(
@@ -883,6 +911,15 @@ mod tests {
             _: &str,
         ) -> Result<Vec<u8>, StorageError> {
             Err(StorageError::NotFound("object".to_string()))
+        }
+
+        async fn get_passthrough_stream(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<BoxStream<'static, Result<Bytes, StorageError>>, StorageError> {
+            Ok(Box::pin(futures::stream::empty()))
         }
 
         async fn get_passthrough_stream_range(

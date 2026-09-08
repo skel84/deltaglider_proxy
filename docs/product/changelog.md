@@ -8,7 +8,242 @@ Every released version of DeltaGlider Proxy, newest first. Versions
 follow [semantic versioning](https://semver.org/); the Docker image
 `beshultd/deltaglider_proxy:<version>` is published for each tag.
 
-_Last updated: 2026-06-26_
+_Last updated: 2026-06-29_
+
+## v1.8.1 — 2026-06-29
+
+### Fixed
+
+- **Mobile horizontal overflow across the admin UI.** Every admin settings page
+  (all 15 routes) could scroll sideways on a phone, clipping chips, buttons, and
+  table columns. Root cause was flex containers — the content pane and the
+  Ant Design `<Layout>` chain — defaulting to `min-width: auto`, so a single wide
+  row or fixed-width table widened the whole shell past the viewport. Fixed
+  systemically (`min-width: 0`) plus per-panel wrap fixes; dense diagnostic
+  tables (Audit, Event Outbox) now scroll within their own card. The
+  Users/Groups/Authentication master-detail split stacks vertically on narrow
+  screens. Verified at a 380px viewport with zero page-level horizontal scroll.
+- **Jobs and Verify-findings panels are now mobile-friendly** — the Verify results
+  table reflows to stacked cards, and the Jobs list drops its duplicate header.
+- **The unsaved-changes bar no longer hides behind the Jobs drawer** — it now
+  floats above the drawer where replication/lifecycle rules are edited, so Apply
+  stays reachable.
+
+## v1.8.0 — 2026-06-29
+
+### Security
+
+- **Spoofable client IP via `X-Forwarded-For` is now gated behind a trusted-proxy
+  allow-list.** When `DGP_TRUST_PROXY_HEADERS=true` (the documented reverse-proxy
+  setup), the proxy previously trusted the first `X-Forwarded-For` element
+  verbatim — letting any client forge the IP used for `aws:SourceIp` IAM
+  conditions and admission `source_ip` rules. The new `DGP_TRUSTED_PROXY_CIDRS`
+  lets you list the CIDRs of your real proxies; `X-Forwarded-For` is then honored
+  **only** from a trusted peer and parsed right-to-left (the rightmost
+  non-trusted hop is the real client). Default behavior is unchanged
+  (`DGP_TRUST_PROXY_HEADERS=false` still ignores the header); operators behind a
+  proxy should set the CIDR list to close the spoofing window.
+- **SSRF guard now resolves DNS.** Outbound URLs (OIDC issuer/JWKS/token,
+  webhooks) were checked only as literal IPs, so a hostname whose DNS record
+  pointed at `169.254.169.254` or a private range passed. A connect-time resolver
+  on the OIDC and webhook clients now re-checks the **resolved** address and
+  fails closed. Note: an OIDC issuer or webhook on a private/internal address is
+  now rejected — set it to a publicly-resolvable host, or reach out if you need
+  an internal-network escape hatch.
+
+### Added
+
+- **Replication "Verify" (parity audit) is now a fast, server-side background
+  job.** Verifying that a replication mirror is byte-identical used to run
+  synchronously in the request (HEAD-per-object every time) and lived only in the
+  browser — navigating away recomputed it from scratch. It now runs as a
+  background job whose result is **persisted server-side** (survives navigation
+  and proxy restart), with a **persistent per-object cache** so re-verify is
+  HEAD-free, plus **live progress** and a **Cancel** button. Exposed at
+  `GET/POST /_/api/admin/jobs/:id/verify` (+ `/verify/cancel`).
+- **Readiness probe at `/_/ready`.** `/_/health` is now liveness-only (fast, no
+  I/O) and honest about it; the new `/_/ready` actually probes the storage
+  backend (bounded by a 3s timeout) and the config DB, returning `503` when not
+  ready. Point your load balancer's readiness check at `/_/ready`.
+- **Multi-instance / HA contract is documented.** `CLAUDE.md` now states plainly
+  which planes are shared across instances (IAM/OAuth via the S3-synced DB,
+  background-job leases) versus instance-local (sessions, multipart uploads,
+  metadata cache, rate limiter), plus the hard prerequisites for running behind a
+  load balancer. See also `docs/plan/architecture-ha-audit-2026-06-28.md`.
+
+### Fixed
+
+- **Multi-instance config sync no longer clobbers in-flight job state.** The
+  encrypted config DB sync replaced the **whole** SQLCipher file on every
+  download — wiping this node's per-node coordination state (replication /
+  lifecycle / maintenance job cursors and leases, the event outbox, listener
+  cursors) along with the IAM tables it was meant to share. The sync now merges
+  **only** the IAM tables out of a peer's DB, leaving coordination state intact,
+  so background jobs and event-driven replication stay consistent across a synced
+  fleet. A schema-version guard skips the merge during a rolling upgrade rather
+  than risk a column mismatch, and the sync ETag only advances on a successful
+  merge (a failed merge retries on the next poll).
+- **`CompleteMultipartUpload` on the wrong instance now explains itself.**
+  Multipart upload state is per-instance; behind a non-sticky load balancer a
+  part/complete landing on a different node than the create returned a bare
+  `NoSuchUpload`. The error message now names the per-instance cause and points
+  at sticky sessions (the S3 error code is unchanged for client compatibility).
+- **Startup banner no longer disagrees with the runtime on proxy-header trust.**
+  The banner parsed `DGP_TRUST_PROXY_HEADERS` as a narrower set than the runtime
+  (`yes`/`on` logged "untrusted" while the runtime trusted them); both now use
+  the same parser.
+
+### Changed
+
+- **The storage backend's streaming memory bound is now enforced by the type
+  system.** `get_passthrough_stream` / `get_passthrough_stream_range` had
+  buffering fallbacks that a backend could silently inherit (defeating the
+  memory bound for large ranged GETs); they are now required methods. No
+  behavior change for the built-in filesystem and S3 backends.
+- **Internal hardening + test-determinism:** typed config-apply pipeline shared
+  by the backup-restore path, replication run/event version counters that replace
+  sleep-based test waits, `parse_copy_range` unit + property tests, and a shared
+  `RunLease` type. The Jobs admin tables also render consistently across mobile
+  and desktop.
+
+## v1.7.0 — 2026-06-28
+
+### Fixed
+
+- **Batch uploads under one presigned POST signature no longer 403.** A
+  presigned browser/CI form-POST policy with `starts-with $key` is designed to
+  upload many files under a single signature (e.g. a release's `.zip` +
+  `.sha512` + `.sha1`). The replay guard treated the second and later files as a
+  replay attack and intermittently returned `403 SignatureDoesNotMatch` — after
+  the body had fully uploaded — whenever two files were signed in the same
+  second. The guard now keys on the signature **and** the file fingerprint, so a
+  batch of distinct files passes while an exact resend stays an idempotent
+  overwrite. The policy's own conditions (`starts-with $key`,
+  `content-length-range`, `expiration`) remain enforced on every request and are
+  the real bound on what a captured signature can write.
+
+### Added
+
+- **Streaming delta compression for unbounded object sizes (opt-in, dormant by
+  default).** New code paths reconstruct (GET) and encode (PUT/POST/copy) delta
+  objects through bounded-memory spool files instead of buffering the whole
+  object in RAM — so delta dedup can scale past the previous in-memory ceiling.
+  This is **off by default**: `DGP_SPOOL_THRESHOLD_BYTES` defaults to
+  `max_object_size`, so the streaming paths are unreachable until an operator
+  lowers the threshold. New tunables: `DGP_SPOOL_DIR`, `DGP_SPOOL_MAX_BYTES`,
+  `DGP_SPOOL_THRESHOLD_BYTES`, `DGP_SPOOL_ACQUIRE_TIMEOUT_SECS`,
+  `DGP_CODEC_STALL_SECS`, `DGP_CODEC_ABSOLUTE_SECS`. The xdelta3 codec gained a
+  stall-based watchdog and streaming entry points; the storage backends gained
+  `get_reference_to_file` / `put_reference_from_file` (filesystem hardlinks, S3
+  streams). See `docs/plan/streaming-delta-any-size.md`.
+
+## v1.6.0 — 2026-06-27
+
+### Added
+
+- **Instant per-bucket size — no more O(n) listing sweeps.** S3 has no
+  protocol call for "how big is this bucket?" — the only primitive is an
+  O(n) `ListObjectsV2` sweep, and the old stats scan capped out at 1000
+  objects per bucket (slow, and simply wrong for large buckets). The proxy
+  now keeps a running per-bucket counter (object count + logical pre-delta
+  bytes + stored bytes), updated on every write and delete, the way Ceph or
+  Backblaze B2 surface an instant number. `/_/stats` reads it in O(1) — the
+  1000-object cap and `truncated` flag are gone — and a **bucket size chip**
+  in the browser top bar shows size · object count at a glance (admin
+  session only). The counter is per-instance and best-effort (it never
+  blocks or fails an S3 request); a **Refresh** button runs an uncapped full
+  reconciling scan on demand. `GET /_/api/admin/usage/bucket/:bucket` exposes
+  the O(1) read; `POST /_/api/admin/usage/refresh` triggers the reconcile.
+
+- **Save-time config advisories.** The admin Apply dialog (and `config lint`)
+  now surface cross-field "this combination is suspicious" warnings *before*
+  you save, instead of leaving you to discover the misconfiguration in
+  production. Seed rules catch a rate limit running with proxy-header trust
+  disabled (which collapses every client onto the proxy's own IP and one
+  shared rate-limit bucket), a stale `${username}` IAM permission template
+  that silently denies access, a frozen bucket quota, and a public-prefix
+  rule that is redundant when auth is already open.
+
+- **In-GUI operational logs — live tail + filter, no SSH required.** A new
+  **System logs** view in the admin UI tails the proxy's operational log
+  stream live (server-sent events) with a Follow toggle, and filters a
+  bounded in-memory backlog by level, target, and free-text search — so
+  diagnosing an incident no longer means SSH-ing in to grep stdout. Backed
+  by `GET /_/api/admin/logs` (filtered backlog) and
+  `GET /_/api/admin/logs/stream` (live SSE), both admin-session-gated. The
+  ring is per-instance and in-memory (size via `DGP_LOG_RING_SIZE`, default
+  2000; floor via `DGP_LOG_RING_LEVEL`, default INFO) — it supplements, and
+  does not replace, shipping the full stdout stream to your log aggregator.
+
+- **`DGP_LOG_FORMAT=json` structured logs.** Opt-in JSON log output so prod
+  logs are field-greppable with `jq` (e.g. by client IP, bucket, or action)
+  instead of being parsed out of free-text lines.
+
+### Changed
+
+- **Slimmer admin sidebar.** The settings sidebar was consolidated from
+  eight groups down to five — single- and two-leaf groups that cost more in
+  headers than they earned are folded together (Dashboard, Trace, Delta
+  efficiency, Audit log, and System logs now sit under one **Observability**
+  group; the single Jobs screen moves under Storage). Every page URL is
+  unchanged.
+
+- **More readable audit & auth logs.** Audit lines now resolve the client IP
+  the same proxy-aware way the rate limiter does (no more `ip=unknown`
+  splitting one client across two values), and brute-force / lockout log
+  lines now include the rate-limit bucket key and proxy-trust state — the
+  fields that make "all clients collapsed onto one bucket" obvious at a
+  glance.
+
+### Fixed
+
+- **Delta uploads work on newer xdelta3 builds (3.1+).** A newer xdelta3
+  enables stream "armor" by default, which requires a seekable target the
+  proxy doesn't provide when piping — making every delta-eligible `PUT`
+  fail with `armor requires a seekable target` on those builds. The codec
+  now probes its xdelta3 at startup and disables armor when supported,
+  while staying compatible with the older 3.0.x builds that lack the flag.
+  Deltas remain format-identical across versions (plain RFC-3284 VCDIFF), so
+  a delta encoded on one xdelta3 version still decodes on any other. The
+  exact xdelta3 version and armor state are now logged at boot.
+
+## v1.5.4 — 2026-06-27
+
+### Changed
+
+- **Jobs UI polish.** Run/failure tables now show relative times ("3h ago")
+  with the full timestamp on hover. The Runs table replaces the
+  scanned/copied/skipped/errors number columns with a single proportional
+  progress bar (green = copied, red = errors, blank = skipped/already-in-sync;
+  the copied count is overlaid, full breakdown on hover) and a clock icon for
+  scheduler-triggered runs — freeing horizontal space. Resuming or running a
+  rule now immediately refreshes its runs + failures tables so the new run
+  shows without reopening the drawer.
+
+### Fixed
+
+- **Clearer "scanned vs processed" reporting.** A run showing `scanned=600,
+  processed=0` previously hid the skipped count, making it look stalled when in
+  fact all 600 objects were already in sync (nothing to copy). The skipped
+  count is now surfaced (in the progress bar + on hover), so an incremental
+  run's "nothing to do" outcome is transparent.
+
+## v1.5.3 — 2026-06-26
+
+### Added
+
+- **Delta-passthrough replication fast path.** Replicating a delta-compressed
+  object between two compressed buckets no longer reconstructs the full object,
+  ships it whole, and re-compresses it at the destination. When the destination
+  already holds the byte-identical reference baseline (or has none yet — it's
+  seeded), the `.delta` blob is shipped **verbatim**: no xdelta3 on either end,
+  and only the delta's bytes cross the wire instead of the full logical object.
+  For versioned-artifact mirrors this is a large egress + CPU saving. The fast
+  path is gated hard for correctness — it only fires when the destination
+  reference's checksum matches and both sides are plaintext, and always falls
+  back to the proven reconstruct path otherwise. Each run reports how many
+  objects took the fast path and the egress bytes saved (a
+  `deltaglider_replication_delta_passthrough_bytes_saved_total` metric).
 
 ## v1.5.2 — 2026-06-26
 

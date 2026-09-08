@@ -4,12 +4,16 @@
  */
 import { useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Alert, Drawer, Empty, Table, Tabs, Tag, Typography } from 'antd';
+import { Alert, Drawer, Empty, Tabs, Tag, Typography } from 'antd';
+import { useColors } from '../../ThemeContext';
 import type { LifecycleConfig, ReplicationConfig } from '../../adminApi';
 import type { JobRow } from '../../jobsView';
 import { isActiveJobStatus, jobStatusLabel, jobStatusTone, kindLabel, parseJobId } from '../../jobsView';
 import { qk } from '../../queries/keys';
 import { useJobFailures, useJobRuns } from '../../queries/jobs';
+import TimeAgo from '../TimeAgo';
+import RecordList from './RecordList';
+import OutcomeMeter from './OutcomeMeter';
 import ReplicationRuleFields from '../ReplicationRuleFields';
 import LifecycleRuleFields from '../LifecycleRuleFields';
 import VerifyTab from './VerifyTab';
@@ -46,6 +50,7 @@ export default function JobDrawer({
   inputRadius,
   onClose,
 }: Props) {
+  const c = useColors();
   const parsed = jobId ? parseJobId(jobId) : null;
   const serverRow = rows.find((r) => r.id === jobId) ?? null;
   // Runs/failures only exist for jobs the SERVER knows (not drafts).
@@ -81,7 +86,10 @@ export default function JobDrawer({
             ...r,
             status: serverRow.status,
             objects_processed: serverRow.progress.processed,
+            objects_skipped: serverRow.progress.skipped,
             errors: serverRow.progress.failed,
+            // Carry live percent so the running run's meter fills (null = unknown).
+            __percent: serverRow.percent ?? null,
           }
         : r,
     );
@@ -160,10 +168,19 @@ export default function JobDrawer({
           )}
           {entries.map(([k, v]) => (
             <div key={k} style={{ display: 'flex', gap: 12, padding: '6px 0' }}>
-              <Text type="secondary" style={{ width: 90, fontSize: 12 }}>
+              <Text type="secondary" style={{ width: 90, flexShrink: 0, fontSize: 12 }}>
                 {k}
               </Text>
-              <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>{v}</Text>
+              <Text
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 13,
+                  wordBreak: 'break-word',
+                  minWidth: 0,
+                }}
+              >
+                {v}
+              </Text>
             </div>
           ))}
         </div>
@@ -173,53 +190,86 @@ export default function JobDrawer({
   })();
 
   const runsTable = (
-    <Table
-      dataSource={liveRuns}
-      rowKey="id"
-      size="small"
-      pagination={false}
-      locale={{ emptyText: 'No runs yet' }}
+    <RecordList
+      rows={liveRuns}
+      rowKey={(r) => String(r.id)}
+      empty="No runs yet"
       columns={[
-        { title: 'Started', render: (_: unknown, r) => fmt(r.started_at) },
-        { title: 'By', dataIndex: 'triggered_by', width: 90 },
         {
-          title: 'Status',
-          width: 110,
-          render: (_: unknown, r) => (
-            <Tag color={jobStatusTone({ status: r.status })}>{r.status}</Tag>
+          key: 'started',
+          label: 'Started',
+          track: 'max-content',
+          render: (r) => (
+            <span style={{ whiteSpace: 'nowrap' }}>
+              {/* "By" folded in as a leading glyph: ⏱ scheduler / ▸ manual. */}
+              <span
+                title={r.triggered_by === 'scheduler' ? 'scheduler' : r.triggered_by}
+                aria-label={r.triggered_by === 'scheduler' ? 'scheduled' : 'manual run'}
+                style={{ color: c.TEXT_MUTED, marginRight: 4 }}
+              >
+                {r.triggered_by === 'scheduler' ? '⏱' : '▸'}
+              </span>
+              <TimeAgo ts={r.started_at} />
+            </span>
           ),
         },
-        { title: 'Scanned', dataIndex: 'objects_scanned', width: 80 },
-        { title: 'Processed', dataIndex: 'objects_processed', width: 90 },
-        { title: 'Errors', dataIndex: 'errors', width: 70 },
+        {
+          key: 'meter',
+          label: 'Outcome',
+          track: 'minmax(0,1fr)',
+          hideLabelOnNarrow: true,
+          render: (r) => (
+            <OutcomeMeter
+              scanned={r.objects_scanned}
+              copied={r.objects_processed}
+              errors={r.errors}
+              skipped={r.objects_skipped}
+              status={r.status}
+              percent={'__percent' in r ? (r as { __percent: number | null }).__percent : null}
+            />
+          ),
+        },
       ]}
     />
   );
 
   const failuresTable = (
-    <Table
-      dataSource={failuresQuery.data?.failures ?? []}
-      rowKey="id"
-      size="small"
-      pagination={false}
-      locale={{ emptyText: 'No recorded failures' }}
+    <RecordList
+      rows={failuresQuery.data?.failures ?? []}
+      rowKey={(f) => String(f.id)}
+      empty="No recorded failures"
       columns={[
-        { title: 'When', width: 160, render: (_: unknown, f) => fmt(f.occurred_at) },
         {
-          title: 'Object',
-          render: (_: unknown, f) => (
-            <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-              {f.bucket ? `${f.bucket}/` : ''}
-              {f.object_key || '(job-level)'}
-            </Text>
+          key: 'when',
+          label: 'When',
+          track: 'max-content',
+          render: (f) => (
+            <span style={{ whiteSpace: 'nowrap' }}>
+              <TimeAgo ts={f.occurred_at} />
+            </span>
           ),
         },
         {
-          title: 'Error',
-          render: (_: unknown, f) => (
-            <Text type="danger" style={{ fontSize: 12 }}>
+          key: 'object',
+          label: 'Object',
+          track: 'minmax(0,1.2fr)',
+          render: (f) => {
+            const obj = `${f.bucket ? `${f.bucket}/` : ''}${f.object_key || '(job-level)'}`;
+            return (
+              <span className="dg-fail-text" title={obj} style={{ fontFamily: 'var(--font-mono)' }}>
+                {obj}
+              </span>
+            );
+          },
+        },
+        {
+          key: 'error',
+          label: 'Error',
+          track: 'minmax(0,1.5fr)',
+          render: (f) => (
+            <span className="dg-fail-text" title={f.error} style={{ color: c.ACCENT_RED }}>
               {f.error}
-            </Text>
+            </span>
           ),
         },
       ]}
@@ -230,7 +280,7 @@ export default function JobDrawer({
     <Drawer
       open={!!jobId}
       onClose={onClose}
-      width={640}
+      width="min(640px, 100vw)"
       title={
         serverRow ? (
           <span>

@@ -19,8 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     lld \
     pkg-config \
     wget \
-    xdelta3 \
+    xdelta3=3.0.11-dfsg-1.2 \
   && rm -rf /var/lib/apt/lists/*
+# Pin xdelta3 to the SAME version the runtime image (Dockerfile) ships, so the
+# integration tests validate the exact delta format prod produces — and adding
+# `-a` to codec.rs (armor-proofing for newer xdelta3) is exercised on the pinned
+# binary. The roundtrip + legacy-fixture codec tests are the cross-version net.
 
 # ── Docker CLI only (not the full daemon — we use the host socket) ──
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
@@ -64,6 +68,7 @@ RUN echo "--- Builder image verification ---" \
   && cargo sbom --help | head -1 \
   && sccache --version \
   && xdelta3 -V \
+  && (xdelta3 -V 2>&1 | grep -q "3.0.11" || (echo "FATAL: xdelta3 not pinned to 3.0.11" && exit 1)) \
   && mc --version \
   && docker --version \
   && git --version \

@@ -87,7 +87,7 @@ Have `dana` click it. She authenticates at the provider, consents, and is redire
 - Matching mapping rules fire — `dana` is now a member of `Engineering`.
 - She gets a session cookie and lands in the admin UI.
 
-Every successful OAuth login shows as `external_login` in **Settings → Diagnostics → Audit**; rejections show as `access_denied`.
+Every successful OAuth login shows as `external_login` in **Settings → Observability → Audit**; rejections show as `access_denied`.
 
 ## If the login fails
 

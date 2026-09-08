@@ -462,10 +462,44 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // --- Metrics ---
     let metrics = init_metrics(&config);
 
+    // --- Per-instance bucket usage counter (O(1) sizes) ---
+    // Lives in its OWN unsynced DB file beside the config DB — never goes
+    // through config_db_sync (whole-file CAS can't compose increments). Plain
+    // SQLite, no secrets; a failure to open degrades to None (scans still work).
+    let bucket_usage: Option<Arc<deltaglider_proxy::bucket_usage::BucketUsage>> = {
+        let path = deltaglider_proxy::bucket_usage::bucket_usage_db_path();
+        match deltaglider_proxy::bucket_usage::BucketUsage::open(&path) {
+            Ok(u) => Some(Arc::new(u)),
+            Err(e) => {
+                tracing::warn!(
+                    "bucket usage counter disabled (could not open {}): {}",
+                    path.display(),
+                    e
+                );
+                None
+            }
+        }
+    };
+
     // --- Engine ---
-    let engine = DynEngine::new(&config, Some(metrics.clone())).await?;
+    let engine = DynEngine::new(&config, Some(metrics.clone()))
+        .await?
+        .with_bucket_usage(bucket_usage.clone());
     if engine.is_cli_available() {
-        info!("  xdelta3 CLI: available (legacy delta interop enabled)");
+        // Log the exact version on EVERY boot — it determines the delta format +
+        // the armor default (see codec.rs `-a`), so it's the first thing to check
+        // when delta encode/decode misbehaves across environments.
+        info!(
+            "  xdelta3 CLI: {} (armor {})",
+            engine
+                .cli_version()
+                .unwrap_or("available (version unknown)"),
+            if engine.codec_armor_disabled() {
+                "disabled via -a (3.1+)"
+            } else {
+                "n/a (3.0.x)"
+            }
+        );
     } else {
         return Err("xdelta3 CLI not found. Install xdelta3 before starting the proxy.".into());
     }
@@ -571,11 +605,11 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // --- Proxy header trust ---
+    // Raw read ONLY for the unset-vs-set log distinction; the truth value comes
+    // from the canonical parse so the banner can't disagree with the runtime
+    // (which also accepts yes/on via env_bool).
     let trust_proxy_explicit = std::env::var("DGP_TRUST_PROXY_HEADERS").ok();
-    let trust_proxy = trust_proxy_explicit
-        .as_deref()
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false); // default false — secure-by-default, see rate_limiter::trust_proxy_headers()
+    let trust_proxy = deltaglider_proxy::rate_limiter::trust_proxy_headers();
     if trust_proxy {
         info!("  Proxy headers: trusted (DGP_TRUST_PROXY_HEADERS=true) — X-Forwarded-For/X-Real-IP used for rate limiting and aws:SourceIp");
     } else if trust_proxy_explicit.is_none() {
@@ -606,6 +640,7 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         multipart,
         metrics: metrics.clone(),
         usage_scanner: usage_scanner.clone(),
+        bucket_usage: bucket_usage.clone(),
         config_db: config_db.clone(),
         form_post_replay: Arc::new(dashmap::DashMap::new()),
         maintenance_gate: maintenance_gate.clone(),
@@ -814,6 +849,7 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         external_auth,
         public_prefix_snapshot,
         admission_chain,
+        parity_cancels: Default::default(),
     });
 
     // --- TLS ---

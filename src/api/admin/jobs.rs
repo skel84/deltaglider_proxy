@@ -60,9 +60,15 @@ pub fn parse_job_id(id: &str) -> Option<(JobSubsystem, &str)> {
 }
 
 /// One status vocabulary:
-/// `idle | queued | running | cancelling | succeeded | failed | cancelled`.
+/// `idle | queued | running | cancelling | succeeded | completed_with_errors |
+/// failed | cancelled`.
 /// The raw subsystem value is reported alongside (`status_raw`); unknown
 /// raw values normalize to `idle` (total function — never panics).
+///
+/// `completed_with_errors` is its OWN normalized state, distinct from both
+/// `succeeded` and `failed`: the sweep finished but ≥1 object errored (a
+/// transient destination 500, say). Collapsing it into `failed` made healthy
+/// runs that copied thousands of objects look broken.
 pub fn normalize_status(raw: &str) -> &'static str {
     match raw {
         "idle" => "idle",
@@ -70,6 +76,7 @@ pub fn normalize_status(raw: &str) -> &'static str {
         "running" => "running",
         "cancelling" => "cancelling",
         "succeeded" | "completed" => "succeeded",
+        "completed_with_errors" => "completed_with_errors",
         "failed" => "failed",
         "cancelled" => "cancelled",
         _ => "idle",
@@ -220,6 +227,11 @@ pub struct JobRunEntry {
     pub objects_deleted: Option<i64>,
     pub bytes: i64,
     pub errors: i64,
+    /// Objects that shipped their `.delta` verbatim on the fast path
+    /// (replication only; 0 for other subsystems). The rest = copied −
+    /// delta_passthrough. Egress saved = Σ(logical − delta).
+    pub delta_passthrough: i64,
+    pub bytes_egress_saved: i64,
 }
 
 /// Unified failure entry — field union; `object_key` is always set
@@ -446,6 +458,75 @@ pub struct LimitQuery {
     pub limit: Option<u32>,
 }
 
+/// GET /_/api/admin/jobs/:id/verify — poll the server-side parity audit status
+/// (replication only). No scan is started; the result survives navigation +
+/// restart.
+pub async fn job_verify_status(
+    Path(id): Path<String>,
+    State(state): State<Arc<AdminState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (sub, key) = parse_job_id(&id).ok_or(not_found())?;
+    if sub != JobSubsystem::Replication {
+        return Err(not_found());
+    }
+    let Json(resp) = super::replication::verify_status(Path(key.to_string()), State(state)).await?;
+    Ok(Json(serde_json::to_value(resp).map_err(internal)?))
+}
+
+/// POST /_/api/admin/jobs/:id/verify — kick off the background parity audit
+/// (replication only). Returns 202 + the running status. The literal `verify`
+/// route carries this POST because it shadows the `:action` param at this path.
+pub async fn job_verify_start(
+    Path(id): Path<String>,
+    State(state): State<Arc<AdminState>>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let (sub, key) = parse_job_id(&id).ok_or(not_found())?;
+    if sub != JobSubsystem::Replication {
+        return Err(not_found());
+    }
+    let (code, Json(resp)) =
+        super::replication::verify(Path(key.to_string()), State(state)).await?;
+    Ok((code, Json(serde_json::to_value(resp).map_err(internal)?)))
+}
+
+/// POST /_/api/admin/jobs/:id/verify/cancel — cancel a running parity audit
+/// (replication only).
+pub async fn job_verify_cancel(
+    Path(id): Path<String>,
+    State(state): State<Arc<AdminState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (sub, key) = parse_job_id(&id).ok_or(not_found())?;
+    if sub != JobSubsystem::Replication {
+        return Err(not_found());
+    }
+    let Json(resp) = super::replication::verify_cancel(Path(key.to_string()), State(state)).await?;
+    Ok(Json(serde_json::to_value(resp).map_err(internal)?))
+}
+
+/// GET /_/api/admin/jobs/parity-version — monotonic counter bumped each time a
+/// background parity audit settles. Mirrors `iam/version`: lets integration
+/// tests poll for a deterministic completion barrier instead of sleeping.
+/// Unauthenticated (just a number, like the other version endpoints).
+pub async fn job_parity_version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "version": crate::replication::parity::current_parity_version() }))
+}
+
+/// GET /_/api/admin/jobs/replication-run-version — bumped each time a SCHEDULED
+/// replication run settles. Sibling of parity-version; same test-barrier role.
+pub async fn job_replication_run_version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "version": crate::replication::state_store::current_replication_run_version()
+    }))
+}
+
+/// GET /_/api/admin/jobs/replication-event-version — bumped each time an
+/// EVENT-DRIVEN drain advances its cursor (event-driven runs write no run row).
+pub async fn job_replication_event_version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "version": crate::replication::state_store::current_replication_event_version()
+    }))
+}
+
 /// GET /_/api/admin/jobs/:id/runs
 pub async fn job_runs(
     Path(id): Path<String>,
@@ -478,6 +559,8 @@ pub async fn job_runs(
                 objects_deleted: Some(r.objects_deleted),
                 bytes: r.bytes_copied,
                 errors: r.errors,
+                delta_passthrough: r.delta_passthrough,
+                bytes_egress_saved: r.bytes_egress_saved,
             })
             .collect(),
         JobSubsystem::Lifecycle => db
@@ -497,6 +580,8 @@ pub async fn job_runs(
                 objects_deleted: None,
                 bytes: r.bytes_affected,
                 errors: r.errors,
+                delta_passthrough: 0,
+                bytes_egress_saved: 0,
             })
             .collect(),
         JobSubsystem::Maintenance => {
@@ -518,6 +603,8 @@ pub async fn job_runs(
                 objects_deleted: None,
                 bytes: job.bytes_done,
                 errors: job.objects_failed,
+                delta_passthrough: 0,
+                bytes_egress_saved: 0,
             }]
         }
     };
@@ -628,11 +715,9 @@ pub async fn job_action(
             ))
         }
         (JobSubsystem::Replication, JobAction::Verify) => {
-            let Json(resp) = super::replication::verify(Path(name), State(state)).await?;
-            Ok((
-                StatusCode::OK,
-                Json(serde_json::to_value(resp).map_err(internal)?),
-            ))
+            // Kicks off a BACKGROUND audit; returns 202 + the (running) status.
+            let (code, Json(resp)) = super::replication::verify(Path(name), State(state)).await?;
+            Ok((code, Json(serde_json::to_value(resp).map_err(internal)?)))
         }
         (JobSubsystem::Lifecycle, JobAction::Pause) => {
             super::lifecycle::pause(Path(name), State(state)).await?;

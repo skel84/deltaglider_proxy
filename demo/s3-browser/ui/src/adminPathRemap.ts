@@ -1,5 +1,5 @@
 /**
- * Admin URL resolution for the 7-group / 15-leaf IA (React-free; the
+ * Admin URL resolution for the 5-group / 15-leaf IA (React-free; the
  * regression script asserts the full remap table).
  *
  * Every URL scheme the app has ever emitted resolves somewhere sensible:

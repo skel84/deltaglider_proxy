@@ -74,7 +74,11 @@ export default function StickyDirtyBar({
       // margins; the inner bar re-enables them.
       style={{
         ...positionStyle,
-        zIndex: 20,
+        // Above the AntD Drawer/Modal (z-index 1000): a rule edited INSIDE the
+        // Jobs drawer raises this page-level bar, so it must float OVER the
+        // drawer to stay reachable (it sat behind it at z-index 20). Inline mode
+        // has no positioning, so the high z is harmless there.
+        zIndex: 1001,
         display: 'flex',
         justifyContent: 'center',
         pointerEvents: 'none',
@@ -90,13 +94,16 @@ export default function StickyDirtyBar({
           pointerEvents: visible ? 'auto' : 'none',
           display: 'flex',
           alignItems: 'center',
+          // Wrap so the message + Discard/Apply don't overflow a phone width.
+          flexWrap: 'wrap',
+          rowGap: 8,
           gap: 14,
           padding: '8px 12px 8px 14px',
           borderRadius: 12,
           background: c.BG_ELEVATED,
           border: `1px solid ${hasErrors ? c.ACCENT_RED : c.BORDER}`,
           boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
-          maxWidth: 560,
+          maxWidth: 'min(560px, calc(100vw - 24px))',
         }}
       >
         <ExclamationCircleFilled

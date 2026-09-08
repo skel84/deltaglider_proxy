@@ -270,6 +270,13 @@ pub struct DeltaGliderEngine<S: StorageBackend> {
     metadata_cache: MetadataCache,
     /// Per-bucket compression policy overrides.
     bucket_policies: crate::bucket_policy::BucketPolicyRegistry,
+    /// Per-instance running usage counter (None in tests / when unavailable).
+    /// Updated best-effort after each successful store/delete.
+    bucket_usage: Option<Arc<crate::bucket_usage::BucketUsage>>,
+    /// Quota'd temp space for streaming delta reconstruction (Phase 3). Large
+    /// delta GETs decode to a spool file here, then stream the file to the
+    /// client — bounded memory regardless of object size.
+    spool: Arc<crate::deltaglider::spool::SpoolDir>,
 }
 
 /// Type alias for engine with dynamic backend dispatch
@@ -697,7 +704,81 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
                 config.buckets.clone(),
                 config.max_delta_ratio,
             ),
+            bucket_usage: None,
+            spool: Arc::new(
+                crate::deltaglider::spool::SpoolDir::from_env()
+                    .unwrap_or_else(|e| panic!("failed to init spool dir: {e}")),
+            ),
         }
+    }
+
+    /// Attach the per-instance usage counter (builder; called once at startup
+    /// after the usage DB is opened). The handle survives engine rebuilds by
+    /// being re-attached.
+    pub fn with_bucket_usage(
+        mut self,
+        usage: Option<Arc<crate::bucket_usage::BucketUsage>>,
+    ) -> Self {
+        self.bucket_usage = usage;
+        self
+    }
+
+    /// Best-effort: fold a stored object into the bucket counter. Never fails
+    /// the S3 path. Applies the NET delta the store path captured:
+    /// - new object: +1 / +logical / +stored
+    /// - overwrite (`result.replaced` set): subtract the prior version first so
+    ///   the count nets to +0 objects (S3 PUT is an upsert — a blind +1 here is
+    ///   the over-count bug the review caught)
+    /// - a newly-seeded reference.bin: + its bytes into stored_bytes (symmetric
+    ///   with `record_delete`'s reclamation subtraction, so inline == scan).
+    fn record_store(&self, bucket: &str, result: &StoreResult) {
+        let Some(u) = &self.bucket_usage else { return };
+        // net: -prior (if overwrite) + new object, + any newly-seeded reference.
+        u.apply_net(
+            bucket,
+            result.replaced.as_deref(),
+            Some(&result.metadata),
+            result.reference_created_bytes as i64,
+        );
+    }
+
+    /// Best-effort: fold a deleted object out of the bucket counter (-1), plus
+    /// any reclaimed reference bytes (stored-only) so stored_bytes stays exact.
+    fn record_delete(&self, bucket: &str, meta: &FileMetadata, reclaimed_ref_bytes: u64) {
+        let Some(u) = &self.bucket_usage else { return };
+        u.apply_net(bucket, Some(meta), None, -(reclaimed_ref_bytes as i64));
+    }
+
+    /// Resolve the prior object at `bucket/key` for overwrite-net accounting —
+    /// only when a counter is attached. `None` on miss / no counter.
+    async fn prior_for_counter(&self, bucket: &str, key: &str) -> Option<FileMetadata> {
+        self.bucket_usage.as_ref()?;
+        let (obj_key, deltaspace_id) = Self::validated_key(bucket, key).ok()?;
+        self.resolve_metadata(bucket, &deltaspace_id, &obj_key)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Best-effort counter update for the delta-passthrough FAST PATH
+    /// (`transfer.rs`), which ships a `.delta` verbatim via `put_delta_raw` and
+    /// thus bypasses the `store()` choke point. Overwrite-aware + adds any
+    /// reference the copy seeded. Mirrors [`Self::record_store`].
+    pub async fn record_fast_path_copy(
+        &self,
+        bucket: &str,
+        dest_key: &str,
+        delta_meta: &FileMetadata,
+        seeded_reference_bytes: u64,
+    ) {
+        let prior = self.prior_for_counter(bucket, dest_key).await;
+        let Some(u) = &self.bucket_usage else { return };
+        u.apply_net(
+            bucket,
+            prior.as_ref(),
+            Some(delta_meta),
+            seeded_reference_bytes as i64,
+        );
     }
 
     /// Return a reference to the metadata cache (for handler-level access).
@@ -708,6 +789,71 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
     /// Returns whether the xdelta3 CLI binary is available for legacy delta decoding.
     pub fn is_cli_available(&self) -> bool {
         self.codec.is_cli_available()
+    }
+
+    /// The installed xdelta3 version line (e.g. "Xdelta version 3.0.11..."), if any.
+    pub fn cli_version(&self) -> Option<&str> {
+        self.codec.cli_version()
+    }
+
+    /// Bytes above which a delta-eligible PUT routes through the streaming spool
+    /// store (`store_spooled_delta`). Tied to `max_object_size`; overridable via
+    /// `DGP_SPOOL_THRESHOLD_BYTES` (shared with the GET-side threshold).
+    pub fn spool_store_threshold(&self) -> u64 {
+        crate::config::env_parse_with_default("DGP_SPOOL_THRESHOLD_BYTES", self.max_object_size)
+    }
+
+    /// Whether `key`'s filename is delta-eligible (used by the adapter to decide
+    /// the streaming-store route before constructing a spool).
+    pub fn is_delta_eligible_key(&self, key: &str) -> bool {
+        let filename = key.rsplit('/').next().unwrap_or(key);
+        self.file_router.is_delta_eligible(filename)
+    }
+
+    /// Run a spool acquisition under the configured timeout, mapping a timeout to
+    /// SlowDown (don't park the request + its budget forever under contention).
+    /// The ONE place the timeout/Overloaded policy lives — both PUT/POST
+    /// (`spool_acquire`) and GET (`spool_acquire_pair`) go through it.
+    async fn with_spool_timeout<T, F>(fut: F) -> Result<T, EngineError>
+    where
+        F: std::future::Future<Output = std::io::Result<T>>,
+    {
+        let secs = crate::config::env_parse_with_default("DGP_SPOOL_ACQUIRE_TIMEOUT_SECS", 120u64);
+        tokio::time::timeout(std::time::Duration::from_secs(secs), fut)
+            .await
+            .map_err(|_| {
+                EngineError::Overloaded("spool budget exhausted; retry shortly".to_string())
+            })?
+            .map_err(|e| EngineError::Storage(StorageError::from(e)))
+    }
+
+    /// Acquire a spool file (timed). For the adapter to stage a large PUT/POST
+    /// body before `store_spooled_delta`. Both ingest paths share it (B1.1).
+    pub async fn spool_acquire(
+        &self,
+        bytes: u64,
+    ) -> Result<crate::deltaglider::spool::Spool, EngineError> {
+        Self::with_spool_timeout(self.spool.acquire(bytes)).await
+    }
+
+    /// Acquire a deadlock-safe spool PAIR (timed) — the GET reconstruct path.
+    pub async fn spool_acquire_pair(
+        &self,
+        a: u64,
+        b: u64,
+    ) -> Result<
+        (
+            crate::deltaglider::spool::Spool,
+            crate::deltaglider::spool::Spool,
+        ),
+        EngineError,
+    > {
+        Self::with_spool_timeout(self.spool.acquire_pair(a, b)).await
+    }
+
+    /// Whether the codec passes `-a` (armor disabled) to xdelta3 (3.1+ only).
+    pub fn codec_armor_disabled(&self) -> bool {
+        self.codec.armor_disabled()
     }
 
     /// Returns the maximum object size in bytes.
@@ -829,6 +975,105 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
                 self.prefix_locks.len()
             );
         }
+    }
+
+    // === Raw deltaspace blob accessors (replication delta-passthrough) ===
+    //
+    // These read/write the LITERAL stored blob + metadata through the
+    // routed+wrapped storage top. For a plaintext object the encrypting
+    // wrapper is a no-op so the round-trip is byte-verbatim; markers on
+    // the returned metadata reflect AT-REST state (the wrapper encrypts
+    // bodies, not metadata). Policy lives in `transfer.rs`; the engine
+    // only exposes the routed raw I/O + the per-deltaspace lock.
+
+    /// Read a delta blob verbatim from a deltaspace.
+    pub async fn get_delta_raw(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.storage.get_delta(bucket, prefix, filename).await
+    }
+
+    /// Write a delta blob + metadata verbatim into a deltaspace.
+    pub async fn put_delta_raw(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+        data: &[u8],
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        self.storage
+            .put_delta(bucket, prefix, filename, data, metadata)
+            .await
+    }
+
+    /// Read a deltaspace reference blob verbatim.
+    pub async fn get_reference_raw(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.storage.get_reference(bucket, prefix).await
+    }
+
+    /// Write a deltaspace reference blob + metadata verbatim.
+    pub async fn put_reference_raw(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        data: &[u8],
+        metadata: &FileMetadata,
+    ) -> Result<(), StorageError> {
+        self.storage
+            .put_reference(bucket, prefix, data, metadata)
+            .await
+    }
+
+    /// Reference metadata as a `Result` (errors propagate) — for callers that
+    /// must distinguish "no reference" from a read failure during seeding.
+    pub async fn reference_metadata_raw(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> Result<FileMetadata, StorageError> {
+        self.storage.get_reference_metadata(bucket, prefix).await
+    }
+
+    /// Reference metadata for a deltaspace, or `None` when no reference exists.
+    pub async fn reference_meta(&self, bucket: &str, prefix: &str) -> Option<FileMetadata> {
+        if !self.storage.has_reference(bucket, prefix).await {
+            return None;
+        }
+        self.storage
+            .get_reference_metadata(bucket, prefix)
+            .await
+            .ok()
+    }
+
+    /// Delta metadata for one object (full Delta info incl. `ref_sha256`).
+    pub async fn delta_meta(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        filename: &str,
+    ) -> Result<FileMetadata, StorageError> {
+        self.storage
+            .get_delta_metadata(bucket, prefix, filename)
+            .await
+    }
+
+    /// Run `f` while holding the per-deltaspace prefix lock, serialising
+    /// the reference seed against concurrent live PUTs to that deltaspace.
+    pub async fn with_dest_prefix_lock<F, Fut, R>(&self, prefix: &str, f: F) -> R
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        let _guard = self.acquire_prefix_lock(prefix).await;
+        f().await
     }
 
     /// Parse and validate an S3 key, returning the parsed key and deltaspace ID.
@@ -1317,7 +1562,7 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
 
     /// Delete an object
     #[instrument(skip(self))]
-    pub async fn delete(&self, bucket: &str, key: &str) -> Result<(), EngineError> {
+    pub async fn delete(&self, bucket: &str, key: &str) -> Result<FileMetadata, EngineError> {
         let (obj_key, deltaspace_id) = Self::validated_key(bucket, key)?;
 
         info!("Deleting {}/{}", bucket, key);
@@ -1359,7 +1604,15 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         let has_objects = remaining
             .iter()
             .any(|m| !matches!(m.storage_info, StorageInfo::Reference { .. }));
+        // Bytes of a reclaimed reference.bin (stored-only) — subtracted from the
+        // counter so stored_bytes stays exact when the last delta is removed.
+        let mut reclaimed_ref_bytes = 0u64;
         if !has_objects && self.storage.has_reference(bucket, &deltaspace_id).await {
+            reclaimed_ref_bytes = remaining
+                .iter()
+                .find(|m| matches!(m.storage_info, StorageInfo::Reference { .. }))
+                .map(|m| m.file_size)
+                .unwrap_or(0);
             // Delete storage BEFORE invalidating cache — prevents stale cache entries
             // from a concurrent GET loading between invalidation and deletion.
             self.storage
@@ -1376,8 +1629,11 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         drop(_guard);
         self.cleanup_prefix_locks();
 
+        // Best-effort counter update: -1 object + reclaimed reference bytes.
+        self.record_delete(bucket, &metadata, reclaimed_ref_bytes);
+
         debug!("Deleted {}/{}", bucket, key);
-        Ok(())
+        Ok(metadata)
     }
 
     /// Get reference with caching. Returns `Bytes` for zero-copy sharing.
@@ -1574,6 +1830,36 @@ mod tests {
             _: &str,
         ) -> Result<Vec<u8>, crate::storage::StorageError> {
             Ok(vec![])
+        }
+        async fn get_passthrough_stream(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<bytes::Bytes, crate::storage::StorageError>>,
+            crate::storage::StorageError,
+        > {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+        async fn get_passthrough_stream_range(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: u64,
+            _: u64,
+        ) -> Result<
+            (
+                futures::stream::BoxStream<
+                    'static,
+                    Result<bytes::Bytes, crate::storage::StorageError>,
+                >,
+                u64,
+            ),
+            crate::storage::StorageError,
+        > {
+            Ok((Box::pin(futures::stream::empty()), 0))
         }
         async fn get_passthrough_metadata(
             &self,
