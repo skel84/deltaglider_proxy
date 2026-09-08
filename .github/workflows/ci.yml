@@ -444,7 +444,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-hosted
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
+        run: cargo install --locked cargo-audit --version 0.22.2
       - name: cargo audit
         env:
           RUSTC_WRAPPER: ""  # audit doesn't compile
@@ -464,7 +464,7 @@ jobs:
       - name: Install cargo-deny
         env:
           RUSTC_WRAPPER: ""
-        run: cargo install --locked cargo-deny
+        run: cargo install --locked cargo-deny --version 0.20.2
       - name: cargo deny check
         env:
           RUSTC_WRAPPER: ""
