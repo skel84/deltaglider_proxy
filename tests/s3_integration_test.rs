@@ -1364,7 +1364,7 @@ async fn test_multipart_delta_compression() {
 }
 
 #[tokio::test]
-async fn test_multipart_large_zip_forces_passthrough_on_s3_backend() {
+async fn test_multipart_large_delta_candidate_is_refused_on_s3_backend() {
     skip_unless_minio!();
     let endpoint = minio_endpoint();
     ensure_bucket(&endpoint).await;
@@ -1392,87 +1392,41 @@ async fn test_multipart_large_zip_forces_passthrough_on_s3_backend() {
     let variant = mutate_binary(&base, 0.04);
     let key = format!("{}/large-variant.zip", prefix);
     let upload_id = create_multipart_upload(&http, &server.endpoint(), server.bucket(), &key).await;
-    let mid = variant.len() / 2;
-    let e1 = upload_part(
-        &http,
-        &server.endpoint(),
-        server.bucket(),
-        &key,
-        &upload_id,
-        1,
-        variant[..mid].to_vec(),
-    )
-    .await;
-    let e2 = upload_part(
-        &http,
-        &server.endpoint(),
-        server.bucket(),
-        &key,
-        &upload_id,
-        2,
-        variant[mid..].to_vec(),
-    )
-    .await;
-
-    let complete = complete_multipart_upload(
-        &http,
-        &server.endpoint(),
-        server.bucket(),
-        &key,
-        &upload_id,
-        &[(1, &e1), (2, &e2)],
-    )
-    .await;
-    assert!(
-        complete.status().is_success(),
-        "CompleteMultipartUpload failed: {}",
-        complete.status()
-    );
-    let storage_type = complete
-        .headers()
-        .get("x-amz-storage-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
-    assert_eq!(
-        storage_type, "passthrough",
-        "Expected forced passthrough for large MPU complete, got {}",
-        storage_type
-    );
-    let roundtrip = get_bytes(&http, &server.endpoint(), server.bucket(), &key).await;
-    assert_eq!(roundtrip, variant);
+    let response = http
+        .put(format!(
+            "{}/{}/{}?partNumber=1&uploadId={}",
+            server.endpoint(),
+            server.bucket(),
+            key,
+            upload_id
+        ))
+        .body(variant)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(response.text().await.unwrap().contains("EntityTooLarge"));
+    let head = http
+        .head(format!("{}/{}/{}", server.endpoint(), server.bucket(), key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn test_startup_sweeps_orphan_relay_artifacts() {
+async fn test_default_startup_preserves_unowned_relay_artifacts() {
     let relay_root = std::env::temp_dir().join("deltaglider-mpu-relay");
-    let orphan_dir = relay_root.join(format!("orphan-dir-{}", unique_prefix()));
-    let orphan_file = relay_root.join(format!("orphan-file-{}.tmp", unique_prefix()));
-    fs::create_dir_all(&orphan_dir).expect("create orphan relay dir");
-    fs::write(orphan_dir.join("part-00001.bin"), b"orphan").expect("write orphan relay part");
-    fs::write(&orphan_file, b"orphan").expect("write orphan relay file");
-
+    fs::create_dir_all(&relay_root).unwrap();
+    let orphan = tempfile::tempdir_in(&relay_root).unwrap();
+    let part = orphan.path().join("part-00001.bin");
+    fs::write(&part, b"unowned payload").unwrap();
     let _server = TestServer::filesystem().await;
-
-    for _ in 0..40 {
-        if !orphan_dir.exists() && !orphan_file.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
-        !orphan_dir.exists(),
-        "startup sweep should remove orphan relay directory {:?}",
-        orphan_dir
-    );
-    assert!(
-        !orphan_file.exists(),
-        "startup sweep should remove orphan relay file {:?}",
-        orphan_file
-    );
+    assert_eq!(fs::read(&part).unwrap(), b"unowned payload");
 }
 
 #[test]
-fn test_completing_timeout_reclaims_stuck_upload() {
+fn test_completing_timeout_retains_owned_upload() {
     let store = MultipartStore::new(10 * 1024 * 1024);
     let id = store
         .create_with_relay_policy("b", "large.zip", None, HashMap::new(), Some(1024), false)
@@ -1492,11 +1446,15 @@ fn test_completing_timeout_reclaims_stuck_upload() {
 
     let report = store.cleanup_expired(Duration::from_secs(3600), Duration::from_millis(1));
     assert_eq!(
-        report.swept_completing_uploads, 1,
-        "sweep should reclaim stuck completing upload"
+        report.swept_completing_uploads, 0,
+        "sweep must not reclaim a completion owned by a backend task"
     );
-    assert!(report.reclaimed_bytes >= 2048);
-    assert_eq!(store.count_uploads(), 0, "upload should be removed");
+    assert_eq!(report.reclaimed_bytes, 0);
+    assert_eq!(store.count_uploads(), 1);
+    assert_eq!(store.get_part_size(&id, 1), Some(2048));
+    store.finish_upload(&id);
+    assert_eq!(store.count_uploads(), 0);
+    assert_eq!(store.get_part_size(&id, 1), None);
 }
 
 #[tokio::test]

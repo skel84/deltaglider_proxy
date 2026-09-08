@@ -468,7 +468,9 @@ jobs:
       - name: cargo deny check
         env:
           RUSTC_WRAPPER: ""
-        run: cargo deny check
+        # Preserve the existing unmaintained-package warning policy.
+        # Vulnerabilities, unsoundness, licenses and source violations still fail.
+        run: cargo deny check --warn unmaintained
 
   frontend-lint:
     name: Frontend Lint

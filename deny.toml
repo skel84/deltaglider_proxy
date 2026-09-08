@@ -19,6 +19,7 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     "MPL-2.0",
+    "CDLA-Permissive-2.0", # Mozilla root certificate data (webpki-roots)
 ]
 
 # The workspace itself is GPL-3.0-only; dependencies retain the allow-list above.
