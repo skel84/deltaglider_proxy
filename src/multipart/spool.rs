@@ -119,7 +119,21 @@ mod tests {
         assert!(status.success());
         assert!(live.exists());
         drop(owner);
-        let restart = Spool::open(dir.path()).unwrap();
+        // Other parallel tests spawn codec processes. On Unix a concurrent
+        // fork may briefly inherit the open-file-description lock until exec
+        // closes the CLOEXEC descriptor. Keep refusing reclamation while that
+        // descriptor exists, and bound how long restart may wait for release.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let restart = loop {
+            match Spool::open(dir.path()) {
+                Ok(restart) => break restart,
+                Err(error) => {
+                    assert_eq!(fs::read(&live).unwrap(), b"retained");
+                    assert!(std::time::Instant::now() < deadline, "{error}");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        };
         assert!(!live.exists());
         drop(restart);
     }
