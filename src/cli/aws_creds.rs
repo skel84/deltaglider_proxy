@@ -405,6 +405,15 @@ aws_access_key_id=AK2
     fn resolve_flag_wins_over_env_and_file() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env = EnvGuard::capture_and_clear();
+        // Exercise all three sources without reading workstation credentials.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials");
+        std::fs::write(
+            &path,
+            "[default]\naws_access_key_id=file-key\naws_secret_access_key=file-secret\nregion=test-region\n",
+        )
+        .unwrap();
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &path);
         std::env::set_var("AWS_ACCESS_KEY_ID", "from-env");
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "from-env-secret");
 
