@@ -255,11 +255,12 @@ Caches SigV4 signatures and rejects duplicates within the replay window. This is
 
 A duplicate of a **mutating** request (PUT/POST/DELETE) within the window is rejected with 400. A duplicate of an **idempotent read** (GET/HEAD) is tolerated and served — boto3 emits byte-identical signatures for the same request within one signing second, and replaying a read re-reads the same bytes. Replay rejections are not counted toward the auth-failure lockout. `DGP_REPLAY_WINDOW_SECS=0` disables replay rejection entirely. When the cache exceeds 500K entries, expired signatures are evicted first.
 
-The native-S3 large-backup profile makes one narrow exception: a completion
-rejected with `503 SlowDown` **before acquiring completion ownership** releases
-that request's replay entry. A client or HTTP intermediary can retry the same
-signed completion without turning capacity rejection into `400 InvalidArgument`.
-The completion slot, retained parts and resource limits are unchanged. Successful,
+Two pre-mutation capacity refusals release that request's replay entry:
+multipart creation rejected at the upload-count limit, and native-S3 large-backup
+completion rejected **before acquiring completion ownership**. Both return
+`503 SlowDown`. A client or HTTP intermediary can retry the same signed request
+without turning capacity rejection into `400 InvalidArgument`.
+Upload counts, completion slots, retained parts and resource limits are unchanged. Successful,
 in-flight, cancelled and ambiguously failed storage work retain replay protection;
 an arbitrary 5xx response does not grant permission to replay a mutation. Other
 admission errors are not covered by this exception. Clients still need bounded

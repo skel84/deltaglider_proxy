@@ -130,6 +130,66 @@ async fn wait_relay_condition(mut condition: impl AsyncFnMut() -> bool) {
 }
 
 #[tokio::test]
+async fn relay_creation_capacity_refusal_preserves_retry_and_existing_uploads() {
+    use crate::api::auth::{ReplayCache, UnexecutedReplayAdmission};
+    use s3s::S3;
+    let (backend, remote, server) = relay_fixture().await;
+    let dir = crate::multipart::test_spool_dir();
+    let service = relay_adapter(backend, dir.path());
+    let cache = ReplayCache::default();
+    let make_request = || {
+        let mut input = s3s::dto::CreateMultipartUploadInput::builder();
+        input
+            .set_bucket("physical".into())
+            .set_key("archive.gz".into());
+        let mut request = relay_request_input(input.build().unwrap());
+        request
+            .extensions
+            .insert(UnexecutedReplayAdmission::for_test(
+                cache.clone(),
+                "creation-retry",
+            ));
+        request
+    };
+    let mut ids = Vec::new();
+    let mut refused = false;
+    // Bounded fixture fill: exercise the real capacity gate, not a mock error.
+    for _ in 0..64 {
+        match service.create_multipart_upload(make_request()).await {
+            Ok(response) => {
+                ids.push(response.output.upload_id.unwrap());
+                assert!(cache.contains_key("creation-retry"));
+            }
+            Err(error) => {
+                assert_eq!(error.code(), &s3s::S3ErrorCode::SlowDown);
+                refused = true;
+                break;
+            }
+        }
+    }
+    assert!(refused, "fixture must reach the actual refusal gate");
+    assert!(!cache.contains_key("creation-retry"));
+    assert_eq!(service.state().multipart.count_uploads(), ids.len());
+    assert_eq!(remote.lock().await.creates, 0);
+    // Make room without altering any other upload; retry can now create once.
+    service
+        .state()
+        .multipart
+        .abort(&ids[0], "physical", "archive.gz")
+        .unwrap();
+    service
+        .create_multipart_upload(make_request())
+        .await
+        .unwrap();
+    assert_eq!(service.state().multipart.count_uploads(), ids.len());
+    assert!(
+        cache.contains_key("creation-retry"),
+        "executed creation stays protected"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn relay_completion_capacity_rejection_releases_only_unexecuted_replay() {
     use crate::api::auth::{ReplayCache, UnexecutedReplayAdmission};
     use s3s::S3;

@@ -978,7 +978,20 @@ impl s3s::S3 for DeltaGliderS3Service {
                 Some(delta_limit),
                 false,
             )
-            .map_err(engine_error_to_s3s)?;
+            .map_err(|error| {
+                // This store entrypoint returns SlowDown only at the upload
+                // count gate, before inserting an upload or touching spool.
+                // Do not apply this exception to upload_part/storage errors.
+                if matches!(&error, crate::api::S3Error::SlowDown(_)) {
+                    if let Some(admission) = req
+                        .extensions
+                        .get::<crate::api::auth::UnexecutedReplayAdmission>()
+                    {
+                        admission.release();
+                    }
+                }
+                engine_error_to_s3s(error)
+            })?;
         self.state.multipart.pin_admission(
             &upload_id,
             admission,
