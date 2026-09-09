@@ -162,9 +162,21 @@ async fn test_quota_delete_frees_space() {
         .build()
         .await;
 
-    // Fill bucket well over quota
-    put_sized(&server, "fill1.bin", 8000).await.ok();
-    put_sized(&server, "fill2.bin", 8000).await.ok();
+    // Establish over-quota usage in the first optimistic PUT. Two smaller
+    // writes race the scanner: it can reject the second, leaving the bucket
+    // below quota. Never ignore a seed failure in a recovery test.
+    put_sized(&server, "fill.bin", 16000)
+        .await
+        .expect("seed over-quota usage");
+    let client = server.s3_client().await;
+    let head = client
+        .head_object()
+        .bucket(BUCKET)
+        .key("fill.bin")
+        .send()
+        .await
+        .expect("verify recovery fixture");
+    assert_eq!(head.content_length(), Some(16000));
 
     // Wait for scanner to enforce quota
     let mut blocked = false;
@@ -179,8 +191,13 @@ async fn test_quota_delete_frees_space() {
     assert!(blocked, "Should be over quota after filling");
 
     // Delete files to free space
-    delete(&server, "fill1.bin").await;
-    delete(&server, "fill2.bin").await;
+    client
+        .delete_object()
+        .bucket(BUCKET)
+        .key("fill.bin")
+        .send()
+        .await
+        .expect("delete recovery fixture");
 
     // Poll until scanner refreshes and allows writes again (max 15 seconds)
     // Scanner cache TTL is 5 minutes, but get_or_scan re-triggers scan when stale.
