@@ -69,6 +69,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
+reqwest-otel = { package = "reqwest", version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 parking_lot = "0.12"
 dashmap = "6"
 moka = { version = "0.12", features = ["sync", "future"] }
@@ -144,4 +148,3 @@ criterion = "0.5"
 [[bench]]
 name = "codec"
 harness = false
-

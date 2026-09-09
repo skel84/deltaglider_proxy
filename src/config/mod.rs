@@ -45,6 +45,12 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Server",
     },
     EnvVarEntry {
+        name: "DGP_OTEL_ENABLED",
+        description: "Opt-in bounded OTLP HTTP trace export (default false); requires OTEL_EXPORTER_OTLP_ENDPOINT; startup-only",
+        example: "true",
+        category: "Server",
+    },
+    EnvVarEntry {
         name: "DGP_LOG_FORMAT",
         description: "Log output format: 'text' (default, human-readable) or 'json' (one JSON object per line, greppable with jq). Startup-only — not hot-reloadable.",
         example: "json",

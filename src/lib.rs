@@ -29,6 +29,7 @@ pub mod maintenance;
 pub mod metadata_cache;
 pub mod metrics;
 pub mod multipart;
+pub mod otel;
 pub mod rate_limiter;
 pub mod replication;
 pub mod s3_adapter_s3s;
