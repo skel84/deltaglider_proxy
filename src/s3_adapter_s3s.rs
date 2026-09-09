@@ -1018,7 +1018,19 @@ impl s3s::S3 for DeltaGliderS3Service {
             .state
             .multipart
             .acquire_part_owner(&input.upload_id)
-            .map_err(engine_error_to_s3s)?;
+            .map_err(|error| {
+                // This gate only attempts a local lock. No body has been
+                // collected and no upload state or backend has been changed.
+                if matches!(&error, crate::api::S3Error::SlowDown(_)) {
+                    if let Some(admission) = req
+                        .extensions
+                        .get::<crate::api::auth::UnexecutedReplayAdmission>()
+                    {
+                        admission.release();
+                    }
+                }
+                engine_error_to_s3s(error)
+            })?;
         let admission = self.state.multipart.admission(&input.upload_id);
         if let Some(admission) = &admission {
             if !std::sync::Weak::ptr_eq(
