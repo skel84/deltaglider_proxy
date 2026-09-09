@@ -255,6 +255,59 @@ Caches SigV4 signatures and rejects duplicates within the replay window. This is
 
 A duplicate of a **mutating** request (PUT/POST/DELETE) within the window is rejected with 400. A duplicate of an **idempotent read** (GET/HEAD) is tolerated and served — boto3 emits byte-identical signatures for the same request within one signing second, and replaying a read re-reads the same bytes. Replay rejections are not counted toward the auth-failure lockout. `DGP_REPLAY_WINDOW_SECS=0` disables replay rejection entirely. When the cache exceeds 500K entries, expired signatures are evicted first.
 
+Two pre-mutation capacity refusals release that request's replay entry:
+multipart creation rejected at the upload-count limit, and native-S3 large-backup
+completion rejected **before acquiring completion ownership**. Both return
+`503 SlowDown`. A client or HTTP intermediary can retry the same signed request
+without turning capacity rejection into `400 InvalidArgument`.
+Upload counts, completion slots, retained parts and resource limits are unchanged. Successful,
+in-flight, cancelled and ambiguously failed storage work retain replay protection;
+an arbitrary 5xx response does not grant permission to replay a mutation. Other
+admission errors are not covered by this exception. Clients still need bounded
+backoff: an intermediary's immediate retries may all encounter the occupied slot.
+
+## OTLP trace export
+
+`DGP_OTEL_ENABLED=true` opts into OTLP HTTP/protobuf trace export at startup.
+It is disabled by default. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to the collector's
+base URL; `/v1/traces` is appended. `OTEL_EXPORTER_OTLP_PROTOCOL`, when set, must
+be `http/protobuf`. Collector redirects and environment HTTP proxies are not
+followed. URLs containing credentials, query parameters or fragments are refused.
+Invalid exporter configuration disables export with a category-only warning;
+it does not prevent the S3 server from starting.
+
+Sampling defaults to **always on**, independently of the enable switch. Standard
+`OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` settings override the default
+using the Rust SDK's sampler configuration. For example, `traceidratio` with
+argument `0.1` samples approximately ten percent. Changes require restart.
+Incoming sampling flags and baggage are not consumed; request spans are currently
+independent root spans, not a distributed parent/child trace chain.
+
+Each S3-router request records only an allowlisted HTTP method and response status.
+Span timing ends when response headers are returned, not when a streamed response
+body finishes. Server errors use a fixed category, never an exception message.
+No request URL, object key, bucket, credentials, headers or body are exported.
+Existing tracing events are not bridged to OTLP. Prometheus metrics and existing
+log delivery retain their current ownership; this feature does not duplicate them.
+
+The service name is `deltaglider-proxy`. Only `k8s.cluster.name`,
+`k8s.namespace.name`, `k8s.pod.name`, `k8s.pod.uid` and `k8s.node.name` are accepted
+from `OTEL_RESOURCE_ATTRIBUTES`, with bounded label-shaped values. Unknown resource
+attributes are omitted. Do not put secrets in telemetry configuration.
+
+Export has a 512-span queue and batches of at most 64. A blocked collector drops
+overflow rather than blocking request processing. HTTP connect/total timeouts are
+one/two seconds; normal shutdown allows three seconds for flushing. Queue size is
+an application reservation, not a total RSS guarantee: exporter serialization,
+HTTP/TLS buffers and SDK state are additional. Always-on sampling is not a rate or
+memory cap. Measure overhead under the intended workload before activation.
+
+Disable with `DGP_OTEL_ENABLED=false` and restart; no storage route, identity,
+multipart limit or bucket state changes are needed. Export configuration and
+collector network access belong to the owning deployment, never a manual patch
+of an operator-generated Pod or DaemonSet. Local exporter tests are not proof of
+ClickStack ingestion or live migration acceptance.
+
 ## S3 backend HEAD concurrency
 
 During LIST operations that require per-object metadata, the proxy issues HEAD requests to the upstream S3 backend. These are limited to avoid triggering the backend's own throttling.

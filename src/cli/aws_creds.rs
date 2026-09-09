@@ -20,13 +20,21 @@ use std::path::{Path, PathBuf};
 /// Resolved credentials + a tag recording where they came from (for
 /// the optional `--verbose` trace and for the "which file did we
 /// read?" diagnostics).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedCreds {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub session_token: Option<String>,
     pub region: Option<String>,
     pub source: CredsSource,
+}
+
+impl std::fmt::Debug for ResolvedCreds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedCreds")
+            .field("credentials", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,13 +73,21 @@ pub enum CredsError {
 
 /// Inputs supplied by the CLI — all optional; the resolver fills in
 /// missing pieces from the env / profile chain.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub struct CredsInputs<'a> {
     pub access_key_flag: Option<&'a str>,
     pub secret_key_flag: Option<&'a str>,
     pub session_token_flag: Option<&'a str>,
     pub profile_flag: Option<&'a str>,
     pub region_flag: Option<&'a str>,
+}
+
+impl std::fmt::Debug for CredsInputs<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredsInputs")
+            .field("credentials", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Resolve credentials using the documented precedence chain. Reads
@@ -389,6 +405,15 @@ aws_access_key_id=AK2
     fn resolve_flag_wins_over_env_and_file() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env = EnvGuard::capture_and_clear();
+        // Exercise all three sources without reading workstation credentials.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials");
+        std::fs::write(
+            &path,
+            "[default]\naws_access_key_id=file-key\naws_secret_access_key=file-secret\nregion=test-region\n",
+        )
+        .unwrap();
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &path);
         std::env::set_var("AWS_ACCESS_KEY_ID", "from-env");
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "from-env-secret");
 
@@ -401,6 +426,30 @@ aws_access_key_id=AK2
         assert_eq!(r.access_key_id, "from-flag");
         assert_eq!(r.secret_access_key, "from-flag-secret");
         assert!(matches!(r.source, CredsSource::Flag));
+    }
+
+    #[test]
+    fn debug_diagnostics_never_expose_credential_material() {
+        let inputs = CredsInputs {
+            access_key_flag: Some("access-canary"),
+            secret_key_flag: Some("secret-canary"),
+            session_token_flag: Some("session-canary"),
+            profile_flag: Some("profile-canary"),
+            region_flag: Some("region-canary"),
+        };
+        let resolved = ResolvedCreds {
+            access_key_id: "access-canary".into(),
+            secret_access_key: "secret-canary".into(),
+            session_token: Some("session-canary".into()),
+            region: Some("region-canary".into()),
+            source: CredsSource::ProfileFile {
+                path: "path-canary".into(),
+                profile: "profile-canary".into(),
+            },
+        };
+        for diagnostic in [format!("{inputs:?}"), format!("{resolved:#?}")] {
+            assert!(!diagnostic.contains("canary"));
+        }
     }
 
     #[test]

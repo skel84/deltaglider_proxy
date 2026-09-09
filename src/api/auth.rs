@@ -37,6 +37,36 @@ type HmacSha256 = Hmac<Sha256>;
 /// Shared replay cache type: signature string -> timestamp of first use.
 pub type ReplayCache = Arc<DashMap<String, Instant>>;
 
+/// Capability issued only after authentication and fresh replay admission.
+/// Dropping it is deliberately fail-closed. Release it only when rejecting a
+/// request before starting any mutation, never after an ambiguous storage error.
+#[derive(Clone)]
+pub(crate) struct UnexecutedReplayAdmission {
+    cache: ReplayCache,
+    signature: String,
+    first_seen: Instant,
+}
+
+impl UnexecutedReplayAdmission {
+    #[cfg(test)]
+    pub(crate) fn for_test(cache: ReplayCache, signature: &str) -> Self {
+        let first_seen = Instant::now();
+        cache.insert(signature.into(), first_seen);
+        Self {
+            cache,
+            signature: signature.into(),
+            first_seen,
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        // A late rejection must not erase a newer request's replay protection
+        // after this entry expired or was evicted and reinserted.
+        self.cache
+            .remove_if(&self.signature, |_, seen| *seen == self.first_seen);
+    }
+}
+
 const MAX_REPLAY_ENTRIES: usize = 500_000;
 
 /// The single auth-gate decision folded from the config-DB lock flag and the
@@ -1006,7 +1036,7 @@ pub async fn sigv4_auth_middleware(
             // so the window is measured from first-seen and a tight retry loop
             // can't keep an idempotent read's slot alive indefinitely.
             let mut is_duplicate = false;
-            cache
+            let first_seen = *cache
                 .entry(sig.clone())
                 .and_modify(|first_seen: &mut Instant| {
                     if first_seen.elapsed() < replay_window {
@@ -1019,7 +1049,13 @@ pub async fn sigv4_auth_middleware(
                 .or_insert_with(Instant::now);
 
             match replay_decision(request.method(), is_duplicate) {
-                ReplayVerdict::Fresh => {}
+                ReplayVerdict::Fresh => {
+                    request.extensions_mut().insert(UnexecutedReplayAdmission {
+                        cache: cache.clone(),
+                        signature: sig.clone(),
+                        first_seen,
+                    });
+                }
                 ReplayVerdict::AllowIdempotentReplay => {
                     // Boto3 same-second signature on an idempotent read. Safe to
                     // serve; log at debug only (not a security event) and do not
@@ -1275,6 +1311,22 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn unexecuted_replay_release_is_explicit_and_generation_scoped() {
+        let cache = ReplayCache::default();
+        let admission = UnexecutedReplayAdmission::for_test(cache.clone(), "synthetic");
+        drop(admission.clone());
+        assert!(cache.contains_key("synthetic"), "drop must fail closed");
+        admission.release();
+        assert!(!cache.contains_key("synthetic"));
+
+        let stale = UnexecutedReplayAdmission::for_test(cache.clone(), "synthetic");
+        let newer = stale.first_seen + Duration::from_secs(3);
+        cache.insert("synthetic".into(), newer);
+        stale.release();
+        assert_eq!(*cache.get("synthetic").unwrap(), newer);
+    }
 
     /// Discriminant for asserting `classify_auth_gate` outcomes without
     /// constructing/comparing the borrowed payloads.

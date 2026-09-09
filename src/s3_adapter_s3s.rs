@@ -978,7 +978,20 @@ impl s3s::S3 for DeltaGliderS3Service {
                 Some(delta_limit),
                 false,
             )
-            .map_err(engine_error_to_s3s)?;
+            .map_err(|error| {
+                // This store entrypoint returns SlowDown only at the upload
+                // count gate, before inserting an upload or touching spool.
+                // Do not apply this exception to upload_part/storage errors.
+                if matches!(&error, crate::api::S3Error::SlowDown(_)) {
+                    if let Some(admission) = req
+                        .extensions
+                        .get::<crate::api::auth::UnexecutedReplayAdmission>()
+                    {
+                        admission.release();
+                    }
+                }
+                engine_error_to_s3s(error)
+            })?;
         self.state.multipart.pin_admission(
             &upload_id,
             admission,
@@ -1121,6 +1134,17 @@ impl s3s::S3 for DeltaGliderS3Service {
                     .clone()
                     .try_acquire_owned()
                     .map_err(|_| {
+                        // This request has not acquired completion ownership or
+                        // started storage I/O. Intermediaries may retry the 503
+                        // with the identical signature: do not turn safe load
+                        // shedding into a permanent replay error. Successful,
+                        // in-flight and ambiguous completions retain protection.
+                        if let Some(admission) =
+                            req.extensions
+                                .get::<crate::api::auth::UnexecutedReplayAdmission>()
+                        {
+                            admission.release();
+                        }
                         s3s::s3_error!(SlowDown, "Multipart completion capacity reached")
                     })?,
             )

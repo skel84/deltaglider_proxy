@@ -415,6 +415,13 @@ fn run_cli_async<F: std::future::Future<Output = i32>>(fut: F) -> i32 {
 async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // --- Logging ---
     let log_reload_handle = init_tracing(&cli);
+    let telemetry = match tokio::task::spawn_blocking(deltaglider_proxy::otel::init).await {
+        Ok(Ok(telemetry)) => telemetry,
+        _ => {
+            tracing::warn!("OTLP initialization failed; serving without trace export");
+            None
+        }
+    };
 
     // --- Configuration ---
     // Use `load_from_path` for explicit --config so env overrides still apply
@@ -779,6 +786,14 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &public_prefix_snapshot,
         &admission_chain,
     );
+    let app = if let Some(telemetry) = telemetry.as_ref() {
+        app.layer(axum::middleware::from_fn_with_state(
+            telemetry.tracer(),
+            deltaglider_proxy::otel::request_trace,
+        ))
+    } else {
+        app
+    };
 
     // --- External auth (OAuth/OIDC) ---
     let external_auth = {
@@ -915,5 +930,8 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("Server shutdown complete");
+    if let Some(telemetry) = telemetry {
+        let _ = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
+    }
     Ok(())
 }

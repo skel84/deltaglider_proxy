@@ -633,7 +633,10 @@ pub fn build_s3_router(
             intercept_form_post_for_s3s,
         ))
         .layer(middleware::from_fn(add_s3_request_id))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(deltaglider_proxy::http_telemetry::request_span),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             deltaglider_proxy::metrics::http_metrics_middleware,

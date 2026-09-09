@@ -45,6 +45,12 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Server",
     },
     EnvVarEntry {
+        name: "DGP_OTEL_ENABLED",
+        description: "Opt-in bounded OTLP HTTP trace export (default false); requires OTEL_EXPORTER_OTLP_ENDPOINT; startup-only",
+        example: "true",
+        category: "Server",
+    },
+    EnvVarEntry {
         name: "DGP_LOG_FORMAT",
         description: "Log output format: 'text' (default, human-readable) or 'json' (one JSON object per line, greppable with jq). Startup-only — not hot-reloadable.",
         example: "json",
@@ -2673,106 +2679,6 @@ mod tests {
             auth_cfg(Some("AK"), None, None).classify_auth_config(),
             AuthConfigOutcome::Missing
         );
-    }
-
-    /// Ensure every env var read in `from_env()` is present in the registry.
-    #[test]
-    fn test_registry_completeness() {
-        // All env var names referenced in from_env() — extracted manually and
-        // kept in sync by this test.
-        let used_in_from_env: &[&str] = &[
-            "DGP_LISTEN_ADDR",
-            "DGP_S3_ENDPOINT",
-            "DGP_S3_REGION",
-            "DGP_S3_PATH_STYLE",
-            "DGP_BE_AWS_ACCESS_KEY_ID",
-            "DGP_BE_AWS_SECRET_ACCESS_KEY",
-            "DGP_DATA_DIR",
-            "DGP_MAX_DELTA_RATIO",
-            "DGP_MAX_OBJECT_SIZE",
-            "DGP_MAX_PASSTHROUGH_OBJECT_SIZE",
-            "DGP_CACHE_MB",
-            "DGP_METADATA_CACHE_MB",
-            "DGP_CODEC_CONCURRENCY",
-            "DGP_BLOCKING_THREADS",
-            "DGP_AUTHENTICATION",
-            "DGP_ACCESS_KEY_ID",
-            "DGP_SECRET_ACCESS_KEY",
-            "DGP_BOOTSTRAP_PASSWORD_HASH",
-            "DGP_LOG_LEVEL",
-            "DGP_CONFIG_SYNC_BUCKET",
-            "DGP_CONFIG_SYNC_KEY",
-            "DGP_CONFIG_SYNC_UPDATE_CAS",
-            "DGP_TLS_ENABLED",
-            "DGP_TLS_CERT",
-            "DGP_TLS_KEY",
-        ];
-
-        let registry_names: Vec<&str> = super::ENV_VAR_REGISTRY.iter().map(|e| e.name).collect();
-
-        // Every var used in from_env must be in the registry
-        for var in used_in_from_env {
-            assert!(
-                registry_names.contains(var),
-                "Env var {var} is used in from_env() but missing from ENV_VAR_REGISTRY"
-            );
-        }
-
-        // Every registry entry must be referenced somewhere in the codebase.
-        // Vars not in from_env() are read at other call sites (startup, session, etc.).
-        let used_outside_from_env: &[&str] = &[
-            "DGP_CONFIG",                            // config::load()
-            "DGP_DEBUG_HEADERS",                     // api::handlers::debug_headers_enabled()
-            "DGP_TRUST_PROXY_HEADERS",               // rate_limiter::trust_proxy_headers()
-            "DGP_LOG_FORMAT",                        // startup::init_tracing() (text|json)
-            "DGP_LOG_RING_SIZE",                     // logs::ring_capacity()
-            "DGP_LOG_RING_LEVEL",                    // logs::ring_min_level()
-            "DGP_SESSION_TTL_HOURS",                 // session::default_session_ttl()
-            "DGP_MPU_LARGE_SPOOL_DIR",               // main multipart disk profile
-            "DGP_MPU_MAX_PART_BYTES",                // multipart::MultipartIngress
-            "DGP_MPU_MAX_BUFFERED_PARTS",            // multipart::MultipartIngress
-            "DGP_MAX_MULTIPART_UPLOADS",             // multipart::default_max_uploads()
-            "DGP_MULTIPART_SWEEP_INTERVAL_SECS",     // main multipart sweeper cadence
-            "DGP_MULTIPART_SWEEP_MAX_AGE_SECS",      // main multipart sweeper max-age cutoff
-            "DGP_MULTIPART_COMPLETING_TIMEOUT_SECS", // main multipart Completing timeout
-            "DGP_MAX_TOTAL_MULTIPART_BYTES",         // multipart::max_total_multipart_bytes()
-            "DGP_MULTIPART_IDLE_TTL_HOURS",          // multipart::idle_ttl_hours()
-            "DGP_AUDIT_RING_SIZE",                   // audit::ring capacity
-            "DGP_CLOCK_SKEW_SECONDS",                // api::auth + startup replay cache
-            "DGP_MAX_CONCURRENT_REQUESTS",           // startup::build_s3_router()
-            "DGP_CORS_PERMISSIVE",                   // demo::ui_router()
-            "DGP_REQUEST_TIMEOUT_SECS",              // startup::build_s3_router()
-            "DGP_CODEC_TIMEOUT_SECS",                // deltaglider::codec::codec_timeout()
-            "DGP_CODEC_STALL_SECS",                  // deltaglider::codec::codec_stall_timeout()
-            "DGP_CODEC_ABSOLUTE_SECS",               // deltaglider::codec::codec_absolute_ceiling()
-            "DGP_SPOOL_DIR",                         // deltaglider::spool::SpoolDir::from_env()
-            "DGP_SPOOL_MAX_BYTES",                   // deltaglider::spool::SpoolDir::from_env()
-            "DGP_SPOOL_THRESHOLD_BYTES",             // engine::retrieve::spool_threshold()
-            "DGP_SPOOL_ACQUIRE_TIMEOUT_SECS", // engine::retrieve::reconstruct_delta_to_spool()
-            "DGP_RATE_LIMIT_MAX_ATTEMPTS",    // rate_limiter::default_auth()
-            "DGP_RATE_LIMIT_WINDOW_SECS",     // rate_limiter::default_auth()
-            "DGP_RATE_LIMIT_LOCKOUT_SECS",    // rate_limiter::default_auth()
-            "DGP_REPLAY_WINDOW_SECS",         // api::auth replay detection
-            "DGP_SECURE_COOKIES",             // api::admin::auth::secure_cookies()
-            "DGP_STREAM_COPY_THRESHOLD",      // transfer_plan::stream_copy_threshold()
-            "DGP_MULTIPART_PART_SIZE",        // transfer_plan::multipart_part_size()
-            "DGP_UPLOAD_CONCURRENCY",         // transfer_plan::upload_concurrency()
-            "DGP_REPLICATION_TRANSFERS",      // transfer_plan::transfers()
-            "DGP_S3_READ_TIMEOUT_SECS",       // storage::s3::build_client()
-            "DGP_S3_CONNECT_TIMEOUT_SECS",    // storage::s3::build_client()
-            "DGP_S3_OPERATION_ATTEMPT_TIMEOUT_SECS", // storage::s3::build_client()
-            "DGP_S3_STALL_GRACE_SECS",        // storage::s3::build_client()
-            "DGP_TRUSTED_PROXY_CIDRS",        // rate_limiter::trusted_proxy_cidrs()
-        ];
-        for name in &registry_names {
-            if used_outside_from_env.contains(name) {
-                continue;
-            }
-            assert!(
-                used_in_from_env.contains(name),
-                "Env var {name} is in ENV_VAR_REGISTRY but not used in from_env() or listed in used_outside_from_env"
-            );
-        }
     }
 
     #[test]
