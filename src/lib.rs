@@ -19,6 +19,7 @@ pub mod config_sections;
 pub mod deltaglider;
 pub mod event_delivery;
 pub mod event_outbox;
+pub mod http_telemetry;
 pub mod iam;
 pub mod init;
 pub mod job_loop;
