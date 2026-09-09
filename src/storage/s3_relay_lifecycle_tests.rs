@@ -130,6 +130,61 @@ async fn wait_relay_condition(mut condition: impl AsyncFnMut() -> bool) {
 }
 
 #[tokio::test]
+async fn relay_completion_capacity_rejection_releases_only_unexecuted_replay() {
+    use crate::api::auth::{ReplayCache, UnexecutedReplayAdmission};
+    use s3s::S3;
+    let (backend, remote, server) = relay_fixture().await;
+    let dir = crate::multipart::test_spool_dir();
+    let service = relay_adapter(backend, dir.path());
+    let id = relay_create(&service, "archive.gz").await;
+    let etag = relay_part(&service, &id, 1, Bytes::from_static(b"retained")).await;
+    let cache = ReplayCache::default();
+    let make_request = || {
+        let mut request = relay_request_input(relay_complete_input(&id, vec![(1, etag.clone())]));
+        request
+            .extensions
+            .insert(UnexecutedReplayAdmission::for_test(
+                cache.clone(),
+                "synthetic",
+            ));
+        request
+    };
+    let permit = service
+        .state()
+        .multipart
+        .completions
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let error = service
+        .complete_multipart_upload(make_request())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), &s3s::S3ErrorCode::SlowDown);
+    assert!(!cache.contains_key("synthetic"));
+    assert_eq!(
+        remote.lock().await.creates,
+        0,
+        "rejection must precede backend effects"
+    );
+    assert_eq!(service.state().multipart.in_flight_bytes(), 8);
+    assert_eq!(service.state().multipart.count_uploads(), 1);
+    drop(permit);
+    service
+        .complete_multipart_upload(make_request())
+        .await
+        .unwrap();
+    assert!(
+        cache.contains_key("synthetic"),
+        "executed mutation retains replay protection"
+    );
+    assert_eq!(service.state().multipart.in_flight_bytes(), 0);
+    assert_eq!(service.state().multipart.count_uploads(), 0);
+    server.abort();
+}
+
+#[tokio::test]
 async fn relay_owned_client_drop_holds_create_abort_expiry_reservations() {
     use s3s::S3;
     use std::sync::Arc;
@@ -147,19 +202,24 @@ async fn relay_owned_client_drop_holds_create_abort_expiry_reservations() {
     let id = relay_create(&service, "archive.gz").await;
     let etag = relay_part(&service, &id, 1, Bytes::from_static(b"retained")).await;
     let input = relay_complete_input(&id, vec![(1, etag)]);
+    let replay_cache = crate::api::auth::ReplayCache::default();
+    let mut request = relay_request_input(input);
+    request
+        .extensions
+        .insert(crate::api::auth::UnexecutedReplayAdmission::for_test(
+            replay_cache.clone(),
+            "in-flight",
+        ));
     let caller = tokio::spawn({
         let service = service.clone();
-        async move {
-            service
-                .complete_multipart_upload(relay_request_input(input))
-                .await
-        }
+        async move { service.complete_multipart_upload(request).await }
     });
     wait_relay_condition(async || remote.lock().await.creates == 1).await;
     caller.abort();
     let _ = caller.await;
     let store = &service.state().multipart;
     let check_owned = || {
+        assert!(replay_cache.contains_key("in-flight"));
         store.cleanup_expired(std::time::Duration::ZERO, std::time::Duration::ZERO);
         assert_eq!(store.in_flight_bytes(), 8);
         assert_eq!(store.count_uploads(), 1);
@@ -180,6 +240,10 @@ async fn relay_owned_client_drop_holds_create_abort_expiry_reservations() {
     assert_eq!(store.in_flight_bytes(), 0);
     assert!(store.completions.clone().try_acquire_owned().is_ok());
     assert_eq!(remote.lock().await.completes, 0);
+    assert!(
+        replay_cache.contains_key("in-flight"),
+        "failed storage work must retain replay protection"
+    );
     server.abort();
     let _ = server.await;
 }

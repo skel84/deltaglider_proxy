@@ -1121,6 +1121,17 @@ impl s3s::S3 for DeltaGliderS3Service {
                     .clone()
                     .try_acquire_owned()
                     .map_err(|_| {
+                        // This request has not acquired completion ownership or
+                        // started storage I/O. Intermediaries may retry the 503
+                        // with the identical signature: do not turn safe load
+                        // shedding into a permanent replay error. Successful,
+                        // in-flight and ambiguous completions retain protection.
+                        if let Some(admission) =
+                            req.extensions
+                                .get::<crate::api::auth::UnexecutedReplayAdmission>()
+                        {
+                            admission.release();
+                        }
                         s3s::s3_error!(SlowDown, "Multipart completion capacity reached")
                     })?,
             )
