@@ -167,6 +167,25 @@ fn build_signed_empty(
     method: reqwest::Method,
     query: &str,
 ) -> reqwest::RequestBuilder {
+    build_signed_payload(
+        endpoint,
+        path,
+        access_key,
+        secret_key,
+        timestamp,
+        (method, query, b""),
+    )
+}
+
+fn build_signed_payload(
+    endpoint: &str,
+    path: &str,
+    access_key: &str,
+    secret_key: &str,
+    timestamp: &str,
+    request: (reqwest::Method, &str, &[u8]),
+) -> reqwest::RequestBuilder {
+    let (method, query, body) = request;
     let date = &timestamp[..8];
     let region = "us-east-1";
     let service = "s3";
@@ -178,7 +197,7 @@ fn build_signed_empty(
         .unwrap_or(endpoint)
         .to_string();
 
-    let payload_hash = sha256_hex(b"");
+    let payload_hash = sha256_hex(body);
 
     let canonical_headers = format!(
         "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
@@ -213,10 +232,109 @@ fn build_signed_empty(
     };
     reqwest::Client::new()
         .request(method, &full_url)
+        .body(body.to_vec())
         .header("authorization", auth_header)
         .header("x-amz-date", timestamp)
         .header("x-amz-content-sha256", &payload_hash)
         .header("host", host)
+}
+
+#[tokio::test]
+async fn rejected_part_retry_is_admitted_but_executed_replay_is_denied() {
+    let server = TestServer::builder()
+        .auth("testkey", "testsecret")
+        .env("RUST_LOG", "off")
+        .env("DGP_MAX_TOTAL_MULTIPART_BYTES", "1")
+        .env("DGP_REPLAY_WINDOW_SECS", "30")
+        .build()
+        .await;
+    let client = server.s3_client_with_creds("testkey", "testsecret").await;
+    let held = client
+        .create_multipart_upload()
+        .bucket(server.bucket())
+        .key("held")
+        .send()
+        .await
+        .unwrap();
+    client
+        .upload_part()
+        .bucket(server.bucket())
+        .key("held")
+        .upload_id(held.upload_id().unwrap())
+        .part_number(1)
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap();
+    let target = client
+        .create_multipart_upload()
+        .bucket(server.bucket())
+        .key("retry")
+        .send()
+        .await
+        .unwrap();
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let path = format!("/{}/retry", server.bucket());
+    let query = format!("partNumber=1&uploadId={}", target.upload_id().unwrap());
+    let request = build_signed_payload(
+        &server.endpoint(),
+        &path,
+        "testkey",
+        "testsecret",
+        &timestamp,
+        (reqwest::Method::PUT, &query, b"y"),
+    )
+    .build()
+    .unwrap();
+    let http = reqwest::Client::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        for _ in 0..2 {
+            let response = http.execute(request.try_clone().unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(response
+                .text()
+                .await
+                .unwrap()
+                .contains("<Code>SlowDown</Code>"));
+        }
+        client
+            .abort_multipart_upload()
+            .bucket(server.bucket())
+            .key("held")
+            .upload_id(held.upload_id().unwrap())
+            .send()
+            .await
+            .unwrap();
+        let response = http.execute(request.try_clone().unwrap()).await.unwrap();
+        assert!(response.status().is_success());
+        let replay = http.execute(request.try_clone().unwrap()).await.unwrap();
+        assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+        assert!(replay
+            .text()
+            .await
+            .unwrap()
+            .contains("Request replay detected"));
+        let parts = client
+            .list_parts()
+            .bucket(server.bucket())
+            .key("retry")
+            .upload_id(target.upload_id().unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(parts.parts().len(), 1);
+        assert_eq!(parts.parts()[0].size(), Some(1));
+    })
+    .await
+    .expect("must finish before replay expiry");
+    client
+        .abort_multipart_upload()
+        .bucket(server.bucket())
+        .key("retry")
+        .upload_id(target.upload_id().unwrap())
+        .send()
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

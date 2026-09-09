@@ -255,14 +255,19 @@ Caches SigV4 signatures and rejects duplicates within the replay window. This is
 
 A duplicate of a **mutating** request (PUT/POST/DELETE) within the window is rejected with 400. A duplicate of an **idempotent read** (GET/HEAD) is tolerated and served — boto3 emits byte-identical signatures for the same request within one signing second, and replaying a read re-reads the same bytes. Replay rejections are not counted toward the auth-failure lockout. `DGP_REPLAY_WINDOW_SECS=0` disables replay rejection entirely. When the cache exceeds 500K entries, expired signatures are evicted first.
 
-Two pre-mutation capacity refusals release that request's replay entry:
-multipart creation rejected at the upload-count limit, and native-S3 large-backup
-completion rejected **before acquiring completion ownership**. Both return
-`503 SlowDown`. A client or HTTP intermediary can retry the same signed request
+Explicitly identified pre-mutation capacity refusals release that request's
+replay entry: multipart creation at the upload-count limit; UploadPart at the
+per-upload lock, body-collector, part-count or aggregate-byte gate; a spool
+availability refusal when no relay promotion occurred in that request; and
+native-S3 large-backup completion **before acquiring completion ownership**.
+These return `503 SlowDown`. A client or HTTP intermediary can retry the same signed request
 without turning capacity rejection into `400 InvalidArgument`.
 Upload counts, completion slots, retained parts and resource limits are unchanged. Successful,
 in-flight, cancelled and ambiguously failed storage work retain replay protection;
-an arbitrary 5xx response does not grant permission to replay a mutation. Other
+an arbitrary 5xx response does not grant permission to replay a mutation.
+Disk-write failures and errors after relay promotion retain protection, even
+when the response is a 5xx. The large-backup profile starts directly in disk
+relay mode; general-profile promotion remains a separate mutation boundary. Other
 admission errors are not covered by this exception. Clients still need bounded
 backoff: an intermediary's immediate retries may all encounter the occupied slot.
 
