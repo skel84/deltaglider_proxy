@@ -190,6 +190,56 @@ async fn relay_creation_capacity_refusal_preserves_retry_and_existing_uploads() 
 }
 
 #[tokio::test]
+async fn relay_part_owner_refusal_preserves_retry_and_executed_protection() {
+    use crate::api::auth::{ReplayCache, UnexecutedReplayAdmission};
+    use s3s::S3;
+    let (backend, remote, server) = relay_fixture().await;
+    let dir = crate::multipart::test_spool_dir();
+    let service = relay_adapter(backend, dir.path());
+    let id = relay_create(&service, "archive.gz").await;
+    let cache = ReplayCache::default();
+    let make_request = || {
+        let mut input = s3s::dto::UploadPartInput::builder();
+        input
+            .set_bucket("physical".into())
+            .set_key("archive.gz".into())
+            .set_upload_id(id.clone())
+            .set_part_number(1)
+            .set_content_length(Some(8))
+            .set_body(Some(s3s::dto::StreamingBlob::from(s3s::Body::from(
+                Bytes::from_static(b"retained"),
+            ))));
+        let mut request = relay_request_input(input.build().unwrap());
+        request.extensions.insert(UnexecutedReplayAdmission::for_test(
+            cache.clone(), "part-owner-retry",
+        ));
+        request
+    };
+    let owner = service.state().multipart.acquire_part_owner(&id).unwrap();
+    let error = service.upload_part(make_request()).await.unwrap_err();
+    assert_eq!(error.code(), &s3s::S3ErrorCode::SlowDown);
+    assert!(!cache.contains_key("part-owner-retry"));
+    assert_eq!(service.state().multipart.in_flight_bytes(), 0);
+    assert_eq!(remote.lock().await.creates, 0);
+    drop(owner);
+    // The body-collector gate must have the same retry contract, without
+    // confusing it with a failure after a part has been written.
+    let body_a = service.state().multipart.ingress.acquire().unwrap();
+    let body_b = service.state().multipart.ingress.acquire().unwrap();
+    let error = service.upload_part(make_request()).await.unwrap_err();
+    assert_eq!(error.code(), &s3s::S3ErrorCode::SlowDown);
+    assert!(!cache.contains_key("part-owner-retry"));
+    assert_eq!(service.state().multipart.in_flight_bytes(), 0);
+    drop((body_a, body_b));
+    service.upload_part(make_request()).await.unwrap();
+    assert!(cache.contains_key("part-owner-retry"));
+    assert_eq!(service.state().multipart.in_flight_bytes(), 8);
+    service.state().multipart.abort(&id, "physical", "archive.gz").unwrap();
+    assert_eq!(service.state().multipart.in_flight_bytes(), 0);
+    server.abort();
+}
+
+#[tokio::test]
 async fn relay_completion_capacity_rejection_releases_only_unexecuted_replay() {
     use crate::api::auth::{ReplayCache, UnexecutedReplayAdmission};
     use s3s::S3;

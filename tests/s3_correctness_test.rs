@@ -172,17 +172,31 @@ async fn test_upload_part_to_deleted_bucket_returns_nosuchbucket() {
         .expect("initiate");
     let upload_id = create.upload_id().unwrap().to_string();
 
-    // Remove the bucket directory directly (simulating a racey admin).
-    let data_dir = server.data_dir().expect("fs data dir");
-    let _ = std::fs::remove_dir_all(data_dir.join(bucket));
-
-    let part_body = vec![0u8; 5 * 1024 * 1024];
-    let res = client
+    // Positive control: this client/upload can accept a part before deletion.
+    // This test owns the missing-bucket guard, not early-response behavior
+    // while an SDK is still streaming a multi-megabyte request body.
+    client
         .upload_part()
         .bucket(bucket)
         .key("part.bin")
         .upload_id(&upload_id)
         .part_number(1)
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .expect("part accepted before bucket deletion");
+
+    // Remove the bucket directory directly (simulating a racey admin).
+    let data_dir = server.data_dir().expect("fs data dir");
+    std::fs::remove_dir_all(data_dir.join(bucket)).expect("remove owned test bucket");
+
+    let part_body = b"y".to_vec();
+    let res = client
+        .upload_part()
+        .bucket(bucket)
+        .key("part.bin")
+        .upload_id(&upload_id)
+        .part_number(2)
         .body(ByteStream::from(part_body))
         .send()
         .await;
