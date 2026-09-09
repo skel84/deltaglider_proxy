@@ -147,6 +147,26 @@ fn build_signed_put(
     secret_key: &str,
     timestamp: &str,
 ) -> reqwest::RequestBuilder {
+    build_signed_empty(
+        endpoint,
+        path,
+        access_key,
+        secret_key,
+        timestamp,
+        reqwest::Method::PUT,
+        "",
+    )
+}
+
+fn build_signed_empty(
+    endpoint: &str,
+    path: &str,
+    access_key: &str,
+    secret_key: &str,
+    timestamp: &str,
+    method: reqwest::Method,
+    query: &str,
+) -> reqwest::RequestBuilder {
     let date = &timestamp[..8];
     let region = "us-east-1";
     let service = "s3";
@@ -167,8 +187,8 @@ fn build_signed_put(
     let signed_headers = "host;x-amz-content-sha256;x-amz-date";
 
     let canonical_request = format!(
-        "PUT\n{}\n\n{}\n{}\n{}",
-        path, canonical_headers, signed_headers, payload_hash
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        method, path, query, canonical_headers, signed_headers, payload_hash
     );
 
     let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
@@ -186,13 +206,84 @@ fn build_signed_put(
         access_key, credential_scope, signed_headers, signature
     );
 
-    let full_url = format!("{}{}", endpoint, path);
+    let full_url = if query.is_empty() {
+        format!("{}{}", endpoint, path)
+    } else {
+        format!("{}{}?{}", endpoint, path, query)
+    };
     reqwest::Client::new()
-        .put(&full_url)
+        .request(method, &full_url)
         .header("authorization", auth_header)
         .header("x-amz-date", timestamp)
         .header("x-amz-content-sha256", &payload_hash)
         .header("host", host)
+}
+
+#[tokio::test]
+async fn rejected_creation_retry_is_admitted_but_executed_replay_is_denied() {
+    let server = TestServer::builder()
+        .auth("testkey", "testsecret")
+        .env("RUST_LOG", "off")
+        .env("DGP_MAX_MULTIPART_UPLOADS", "1")
+        .env("DGP_REPLAY_WINDOW_SECS", "30")
+        .build()
+        .await;
+    let client = server.s3_client_with_creds("testkey", "testsecret").await;
+    let held = client
+        .create_multipart_upload()
+        .bucket(server.bucket())
+        .key("held")
+        .send()
+        .await
+        .unwrap();
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let path = format!("/{}/retry", server.bucket());
+    let request = build_signed_empty(
+        &server.endpoint(),
+        &path,
+        "testkey",
+        "testsecret",
+        &now,
+        reqwest::Method::POST,
+        "uploads=",
+    )
+    .build()
+    .unwrap();
+    let http = reqwest::Client::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        // Identical signed requests, no client/intermediary re-signing.
+        for _ in 0..2 {
+            let response = http.execute(request.try_clone().unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(response
+                .text()
+                .await
+                .unwrap()
+                .contains("<Code>SlowDown</Code>"));
+        }
+        client
+            .abort_multipart_upload()
+            .bucket(server.bucket())
+            .key("held")
+            .upload_id(held.upload_id().unwrap())
+            .send()
+            .await
+            .unwrap();
+        let response = http.execute(request.try_clone().unwrap()).await.unwrap();
+        assert!(
+            response.status().is_success(),
+            "retry after making capacity must succeed"
+        );
+        let replay = http.execute(request.try_clone().unwrap()).await.unwrap();
+        assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+        assert!(replay
+            .text()
+            .await
+            .unwrap()
+            .contains("Request replay detected"));
+    })
+    .await
+    .expect("must prove replay denial before the replay window expires");
 }
 
 // ============================================================================
