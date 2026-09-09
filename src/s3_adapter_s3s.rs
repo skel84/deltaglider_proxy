@@ -1060,19 +1060,41 @@ impl s3s::S3 for DeltaGliderS3Service {
             input.body,
             &headers,
         )
-        .await?;
+        .await
+        .inspect_err(|error| {
+            // collect_part_body produces SlowDown only at ingress.acquire(),
+            // before polling the request body or modifying an upload.
+            if error.code() == &s3s::S3ErrorCode::SlowDown {
+                if let Some(admission) = req
+                    .extensions
+                    .get::<crate::api::auth::UnexecutedReplayAdmission>()
+                {
+                    admission.release();
+                }
+            }
+        })?;
         validate_content_md5_s3s(input.content_md5.as_deref(), &admitted.data)?;
         let etag = self
             .state
             .multipart
-            .upload_part(
+            .upload_part_classified(
                 &input.upload_id,
                 &input.bucket,
                 &input.key,
                 input.part_number as u32,
                 admitted.data,
             )
-            .map_err(engine_error_to_s3s)?;
+            .map_err(|failure| {
+                if failure.unexecuted_capacity {
+                    if let Some(admission) = req
+                        .extensions
+                        .get::<crate::api::auth::UnexecutedReplayAdmission>()
+                    {
+                        admission.release();
+                    }
+                }
+                engine_error_to_s3s(failure.error)
+            })?;
         Ok(s3s::S3Response::new(s3s::dto::UploadPartOutput {
             e_tag: Some(parse_s3s_etag(&etag)?),
             ..Default::default()

@@ -11,6 +11,32 @@ use crate::api::S3Error;
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Duration, Utc};
 
+/// Only explicitly identified pre-mutation capacity gates permit a replay retry.
+/// Conversion from an ordinary error is deliberately fail-closed.
+#[derive(Debug)]
+pub(crate) struct PartUploadFailure {
+    pub(crate) error: S3Error,
+    pub(crate) unexecuted_capacity: bool,
+}
+
+impl PartUploadFailure {
+    fn unexecuted_capacity(message: String) -> Self {
+        Self {
+            error: S3Error::SlowDown(message),
+            unexecuted_capacity: true,
+        }
+    }
+}
+
+impl From<S3Error> for PartUploadFailure {
+    fn from(error: S3Error) -> Self {
+        Self {
+            error,
+            unexecuted_capacity: false,
+        }
+    }
+}
+
 /// Per-part listing entry used by ListParts. Previously defined in
 /// `src/api/xml.rs`; moved here when the axum XML response builders
 /// were retired with the legacy S3 adapter. The s3s adapter
@@ -582,10 +608,23 @@ impl MultipartStore {
         part_number: u32,
         data: Bytes,
     ) -> Result<String, S3Error> {
+        self.upload_part_classified(upload_id, bucket, key, part_number, data)
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) fn upload_part_classified(
+        &self,
+        upload_id: &str,
+        bucket: &str,
+        key: &str,
+        part_number: u32,
+        data: Bytes,
+    ) -> Result<String, PartUploadFailure> {
         if !(1..=10000).contains(&part_number) {
             return Err(S3Error::InvalidArgument(
                 "Part number must be between 1 and 10000".to_string(),
-            ));
+            )
+            .into());
         }
 
         let md5_raw: [u8; 16] = Md5::digest(&data).into();
@@ -601,7 +640,7 @@ impl MultipartStore {
 
         // Validate bucket+key match
         if upload.bucket != bucket || upload.key != key {
-            return Err(S3Error::NoSuchUpload(upload_id.to_string()));
+            return Err(S3Error::NoSuchUpload(upload_id.to_string()).into());
         }
 
         // C4 security fix: parts can only be uploaded while the upload is
@@ -611,7 +650,8 @@ impl MultipartStore {
             return Err(S3Error::InvalidRequest(
                 "Upload is in the process of being completed; no more parts can be added"
                     .to_string(),
-            ));
+            )
+            .into());
         }
 
         // C3 DoS fix: enforce size caps BEFORE buffering the part. Two
@@ -640,7 +680,8 @@ impl MultipartStore {
             return Err(S3Error::EntityTooLarge {
                 size: cumulative_after,
                 max: upload.accepted_limit,
-            });
+            }
+            .into());
         }
         if self.large_profile()
             && (size > LARGE_PART_BYTES
@@ -648,7 +689,9 @@ impl MultipartStore {
                     && (total_parts >= LARGE_PARTS
                         || upload.parts.len() >= LARGE_PARTS_PER_UPLOAD)))
         {
-            return Err(S3Error::SlowDown("Multipart part budget reached".into()));
+            return Err(PartUploadFailure::unexecuted_capacity(
+                "Multipart part budget reached".into(),
+            ));
         }
 
         // Compute the global delta we'd contribute (signed on overwrite).
@@ -660,7 +703,7 @@ impl MultipartStore {
                 .load(std::sync::atomic::Ordering::Relaxed)
                 .saturating_add(if relayed { size } else { delta as u64 });
             if new_total > self.max_total_multipart_bytes {
-                return Err(S3Error::SlowDown(format!(
+                return Err(PartUploadFailure::unexecuted_capacity(format!(
                     "Multipart in-flight bytes cap reached ({} / {} bytes)",
                     new_total, self.max_total_multipart_bytes
                 )));
@@ -686,7 +729,13 @@ impl MultipartStore {
                 let path = part_path(relay_dir, part_number);
                 if let Some(spool) = &self.spool {
                     spool.check_write(size).map_err(|_| {
-                        S3Error::SlowDown("Multipart spool capacity unavailable".into())
+                        let message = "Multipart spool capacity unavailable".into();
+                        if should_promote_to_relay {
+                            // Promotion may already have written existing parts.
+                            PartUploadFailure::from(S3Error::SlowDown(message))
+                        } else {
+                            PartUploadFailure::unexecuted_capacity(message)
+                        }
                     })?;
                 }
                 // Count temporary bytes before touching disk. On any failure the
@@ -696,7 +745,7 @@ impl MultipartStore {
                 upload.cleanup_bytes = size;
                 if let Err(e) = write_part_file(&path, &data, self.large_profile()) {
                     upload.state = MultipartState::Cleaning;
-                    return Err(e);
+                    return Err(e.into());
                 }
                 self.in_flight_bytes
                     .fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
@@ -1966,9 +2015,69 @@ mod tests {
             .unwrap();
         // Next byte anywhere → SlowDown.
         let err = store
-            .upload_part(&id_a, "b", "a", 2, Bytes::from(vec![0u8; 1]))
+            .upload_part_classified(&id_a, "b", "a", 2, Bytes::from(vec![0u8; 1]))
             .unwrap_err();
-        assert!(matches!(err, S3Error::SlowDown(_)), "got {:?}", err);
+        assert!(matches!(err.error, S3Error::SlowDown(_)), "got {:?}", err);
+        assert!(err.unexecuted_capacity);
+        assert_eq!(store.get_part_size(&id_a, 2), None);
+        assert_eq!(store.in_flight_bytes(), 2048);
+        store.abort(&id_b, "b", "b").unwrap();
+        store
+            .upload_part_classified(&id_a, "b", "a", 2, Bytes::from_static(b"x"))
+            .unwrap();
+        assert_eq!(store.get_part_size(&id_a, 2), Some(1));
+    }
+
+    #[test]
+    fn unavailable_spool_refusal_can_retry_without_mutation() {
+        let dir = test_spool_dir();
+        let mut store = MultipartStore::new(1024)
+            .with_large_spool(dir.path())
+            .unwrap();
+        let id = store.create("b", "key", None, HashMap::new()).unwrap();
+        // Exercise the real statvfs refusal, with all upload prerequisites
+        // valid, without consuming the host filesystem's free space.
+        let root = store.spool.as_ref().unwrap().root.clone();
+        store.spool.as_mut().unwrap().root = root.join("unavailable");
+        let failure = store
+            .upload_part_classified(&id, "b", "key", 1, Bytes::from_static(b"x"))
+            .unwrap_err();
+        assert!(failure.unexecuted_capacity);
+        assert_eq!(store.in_flight_bytes(), 0);
+        assert_eq!(store.uploads.read()[&id].state, MultipartState::Open);
+        assert_eq!(store.get_part_size(&id, 1), None);
+        store.spool.as_mut().unwrap().root = root;
+        store
+            .upload_part_classified(&id, "b", "key", 1, Bytes::from_static(b"x"))
+            .unwrap();
+        assert_eq!(store.get_part_size(&id, 1), Some(1));
+        store.abort(&id, "b", "key").unwrap();
+        assert_eq!(store.in_flight_bytes(), 0);
+    }
+
+    #[test]
+    fn part_write_failure_is_not_an_unexecuted_capacity_refusal() {
+        let dir = test_spool_dir();
+        let store = MultipartStore::new(1024)
+            .with_large_spool(dir.path())
+            .unwrap();
+        let id = store.create("b", "key", None, HashMap::new()).unwrap();
+        let path = {
+            let uploads = store.uploads.read();
+            let RelayStrategy::Relayed { relay_dir } = &uploads[&id].relay_strategy else {
+                panic!("fixture must use actual disk relay");
+            };
+            part_path(relay_dir, 1)
+        };
+        // An owned directory at the part-file path forces the real write to
+        // fail after cleanup accounting begins, without filling the disk.
+        fs::create_dir_all(&path).unwrap();
+        let failure = store
+            .upload_part_classified(&id, "b", "key", 1, Bytes::from_static(b"x"))
+            .unwrap_err();
+        assert!(!failure.unexecuted_capacity);
+        assert_eq!(store.uploads.read()[&id].state, MultipartState::Cleaning);
+        assert_eq!(store.get_part_size(&id, 1), None);
     }
 
     #[test]

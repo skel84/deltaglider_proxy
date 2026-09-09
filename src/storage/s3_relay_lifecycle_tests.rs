@@ -222,6 +222,15 @@ async fn relay_part_owner_refusal_preserves_retry_and_executed_protection() {
     assert_eq!(service.state().multipart.in_flight_bytes(), 0);
     assert_eq!(remote.lock().await.creates, 0);
     drop(owner);
+    // The body-collector gate must have the same retry contract, without
+    // confusing it with a failure after a part has been written.
+    let body_a = service.state().multipart.ingress.acquire().unwrap();
+    let body_b = service.state().multipart.ingress.acquire().unwrap();
+    let error = service.upload_part(make_request()).await.unwrap_err();
+    assert_eq!(error.code(), &s3s::S3ErrorCode::SlowDown);
+    assert!(!cache.contains_key("part-owner-retry"));
+    assert_eq!(service.state().multipart.in_flight_bytes(), 0);
+    drop((body_a, body_b));
     service.upload_part(make_request()).await.unwrap();
     assert!(cache.contains_key("part-owner-retry"));
     assert_eq!(service.state().multipart.in_flight_bytes(), 8);
