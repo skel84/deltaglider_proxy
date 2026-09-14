@@ -387,6 +387,7 @@ pub async fn create_backend(
         // none) — operators configure encryption after creation via
         // the Backends panel or a section-level PATCH.
         encryption: crate::config::BackendEncryptionConfig::default(),
+        s3_timeouts: None,
     });
 
     if body.set_default == Some(true) || cfg.default_backend.is_none() {

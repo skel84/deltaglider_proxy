@@ -259,6 +259,7 @@ impl BackendInfoResponse {
             name: "default".into(),
             backend: cfg.backend.clone(),
             encryption: cfg.backend_encryption.clone(),
+            s3_timeouts: None,
         };
         let mut out: Self = (&named).into();
         out.is_synthesized = true;
@@ -910,6 +911,7 @@ mod tests {
                 allow_local: false,
             },
             encryption: crate::config::BackendEncryptionConfig::default(),
+            s3_timeouts: None,
         };
         let info: BackendInfoResponse = (&named).into();
         assert_eq!(info.name, "hetzner");

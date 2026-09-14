@@ -1036,6 +1036,56 @@ pub(crate) fn apply_backend_encryption_env(backend_name: &str, enc: &mut Backend
     }
 }
 
+/// Explicit timeout bounds for one named S3 backend.
+///
+/// Omission preserves the process-global compatibility defaults. A configured
+/// profile is complete so its bounds cannot silently inherit an unrelated
+/// environment value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct S3TimeoutProfile {
+    /// Maximum time without progress while reading one S3 response body.
+    pub read_timeout_secs: u64,
+    /// Maximum time for one S3 SDK request attempt.
+    pub operation_attempt_timeout_secs: u64,
+    /// Maximum total time for one S3 SDK operation.
+    pub operation_timeout_secs: u64,
+}
+
+impl S3TimeoutProfile {
+    const MAX_TIMEOUT_SECS: u64 = 900;
+
+    /// Reject profiles that could disable bounded failure or make a request
+    /// deadline shorter than a nested deadline.
+    pub fn validate(self) -> Result<(), String> {
+        for (name, value) in [
+            ("read_timeout_secs", self.read_timeout_secs),
+            (
+                "operation_attempt_timeout_secs",
+                self.operation_attempt_timeout_secs,
+            ),
+            ("operation_timeout_secs", self.operation_timeout_secs),
+        ] {
+            if value == 0 || value > Self::MAX_TIMEOUT_SECS {
+                return Err(format!(
+                    "{name} must be within 1..={} seconds",
+                    Self::MAX_TIMEOUT_SECS
+                ));
+            }
+        }
+        if self.read_timeout_secs > self.operation_attempt_timeout_secs {
+            return Err(
+                "read_timeout_secs must not exceed operation_attempt_timeout_secs".to_string(),
+            );
+        }
+        if self.operation_attempt_timeout_secs > self.operation_timeout_secs {
+            return Err(
+                "operation_attempt_timeout_secs must not exceed operation_timeout_secs".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// A named storage backend with its connection configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NamedBackendConfig {
@@ -1049,6 +1099,10 @@ pub struct NamedBackendConfig {
     /// default.
     #[serde(default, skip_serializing_if = "is_default_encryption")]
     pub encryption: BackendEncryptionConfig,
+    /// Complete S3 request bounds for this backend. Omission retains the
+    /// legacy process-global timeout behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3_timeouts: Option<S3TimeoutProfile>,
 }
 
 /// TLS configuration (optional)
@@ -1448,6 +1502,13 @@ impl Config {
             };
             spec.validate()
                 .map_err(|e| ConfigError::Parse(format!("admission: {}", e)))?;
+        }
+        for named in &self.backends {
+            if let Some(profile) = named.s3_timeouts {
+                profile.validate().map_err(|e| {
+                    ConfigError::Parse(format!("backend `{}` s3_timeouts: {}", named.name, e))
+                })?;
+            }
         }
         Ok(())
     }
@@ -2960,6 +3021,7 @@ backend:
                 legacy_key: None,
                 legacy_key_id: None,
             },
+            s3_timeouts: None,
         });
 
         let redacted = cfg.redact_all_secrets();
@@ -3094,6 +3156,25 @@ backends:
     }
 
     #[test]
+    fn test_from_yaml_str_rejects_invalid_named_s3_timeout_profile() {
+        let yaml = r#"
+backends:
+  - name: harbor
+    type: s3
+    s3_timeouts:
+      read_timeout_secs: 0
+      operation_attempt_timeout_secs: 240
+      operation_timeout_secs: 300
+"#;
+        let err = Config::from_yaml_str(yaml)
+            .expect_err("invalid named S3 timeout profiles must be rejected before runtime");
+        assert!(
+            format!("{err}").contains("backend `harbor` s3_timeouts"),
+            "unexpected validation error: {err}"
+        );
+    }
+
+    #[test]
     fn test_global_encryption_key_field_no_longer_accepted() {
         // Regression: the old `encryption_key:` at the config root must
         // be rejected. No legacy — nobody shipped with it — so a YAML
@@ -3153,6 +3234,7 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
                     legacy_key: None,
                     legacy_key_id: None,
                 },
+                s3_timeouts: None,
             }],
             ..Config::default()
         };
@@ -3183,6 +3265,7 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
                     legacy_key: None,
                     legacy_key_id: None,
                 },
+                s3_timeouts: None,
             }],
             ..Config::default()
         };
@@ -3244,6 +3327,7 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
                         legacy_key: None,
                         legacy_key_id: None,
                     },
+                    s3_timeouts: None,
                 },
                 NamedBackendConfig {
                     name: "b".into(),
@@ -3256,6 +3340,7 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
                         legacy_key: None,
                         legacy_key_id: None,
                     },
+                    s3_timeouts: None,
                 },
             ],
             ..Config::default()
@@ -3287,6 +3372,7 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
                         legacy_key: None,
                         legacy_key_id: None,
                     },
+                    s3_timeouts: None,
                 },
                 NamedBackendConfig {
                     name: "replica".into(),
@@ -3299,6 +3385,7 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
                         legacy_key: None,
                         legacy_key_id: None,
                     },
+                    s3_timeouts: None,
                 },
             ],
             ..Config::default()
@@ -3327,6 +3414,7 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
                     legacy_key: None,
                     legacy_key_id: None,
                 },
+                s3_timeouts: None,
             }],
             ..Config::default()
         };
@@ -3541,16 +3629,19 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
                     name: "shared".into(),
                     backend: BackendConfig::Filesystem { path: "/a".into() },
                     encryption: BackendEncryptionConfig::default(),
+                    s3_timeouts: None,
                 },
                 NamedBackendConfig {
                     name: "unique".into(),
                     backend: BackendConfig::Filesystem { path: "/b".into() },
                     encryption: BackendEncryptionConfig::default(),
+                    s3_timeouts: None,
                 },
                 NamedBackendConfig {
                     name: "shared".into(),
                     backend: BackendConfig::Filesystem { path: "/c".into() },
                     encryption: BackendEncryptionConfig::default(),
+                    s3_timeouts: None,
                 },
             ],
             ..Config::default()
@@ -3572,11 +3663,13 @@ encryption_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
                     name: "a".into(),
                     backend: BackendConfig::Filesystem { path: "/a".into() },
                     encryption: BackendEncryptionConfig::default(),
+                    s3_timeouts: None,
                 },
                 NamedBackendConfig {
                     name: "b".into(),
                     backend: BackendConfig::Filesystem { path: "/b".into() },
                     encryption: BackendEncryptionConfig::default(),
+                    s3_timeouts: None,
                 },
             ],
             ..Config::default()
@@ -4233,11 +4326,13 @@ admission_blocks:
                     name: "eu-archive".into(),
                     backend: BackendConfig::Filesystem { path: "/a".into() },
                     encryption: BackendEncryptionConfig::default(),
+                    s3_timeouts: None,
                 },
                 NamedBackendConfig {
                     name: "eu.archive".into(),
                     backend: BackendConfig::Filesystem { path: "/b".into() },
                     encryption: BackendEncryptionConfig::default(),
+                    s3_timeouts: None,
                 },
             ],
             ..Config::default()
@@ -4260,11 +4355,13 @@ admission_blocks:
                     name: "one".into(),
                     backend: BackendConfig::Filesystem { path: "/a".into() },
                     encryption: BackendEncryptionConfig::default(),
+                    s3_timeouts: None,
                 },
                 NamedBackendConfig {
                     name: "two".into(),
                     backend: BackendConfig::Filesystem { path: "/b".into() },
                     encryption: BackendEncryptionConfig::default(),
+                    s3_timeouts: None,
                 },
             ],
             ..Config::default()
@@ -4310,6 +4407,7 @@ admission_blocks:
                     ),
                     legacy_key_id: Some("test-legacy-kid".into()),
                 },
+                s3_timeouts: None,
             }],
             ..Config::default()
         };

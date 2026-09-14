@@ -316,7 +316,7 @@ impl DynEngine {
         let storage: Box<dyn StorageBackend> = if config.backends.is_empty() {
             // Singleton backend path. Synthetic name "default" matches
             // what `apply_backend_encryption_env` uses for this entry.
-            let raw = build_raw_backend(&config.backend, &config.backend_encryption).await?;
+            let raw = build_raw_backend(&config.backend, &config.backend_encryption, None).await?;
             wrap_backend_with_encryption(
                 "default",
                 raw,
@@ -331,7 +331,8 @@ impl DynEngine {
             let mut backends = std::collections::HashMap::new();
             let mut kid_collisions = KeyIdCollisionCheck::new();
             for named in &config.backends {
-                let raw = build_raw_backend(&named.backend, &named.encryption).await?;
+                let raw =
+                    build_raw_backend(&named.backend, &named.encryption, named.s3_timeouts).await?;
                 let wrapped = wrap_backend_with_encryption(
                     &named.name,
                     raw,
@@ -394,6 +395,7 @@ fn native_encryption_for(
 async fn build_raw_backend(
     cfg: &BackendConfig,
     enc: &crate::config::BackendEncryptionConfig,
+    s3_timeouts: Option<crate::config::S3TimeoutProfile>,
 ) -> Result<Box<dyn StorageBackend>, StorageError> {
     match cfg {
         BackendConfig::Filesystem { path } => {
@@ -401,7 +403,9 @@ async fn build_raw_backend(
         }
         BackendConfig::S3 { .. } => {
             let native = native_encryption_for(enc);
-            Ok(Box::new(S3Backend::new(cfg, native).await?))
+            Ok(Box::new(
+                S3Backend::new_with_s3_timeouts(cfg, native, s3_timeouts).await?,
+            ))
         }
     }
 }

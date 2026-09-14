@@ -30,7 +30,7 @@ use super::traits::{
     DelegatedListResult, LiteScanResult, MultipartUpload, StorageBackend, StorageError,
     UploadedPart,
 };
-use crate::config::BackendConfig;
+use crate::config::{BackendConfig, S3TimeoutProfile};
 use crate::types::{FileMetadata, StorageInfo};
 use async_trait::async_trait;
 use aws_credential_types::Credentials;
@@ -49,6 +49,7 @@ use tracing::{debug, instrument, warn};
 /// Operation context for S3 error classification.
 #[derive(Debug)]
 enum S3Op {
+    ListBuckets,
     ListObjects,
     CreateBucket,
     PutObject,
@@ -65,6 +66,7 @@ enum S3Op {
 impl std::fmt::Display for S3Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            S3Op::ListBuckets => write!(f, "list_buckets"),
             S3Op::ListObjects => write!(f, "list_objects"),
             S3Op::CreateBucket => write!(f, "create_bucket"),
             S3Op::PutObject => write!(f, "put_object"),
@@ -169,12 +171,96 @@ impl NativeEncryptionConfig {
         }
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedS3Timeouts {
+    connect_timeout_secs: u64,
+    read_timeout_secs: u64,
+    operation_attempt_timeout_secs: u64,
+    operation_timeout_secs: Option<u64>,
+    stalled_stream_grace_secs: u64,
+}
+
+impl ResolvedS3Timeouts {
+    fn compatibility() -> Self {
+        Self {
+            connect_timeout_secs: crate::config::env_parse_with_default(
+                "DGP_S3_CONNECT_TIMEOUT_SECS",
+                10u64,
+            ),
+            read_timeout_secs: crate::config::env_parse_with_default(
+                "DGP_S3_READ_TIMEOUT_SECS",
+                60u64,
+            ),
+            operation_attempt_timeout_secs: crate::config::env_parse_with_default(
+                "DGP_S3_OPERATION_ATTEMPT_TIMEOUT_SECS",
+                300u64,
+            ),
+            operation_timeout_secs: None,
+            stalled_stream_grace_secs: crate::config::env_parse_with_default(
+                "DGP_S3_STALL_GRACE_SECS",
+                20u64,
+            ),
+        }
+    }
+
+    fn from_profile(profile: Option<S3TimeoutProfile>) -> Result<Self, StorageError> {
+        let Some(profile) = profile else {
+            return Ok(Self::compatibility());
+        };
+        profile.validate().map_err(StorageError::Other)?;
+        Ok(Self {
+            connect_timeout_secs: 10,
+            read_timeout_secs: profile.read_timeout_secs,
+            operation_attempt_timeout_secs: profile.operation_attempt_timeout_secs,
+            operation_timeout_secs: Some(profile.operation_timeout_secs),
+            stalled_stream_grace_secs: 20,
+        })
+    }
+
+    fn timeout_config(self) -> aws_sdk_s3::config::timeout::TimeoutConfig {
+        let builder = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+            .read_timeout(std::time::Duration::from_secs(self.read_timeout_secs))
+            .connect_timeout(std::time::Duration::from_secs(self.connect_timeout_secs))
+            .operation_attempt_timeout(std::time::Duration::from_secs(
+                self.operation_attempt_timeout_secs,
+            ));
+        let builder = match self.operation_timeout_secs {
+            Some(timeout) => builder.operation_timeout(std::time::Duration::from_secs(timeout)),
+            None => builder,
+        };
+        builder.build()
+    }
+
+    fn stalled_stream_protection(self) -> aws_sdk_s3::config::StalledStreamProtectionConfig {
+        aws_sdk_s3::config::StalledStreamProtectionConfig::enabled()
+            .grace_period(std::time::Duration::from_secs(
+                self.stalled_stream_grace_secs,
+            ))
+            .build()
+    }
+
+    fn native_relay(self) -> Self {
+        if self.operation_timeout_secs.is_some() {
+            return self;
+        }
+        Self {
+            connect_timeout_secs: 10,
+            read_timeout_secs: 60,
+            operation_attempt_timeout_secs: 120,
+            operation_timeout_secs: Some(300),
+            stalled_stream_grace_secs: 20,
+        }
+    }
+}
 
 pub struct S3Backend {
     client: Client,
     /// Per-backend native S3 server-side encryption mode. Applied to
     /// every `put_object`/`put_directory_marker` call.
     native_encryption: NativeEncryptionConfig,
+    /// Resolved at backend construction so an explicit named profile cannot
+    /// fall back to process-global settings during normal or relay traffic.
+    timeouts: ResolvedS3Timeouts,
 }
 
 impl S3Backend {
@@ -262,6 +348,13 @@ impl S3Backend {
     /// Build an S3 client from a BackendConfig without creating an S3Backend.
     /// Useful for one-off operations like testing connectivity.
     pub async fn build_client(config: &BackendConfig) -> Result<Client, StorageError> {
+        Self::build_client_with_timeouts(config, ResolvedS3Timeouts::compatibility()).await
+    }
+
+    async fn build_client_with_timeouts(
+        config: &BackendConfig,
+        timeouts: ResolvedS3Timeouts,
+    ) -> Result<Client, StorageError> {
         let (endpoint, region, force_path_style, access_key_id, secret_access_key, allow_local) =
             match config {
                 BackendConfig::S3 {
@@ -299,30 +392,10 @@ impl S3Backend {
             }
         };
 
-        // Build S3 client directly — no aws-config needed since we use static credentials.
-        // Disable automatic request checksums (CRC32/CRC64) added by the SDK by default.
-        // S3-compatible stores (Hetzner, MinIO, Backblaze B2) reject these headers with
-        // BadRequest. Setting WhenRequired preserves compatibility with both AWS S3 and
-        // S3-compatible endpoints. See: Python deltaglider [6.1.1] for the equivalent fix.
-        // Per-attempt + read/connect timeouts so a stalled socket fails
-        // fast (per multipart part) instead of hanging the whole copy
-        // until lease lapse. Phase B streaming relies on these to bound a
-        // mid-part GET/PUT. All env-overridable in seconds.
-        let read_timeout = crate::config::env_parse_with_default("DGP_S3_READ_TIMEOUT_SECS", 60u64);
-        let connect_timeout =
-            crate::config::env_parse_with_default("DGP_S3_CONNECT_TIMEOUT_SECS", 10u64);
-        let attempt_timeout =
-            crate::config::env_parse_with_default("DGP_S3_OPERATION_ATTEMPT_TIMEOUT_SECS", 300u64);
-        let stall_grace = crate::config::env_parse_with_default("DGP_S3_STALL_GRACE_SECS", 20u64);
-        let timeout_config = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
-            .read_timeout(std::time::Duration::from_secs(read_timeout))
-            .connect_timeout(std::time::Duration::from_secs(connect_timeout))
-            .operation_attempt_timeout(std::time::Duration::from_secs(attempt_timeout))
-            .build();
-        let stalled_stream_protection =
-            aws_sdk_s3::config::StalledStreamProtectionConfig::enabled()
-                .grace_period(std::time::Duration::from_secs(stall_grace))
-                .build();
+        // An explicit named profile arrives fully resolved; legacy callers use
+        // the process-global compatibility profile above.
+        let timeout_config = timeouts.timeout_config();
+        let stalled_stream_protection = timeouts.stalled_stream_protection();
 
         let mut s3_config_builder = aws_sdk_s3::config::Builder::new()
             .behavior_version(BehaviorVersion::latest())
@@ -382,7 +455,18 @@ impl S3Backend {
         config: &BackendConfig,
         native_encryption: NativeEncryptionConfig,
     ) -> Result<Self, StorageError> {
-        let client = Self::build_client(config).await?;
+        Self::new_with_s3_timeouts(config, native_encryption, None).await
+    }
+
+    /// Create a backend with complete request bounds for one named S3 backend.
+    /// The profile is resolved once and reused by native relay workers.
+    pub async fn new_with_s3_timeouts(
+        config: &BackendConfig,
+        native_encryption: NativeEncryptionConfig,
+        profile: Option<S3TimeoutProfile>,
+    ) -> Result<Self, StorageError> {
+        let timeouts = ResolvedS3Timeouts::from_profile(profile)?;
+        let client = Self::build_client_with_timeouts(config, timeouts).await?;
         debug!(
             "S3Backend initialized (multi-bucket mode, native encryption: {:?})",
             native_encryption
@@ -390,6 +474,7 @@ impl S3Backend {
         Ok(Self {
             client,
             native_encryption,
+            timeouts,
         })
     }
 
@@ -451,22 +536,17 @@ impl S3Backend {
             if s == 403 && op.is_bucket_level() {
                 return StorageError::BucketNotFound(bucket.to_string());
             }
-            // E-P1-1: 503 SlowDown is the AWS-spec transient throttle
-            // signal. Map to a dedicated `Throttled` variant so the
-            // API layer can surface 503 SlowDown to the caller —
-            // pre-fix this fell into `S3(...)` → catch-all in
-            // `api/errors.rs` → 500 InternalError, which AWS SDKs
-            // treat as permanent and DON'T back off on. Real
-            // production load against a back-pressuring backend
-            // would cascade into client retry storms with no
-            // throttle propagation. Also catches `SlowDown` literal
-            // in the SDK error body when the upstream returns it
-            // without a 503 status (some implementations).
-            if s == 503 || debug_str.contains("SlowDown") {
-                return StorageError::Throttled(format!("{} throttled (status={}): {}", op, s, e));
+            // `SlowDown` and gateway/request-timeout responses are transient
+            // upstream pressure. Surface AWS's retryable 503 contract rather
+            // than a permanent 500 to the S3 client.
+            if matches!(s, 408 | 429 | 502 | 503 | 504) || debug_str.contains("SlowDown") {
+                return StorageError::Throttled(format!(
+                    "{} transient upstream failure (status={}): {}",
+                    op, s, e
+                ));
             }
-        } else if debug_str.contains("SlowDown") {
-            return StorageError::Throttled(format!("{} throttled: {}", op, e));
+        } else if matches!(e, SdkError::TimeoutError(_)) || debug_str.contains("SlowDown") {
+            return StorageError::Throttled(format!("{} transient upstream failure: {}", op, e));
         }
         StorageError::S3(format!(
             "{} failed (status={}): {}",
@@ -708,8 +788,9 @@ impl S3Backend {
                     let is_retryable = if let SdkError::ServiceError(ref svc) = e {
                         let status = svc.raw().status().as_u16();
                         // Hetzner returns transient 400s with connection:close and no
-                        // request-id (~1-2% of requests). 503 is standard SlowDown.
-                        status == 400 || status == 503
+                        // request-id (~1-2% of requests). Gateway failures are also
+                        // retryable after the body has been safely buffered.
+                        status == 400 || matches!(status, 408 | 429 | 502 | 503 | 504)
                     } else {
                         // Network/dispatch errors are retryable
                         matches!(e, SdkError::DispatchFailure(_) | SdkError::TimeoutError(_))
@@ -787,7 +868,7 @@ impl S3Backend {
                 Err(e) => {
                     let is_retryable = if let SdkError::ServiceError(ref svc) = e {
                         let status = svc.raw().status().as_u16();
-                        status == 400 || status == 503
+                        status == 400 || matches!(status, 408 | 429 | 502 | 503 | 504)
                     } else {
                         matches!(e, SdkError::DispatchFailure(_) | SdkError::TimeoutError(_))
                     };
@@ -1290,7 +1371,7 @@ impl StorageBackend for S3Backend {
             .list_buckets()
             .send()
             .await
-            .map_err(|e| StorageError::S3(format!("list_buckets failed: {}", e)))?;
+            .map_err(|e| Self::classify_s3_error("<all>", &e, S3Op::ListBuckets))?;
 
         let mut buckets: Vec<(String, DateTime<Utc>)> = response
             .buckets()
@@ -1558,23 +1639,19 @@ impl StorageBackend for S3Backend {
     }
 
     fn native_relay_target(&self, bucket: &str) -> Option<(Box<dyn StorageBackend>, String)> {
+        let timeouts = self.timeouts.native_relay();
         Some((
             Box::new(Self {
                 client: Client::from_conf(
                     self.client
                         .config()
                         .to_builder()
-                        .timeout_config(
-                            aws_sdk_s3::config::timeout::TimeoutConfig::builder()
-                                .connect_timeout(std::time::Duration::from_secs(10))
-                                .read_timeout(std::time::Duration::from_secs(60))
-                                .operation_attempt_timeout(std::time::Duration::from_secs(120))
-                                .operation_timeout(std::time::Duration::from_secs(300))
-                                .build(),
-                        )
+                        .timeout_config(timeouts.timeout_config())
+                        .stalled_stream_protection(timeouts.stalled_stream_protection())
                         .build(),
                 ),
                 native_encryption: self.native_encryption.clone(),
+                timeouts,
             }),
             bucket.to_owned(),
         ))
@@ -1786,7 +1863,9 @@ impl StorageBackend for S3Backend {
                 Err(e) => {
                     let is_retryable = if let SdkError::ServiceError(ref svc) = e {
                         let status = svc.raw().status().as_u16();
-                        status == 400 || status == 500 || status == 503
+                        status == 400
+                            || status == 500
+                            || matches!(status, 408 | 429 | 502 | 503 | 504)
                     } else {
                         matches!(e, SdkError::DispatchFailure(_) | SdkError::TimeoutError(_))
                     };
@@ -2290,6 +2369,137 @@ mod tests {
     use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
     use aws_smithy_runtime_api::http::StatusCode;
     use aws_smithy_types::body::SdkBody;
+    #[test]
+    fn named_s3_timeout_profile_is_complete_and_shared_with_native_relay() {
+        let profile = S3TimeoutProfile {
+            read_timeout_secs: 180,
+            operation_attempt_timeout_secs: 240,
+            operation_timeout_secs: 300,
+        };
+        let timeouts = ResolvedS3Timeouts::from_profile(Some(profile)).expect("valid profile");
+
+        assert_eq!(timeouts.connect_timeout_secs, 10);
+        assert_eq!(timeouts.read_timeout_secs, 180);
+        assert_eq!(timeouts.operation_attempt_timeout_secs, 240);
+        assert_eq!(timeouts.operation_timeout_secs, Some(300));
+        assert_eq!(timeouts.native_relay(), timeouts);
+    }
+
+    #[test]
+    fn named_s3_timeout_profile_rejects_unbounded_or_nested_deadlines() {
+        for profile in [
+            S3TimeoutProfile {
+                read_timeout_secs: 0,
+                operation_attempt_timeout_secs: 240,
+                operation_timeout_secs: 300,
+            },
+            S3TimeoutProfile {
+                read_timeout_secs: 181,
+                operation_attempt_timeout_secs: 180,
+                operation_timeout_secs: 300,
+            },
+            S3TimeoutProfile {
+                read_timeout_secs: 180,
+                operation_attempt_timeout_secs: 240,
+                operation_timeout_secs: 901,
+            },
+        ] {
+            assert!(ResolvedS3Timeouts::from_profile(Some(profile)).is_err());
+        }
+    }
+    async fn delayed_s3_response(
+        axum::extract::State(delay): axum::extract::State<std::time::Duration>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+
+        tokio::time::sleep(delay).await;
+        (
+            axum::http::StatusCode::OK,
+            [("content-length", "7")],
+            Bytes::from_static(b"payload"),
+        )
+            .into_response()
+    }
+
+    #[tokio::test]
+    async fn named_s3_timeout_profile_bounds_delayed_response_headers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new()
+                    .fallback(delayed_s3_response)
+                    .with_state(std::time::Duration::from_millis(1_100)),
+            )
+            .await
+            .unwrap();
+        });
+        let backend = BackendConfig::S3 {
+            endpoint: Some(endpoint),
+            region: "us-east-1".into(),
+            force_path_style: true,
+            access_key_id: Some("local".into()),
+            secret_access_key: Some("local".into()),
+            allow_local: true,
+        };
+        let requests_finish = |profile| {
+            let config = backend.clone();
+            async move {
+                let backend = S3Backend::new_with_s3_timeouts(
+                    &config,
+                    NativeEncryptionConfig::None,
+                    Some(profile),
+                )
+                .await
+                .expect("construct local S3 backend");
+                match backend
+                    .client
+                    .get_object()
+                    .bucket("bucket")
+                    .key("object")
+                    .send()
+                    .await
+                {
+                    Ok(response) => response.body.collect().await.is_ok(),
+                    Err(_) => false,
+                }
+            }
+        };
+
+        let short = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            requests_finish(S3TimeoutProfile {
+                read_timeout_secs: 1,
+                operation_attempt_timeout_secs: 2,
+                operation_timeout_secs: 3,
+            }),
+        )
+        .await
+        .expect("short deadline remained bounded");
+        assert!(
+            !short,
+            "one-second read deadline accepted a delayed response"
+        );
+
+        let long = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            requests_finish(S3TimeoutProfile {
+                read_timeout_secs: 2,
+                operation_attempt_timeout_secs: 3,
+                operation_timeout_secs: 4,
+            }),
+        )
+        .await
+        .expect("long deadline remained bounded");
+        assert!(
+            long,
+            "two-second read deadline rejected the same delayed response"
+        );
+
+        server.abort();
+        let _ = server.await;
+    }
 
     #[derive(Default)]
     struct RelayFixture {
@@ -2405,6 +2615,7 @@ mod tests {
             S3Backend {
                 client: Client::from_conf(config),
                 native_encryption: NativeEncryptionConfig::None,
+                timeouts: ResolvedS3Timeouts::compatibility(),
             },
             state,
             server,
@@ -2680,6 +2891,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn classify_s3_error_maps_gateway_timeout_to_retryable_slow_down() {
+        let inner = aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error::generic(
+            aws_smithy_types::error::ErrorMetadata::builder()
+                .code("GatewayTimeout")
+                .build(),
+        );
+        let err: SdkError<_> = SdkError::service_error(inner, http_response(504, Some("req-6")));
+        let classified = S3Backend::classify_s3_error("bucket", &err, S3Op::ListObjects);
+        match classified {
+            StorageError::Throttled(message) => {
+                assert!(
+                    message.contains("504"),
+                    "status must be in message: {message}"
+                );
+            }
+            other => panic!("expected retryable throttle for 504, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_list_buckets_gateway_timeout_as_retryable_slow_down() {
+        let inner = aws_sdk_s3::operation::list_buckets::ListBucketsError::generic(
+            aws_smithy_types::error::ErrorMetadata::builder()
+                .code("GatewayTimeout")
+                .build(),
+        );
+        let err: SdkError<_> = SdkError::service_error(inner, http_response(504, Some("req-7")));
+        let classified = S3Backend::classify_s3_error("<all>", &err, S3Op::ListBuckets);
+        assert!(matches!(classified, StorageError::Throttled(_)));
+    }
+
     /// `S3Op::is_bucket_level` is the table driving the 403 rewrite.
     /// Guard that truth-table explicitly — if someone adds a new op
     /// variant and forgets to decide its level, this test will still
@@ -2698,6 +2941,7 @@ mod tests {
         assert!(!S3Op::HeadObject.is_bucket_level());
         assert!(!S3Op::DeleteObject.is_bucket_level());
         assert!(!S3Op::Other("delete_bucket").is_bucket_level());
+        assert!(!S3Op::ListBuckets.is_bucket_level());
     }
 
     // ──────────────────────────────────────────────────────────────
