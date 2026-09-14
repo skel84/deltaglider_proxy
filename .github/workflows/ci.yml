@@ -270,9 +270,9 @@ jobs:
         run: |
           rm -f deltaglider_config.db deltaglider_config.db.bak .deltaglider_bootstrap_hash
           rm -f /tmp/deltaglider_config.db /tmp/deltaglider_config.db.bak /tmp/.deltaglider_bootstrap_hash
-      - name: Install MinIO client
+      - name: Install pinned MinIO client
         run: |
-          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "$RUNNER_TEMP/mc"
+          curl -fsSL https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z -o "$RUNNER_TEMP/mc"
           sudo install -m 0755 "$RUNNER_TEMP/mc" /usr/local/bin/mc
       - name: Start MinIO for tests
         run: |
