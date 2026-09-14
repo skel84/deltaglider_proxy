@@ -49,6 +49,7 @@ use tracing::{debug, instrument, warn};
 /// Operation context for S3 error classification.
 #[derive(Debug)]
 enum S3Op {
+    ListBuckets,
     ListObjects,
     CreateBucket,
     PutObject,
@@ -65,6 +66,7 @@ enum S3Op {
 impl std::fmt::Display for S3Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            S3Op::ListBuckets => write!(f, "list_buckets"),
             S3Op::ListObjects => write!(f, "list_objects"),
             S3Op::CreateBucket => write!(f, "create_bucket"),
             S3Op::PutObject => write!(f, "put_object"),
@@ -1369,7 +1371,7 @@ impl StorageBackend for S3Backend {
             .list_buckets()
             .send()
             .await
-            .map_err(|e| StorageError::S3(format!("list_buckets failed: {}", e)))?;
+            .map_err(|e| Self::classify_s3_error("<all>", &e, S3Op::ListBuckets))?;
 
         let mut buckets: Vec<(String, DateTime<Utc>)> = response
             .buckets()
@@ -2909,6 +2911,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn classify_list_buckets_gateway_timeout_as_retryable_slow_down() {
+        let inner = aws_sdk_s3::operation::list_buckets::ListBucketsError::generic(
+            aws_smithy_types::error::ErrorMetadata::builder()
+                .code("GatewayTimeout")
+                .build(),
+        );
+        let err: SdkError<_> = SdkError::service_error(inner, http_response(504, Some("req-7")));
+        let classified = S3Backend::classify_s3_error("<all>", &err, S3Op::ListBuckets);
+        assert!(matches!(classified, StorageError::Throttled(_)));
+    }
+
     /// `S3Op::is_bucket_level` is the table driving the 403 rewrite.
     /// Guard that truth-table explicitly — if someone adds a new op
     /// variant and forgets to decide its level, this test will still
@@ -2927,6 +2941,7 @@ mod tests {
         assert!(!S3Op::HeadObject.is_bucket_level());
         assert!(!S3Op::DeleteObject.is_bucket_level());
         assert!(!S3Op::Other("delete_bucket").is_bucket_level());
+        assert!(!S3Op::ListBuckets.is_bucket_level());
     }
 
     // ──────────────────────────────────────────────────────────────

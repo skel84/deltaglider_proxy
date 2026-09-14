@@ -1503,6 +1503,13 @@ impl Config {
             spec.validate()
                 .map_err(|e| ConfigError::Parse(format!("admission: {}", e)))?;
         }
+        for named in &self.backends {
+            if let Some(profile) = named.s3_timeouts {
+                profile.validate().map_err(|e| {
+                    ConfigError::Parse(format!("backend `{}` s3_timeouts: {}", named.name, e))
+                })?;
+            }
+        }
         Ok(())
     }
 
@@ -3146,6 +3153,25 @@ backends:
             cfg.backends[1].encryption,
             BackendEncryptionConfig::None { .. }
         ));
+    }
+
+    #[test]
+    fn test_from_yaml_str_rejects_invalid_named_s3_timeout_profile() {
+        let yaml = r#"
+backends:
+  - name: harbor
+    type: s3
+    s3_timeouts:
+      read_timeout_secs: 0
+      operation_attempt_timeout_secs: 240
+      operation_timeout_secs: 300
+"#;
+        let err = Config::from_yaml_str(yaml)
+            .expect_err("invalid named S3 timeout profiles must be rejected before runtime");
+        assert!(
+            format!("{err}").contains("backend `harbor` s3_timeouts"),
+            "unexpected validation error: {err}"
+        );
     }
 
     #[test]
