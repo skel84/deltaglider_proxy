@@ -991,7 +991,7 @@ impl s3s::S3 for DeltaGliderS3Service {
                         admission.release();
                     }
                 }
-                engine_error_to_s3s(error)
+                multipart_capacity_error(&self.state.multipart, engine_error_to_s3s(error))
             })?;
         self.state.multipart.pin_admission(
             &upload_id,
@@ -1030,7 +1030,7 @@ impl s3s::S3 for DeltaGliderS3Service {
                         admission.release();
                     }
                 }
-                engine_error_to_s3s(error)
+                multipart_capacity_error(&self.state.multipart, engine_error_to_s3s(error))
             })?;
         let admission = self.state.multipart.admission(&input.upload_id);
         if let Some(admission) = &admission {
@@ -1062,7 +1062,7 @@ impl s3s::S3 for DeltaGliderS3Service {
             &headers,
         )
         .await
-        .inspect_err(|error| {
+        .map_err(|error| {
             // collect_part_body produces SlowDown only at ingress.acquire(),
             // before polling the request body or modifying an upload.
             if error.code() == &s3s::S3ErrorCode::SlowDown {
@@ -1073,6 +1073,7 @@ impl s3s::S3 for DeltaGliderS3Service {
                     admission.release();
                 }
             }
+            multipart_capacity_error(&self.state.multipart, error)
         })?;
         validate_content_md5_s3s(input.content_md5.as_deref(), &admitted.data)?;
         let etag = self
@@ -1094,7 +1095,12 @@ impl s3s::S3 for DeltaGliderS3Service {
                         admission.release();
                     }
                 }
-                engine_error_to_s3s(failure.error)
+                let error = engine_error_to_s3s(failure.error);
+                if failure.unexecuted_capacity {
+                    multipart_capacity_error(&self.state.multipart, error)
+                } else {
+                    error
+                }
             })?;
         Ok(s3s::S3Response::new(s3s::dto::UploadPartOutput {
             e_tag: Some(parse_s3s_etag(&etag)?),
@@ -1180,7 +1186,10 @@ impl s3s::S3 for DeltaGliderS3Service {
                         {
                             admission.release();
                         }
-                        s3s::s3_error!(SlowDown, "Multipart completion capacity reached")
+                        multipart_capacity_error(
+                            &self.state.multipart,
+                            s3s::s3_error!(SlowDown, "Multipart completion capacity reached"),
+                        )
                     })?,
             )
         } else {
@@ -1757,6 +1766,19 @@ async fn evaluate_put_etag_conditionals_s3s(
     Ok(())
 }
 
+// Only proven pre-execution capacity refusals use this mapping. Keep the S3
+// SlowDown code for SDK backoff, but avoid an intermediary's automatic 5xx
+// replay of large bodies. Ambiguous/storage failures retain their usual status.
+fn multipart_capacity_error(
+    store: &crate::multipart::MultipartStore,
+    mut error: s3s::S3Error,
+) -> s3s::S3Error {
+    if store.client_capacity_backoff() && error.code() == &s3s::S3ErrorCode::SlowDown {
+        error.set_status_code(axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+    error
+}
+
 fn engine_error_to_s3s(err: impl Into<crate::api::S3Error>) -> s3s::S3Error {
     match err.into() {
         crate::api::S3Error::NoSuchKey(_) => s3s::s3_error!(NoSuchKey),
@@ -2206,6 +2228,34 @@ mod tests {
     #[test]
     fn adapter_type_implements_s3_trait() {
         assert_s3_service::<DeltaGliderS3Service>();
+    }
+
+    #[test]
+    fn multipart_capacity_status_preserves_error_codes_and_legacy_profiles() {
+        use crate::multipart::{MultipartStore, NativeMultipartProfile};
+        for (profile, expected) in [
+            (
+                NativeMultipartProfile::LargeBackup,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                NativeMultipartProfile::LargeObject,
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+            ),
+        ] {
+            let dir = crate::multipart::test_spool_dir();
+            let store = MultipartStore::new(1024)
+                .with_native_spool(dir.path(), profile)
+                .unwrap();
+            let error = multipart_capacity_error(&store, s3s::s3_error!(SlowDown));
+            assert_eq!(error.code(), &s3s::S3ErrorCode::SlowDown);
+            assert_eq!(error.status_code(), Some(expected));
+            let error = multipart_capacity_error(&store, s3s::s3_error!(InternalError));
+            assert_eq!(
+                error.status_code(),
+                Some(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+            );
+        }
     }
 
     #[test]

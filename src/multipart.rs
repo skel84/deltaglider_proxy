@@ -363,6 +363,7 @@ pub struct MultipartStore {
     pub(crate) ingress: MultipartIngress,
     relay_root: PathBuf,
     spool: Option<spool::Spool>,
+    native_profile: Option<NativeMultipartProfile>,
     #[cfg(test)]
     fail_cleanup: std::sync::atomic::AtomicBool,
     pub(crate) completions: Arc<tokio::sync::Semaphore>,
@@ -390,6 +391,7 @@ impl MultipartStore {
             ingress: MultipartIngress::from_env(),
             relay_root: relay_root_dir().join(uuid::Uuid::new_v4().to_string()),
             spool: None,
+            native_profile: None,
             #[cfg(test)]
             fail_cleanup: std::sync::atomic::AtomicBool::new(false),
             completions: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -432,6 +434,7 @@ impl MultipartStore {
         let spool = spool::Spool::open(path)?;
         self.relay_root = spool.root.clone();
         self.spool = Some(spool);
+        self.native_profile = Some(profile);
         self.max_object_size = object;
         self.max_total_multipart_bytes = spool_bytes;
         self.max_uploads = LARGE_UPLOADS;
@@ -446,6 +449,13 @@ impl MultipartStore {
 
     pub fn large_profile(&self) -> bool {
         self.spool.is_some()
+    }
+
+    pub(crate) fn client_capacity_backoff(&self) -> bool {
+        matches!(
+            self.native_profile,
+            Some(NativeMultipartProfile::LargeObject)
+        )
     }
 
     pub(crate) fn pin_admission(
@@ -530,6 +540,7 @@ impl MultipartStore {
             ingress: MultipartIngress::new(None, None),
             relay_root: relay_root_dir().join(uuid::Uuid::new_v4().to_string()),
             spool: None,
+            native_profile: None,
             #[cfg(test)]
             fail_cleanup: std::sync::atomic::AtomicBool::new(false),
             completions: Arc::new(tokio::sync::Semaphore::new(1)),
