@@ -378,6 +378,7 @@ pub struct MultipartStore {
     /// UploadPart accepts bytes (C3 DoS fix).
     in_flight_bytes: std::sync::atomic::AtomicU64,
     max_total_multipart_bytes: u64,
+    object_size_refusals: prometheus::IntCounter,
     idle_ttl: Duration,
 }
 
@@ -402,6 +403,11 @@ impl MultipartStore {
             max_parts_per_upload: LARGE_PARTS_PER_UPLOAD,
             in_flight_bytes: std::sync::atomic::AtomicU64::new(0),
             max_total_multipart_bytes,
+            object_size_refusals: prometheus::IntCounter::new(
+                "deltaglider_multipart_object_size_refusals_total",
+                "Multipart requests refused for exceeding the object size limit",
+            )
+            .expect("valid metric name"),
             idle_ttl: Duration::hours(idle_ttl_hours),
         }
     }
@@ -551,6 +557,11 @@ impl MultipartStore {
             max_parts_per_upload: LARGE_PARTS_PER_UPLOAD,
             in_flight_bytes: std::sync::atomic::AtomicU64::new(0),
             max_total_multipart_bytes,
+            object_size_refusals: prometheus::IntCounter::new(
+                "deltaglider_multipart_object_size_refusals_total",
+                "Multipart requests refused for exceeding the object size limit",
+            )
+            .expect("valid metric name"),
             idle_ttl,
         }
     }
@@ -560,6 +571,23 @@ impl MultipartStore {
     pub(crate) fn in_flight_bytes(&self) -> u64 {
         self.in_flight_bytes
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Largest retained upload, including an upload being completed. The store
+    /// bounds the number of uploads and parts; no bucket or object labels leak.
+    pub(crate) fn largest_upload_bytes(&self) -> u64 {
+        self.uploads
+            .read()
+            .values()
+            .map(|upload| upload.parts.values().map(|part| part.size).sum())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Share the registered process counter with the store that enforces limits.
+    pub fn with_refusal_counter(mut self, counter: prometheus::IntCounter) -> Self {
+        self.object_size_refusals = counter;
+        self
     }
 
     /// Create a new multipart upload, returns the upload ID.
@@ -727,6 +755,7 @@ impl MultipartStore {
             .saturating_add(size);
 
         if cumulative_after > upload.accepted_limit {
+            self.object_size_refusals.inc();
             return Err(S3Error::EntityTooLarge {
                 size: cumulative_after,
                 max: upload.accepted_limit,
@@ -2026,6 +2055,11 @@ mod tests {
             "got {:?}",
             err
         );
+        assert_eq!(store.object_size_refusals.get(), 1);
+        assert_eq!(store.largest_upload_bytes(), 900);
+        store.abort(&upload_id, "bucket", "key").unwrap();
+        assert_eq!(store.largest_upload_bytes(), 0);
+        assert_eq!(store.object_size_refusals.get(), 1);
     }
 
     #[test]
@@ -2046,6 +2080,7 @@ mod tests {
             .unwrap();
         // Counter should reflect the overwrite.
         assert_eq!(store.in_flight_bytes(), 600);
+        assert_eq!(store.largest_upload_bytes(), 600);
     }
 
     #[test]
@@ -2063,6 +2098,8 @@ mod tests {
         store
             .upload_part(&id_b, "b", "b", 1, Bytes::from(vec![0u8; 1024]))
             .unwrap();
+        assert_eq!(store.largest_upload_bytes(), 1024);
+        assert_eq!(store.object_size_refusals.get(), 0);
         // Next byte anywhere → SlowDown.
         let err = store
             .upload_part_classified(&id_a, "b", "a", 2, Bytes::from(vec![0u8; 1]))

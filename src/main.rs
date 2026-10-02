@@ -515,7 +515,8 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .set(engine.cache_max_capacity() as f64);
 
     // --- Multipart uploads ---
-    let mut multipart = MultipartStore::new(config.max_object_size);
+    let mut multipart = MultipartStore::new(config.max_object_size)
+        .with_refusal_counter(metrics.multipart_object_size_refusals_total.clone());
     let spool_path = std::env::var_os("DGP_MPU_LARGE_SPOOL_DIR").map(std::path::PathBuf::from);
     let profile = match std::env::var("DGP_MPU_UPLOAD_PROFILE") {
         Ok(value) => {

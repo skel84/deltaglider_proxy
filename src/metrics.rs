@@ -68,6 +68,8 @@ pub struct Metrics {
     pub multipart_sweep_last_uploads_reclaimed: Gauge,
     pub multipart_sweep_last_reclaimed_bytes: Gauge,
     pub multipart_uploads_inflight: Gauge,
+    pub multipart_largest_upload_bytes: Gauge,
+    pub multipart_object_size_refusals_total: IntCounter,
 
     // -- Replication streaming-copy (Phase B) --
     // Deterministic high-water gauges + totals. Prove bounded memory, real
@@ -417,6 +419,23 @@ impl Metrics {
             .unwrap()
         );
 
+        let multipart_largest_upload_bytes = register!(
+            registry,
+            Gauge::new(
+                "deltaglider_multipart_largest_upload_bytes",
+                "Largest retained multipart upload in bytes, including completion",
+            )
+            .unwrap()
+        );
+        let multipart_object_size_refusals_total = register!(
+            registry,
+            IntCounter::new(
+                "deltaglider_multipart_object_size_refusals_total",
+                "Cumulative multipart requests refused for exceeding the object size limit",
+            )
+            .unwrap()
+        );
+
         // -- Replication streaming-copy (Phase B) --
         let replication_part_bytes_resident = register!(
             registry,
@@ -532,6 +551,8 @@ impl Metrics {
             multipart_sweep_last_uploads_reclaimed,
             multipart_sweep_last_reclaimed_bytes,
             multipart_uploads_inflight,
+            multipart_largest_upload_bytes,
+            multipart_object_size_refusals_total,
             replication_part_bytes_resident,
             replication_part_bytes_resident_peak,
             replication_parts_inflight,
@@ -647,7 +668,7 @@ pub async fn http_metrics_middleware(
 pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let metrics = &state.metrics;
 
-    // Update on-demand gauges (all O(1) atomic reads)
+    // Update on-demand metrics. Multipart size scans the bounded retained parts.
     let engine = state.engine.load();
     metrics
         .process_peak_rss_bytes
@@ -675,6 +696,10 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
     metrics
         .multipart_uploads_inflight
         .set(state.multipart.count_uploads() as f64);
+
+    metrics
+        .multipart_largest_upload_bytes
+        .set(state.multipart.largest_upload_bytes() as f64);
 
     let encoder = TextEncoder::new();
     let metric_families = metrics.registry.gather();
