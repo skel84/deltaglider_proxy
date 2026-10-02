@@ -406,10 +406,13 @@ async fn generated_relay_integrity(size: u64, profile: crate::multipart::NativeM
     assert_eq!(files, parts.len());
     eprintln!("relay resource evidence: payload_bytes={size} source_files={files} allocated_file_bytes={allocated}");
     let expected = hex::encode(expected.finalize());
-    service
+    let mut completed = service
         .complete_multipart_upload(relay_request_input(relay_complete_input(&id, parts)))
         .await
         .unwrap();
+    if let Some(final_result) = completed.output.future.take() {
+        final_result.await.unwrap();
+    }
     let state = remote.lock().await;
     assert_eq!(state.received, size);
     assert_eq!(hex::encode(state.digest.clone().finalize()), expected);

@@ -268,11 +268,20 @@ sequential 8 MiB backend parts without assembling an object in memory.
 Pre-execution capacity refusals in this profile return HTTP 429 with the S3
 `SlowDown` code. SDK clients perform backoff; an HTTP intermediary must not
 replay a large refused body under a generic 5xx retry policy. The existing
-large-backup profile retains HTTP 503. Backend failures and ambiguous writes
-retain their ordinary status and replay protection.
+large-backup profile retains HTTP 503. Replay protection still applies to backend
+failures and ambiguous writes.
 
-Use a read timeout that covers the whole sequential completion and reconcile
-a timed-out object before starting another upload. The per-backend operation
+After acquiring completion ownership, this profile uses the protocol library's
+[S3 completion stream](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html):
+HTTP 200 headers and periodic XML whitespace keep an idle
+HTTP proxy or client connected. The final XML carries the result or an embedded
+S3 error; HTTP 200 alone is not proof of publication. SDK clients parse that
+final result. Capacity refusal still happens before the stream starts. The
+standard and large-backup profiles retain their existing completion response.
+
+A disconnected response leaves the backend owner running with its permit,
+spool and reservations until settlement. Reconcile HEAD and data after an
+ambiguous response before starting another upload. The per-backend operation
 timeout bounds each SDK request, not the complete object transfer.
 
 Use a disk-backed volume with room for the 16 GiB reservation budget, up to

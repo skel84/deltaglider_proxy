@@ -413,6 +413,7 @@ pub fn build_s3_router(
             response.headers_mut().insert("x-amz-request-id", value);
         }
 
+        let response = deltaglider_proxy::s3_adapter_s3s::completion_http_response(response);
         let is_error = response.status().is_client_error() || response.status().is_server_error();
 
         let content_type_is_xml = response

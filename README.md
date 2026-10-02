@@ -54,7 +54,8 @@ Clients see standard S3. They don't know which backend stores their bucket. They
 For operator-controlled native gzip backup streams, the disabled-by-default
 [native-S3 multipart disk profile](docs/product/reference/rate-limits.md#opt-in-native-s3-large-backup-profile)
 defines bounded ingress, spool ownership and recovery prerequisites; it is not a
-general increase to object-engine memory limits.
+general increase to object-engine memory limits. ClickHouse-sized files use the
+separate [large-object profile](docs/product/reference/rate-limits.md#opt-in-native-s3-large-object-profile).
 
 ### Transparent Delta Compression
 - **60-95% storage reduction** on repeated binary workloads when internal structure is similar across versions (backup archives, software catalogs, media/texture variants, AI model variants, release artifacts, firmware, ML checkpoints)
