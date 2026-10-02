@@ -1199,12 +1199,19 @@ impl s3s::S3 for DeltaGliderS3Service {
         // Dropping the HTTP handler detaches this sole owner, not the backend.
         // It retains the permit, spool, reservations and SDK create/abort future
         // through quiescence. A disconnect does NOT mean an S3 abort succeeded.
-        tokio::spawn(async move {
+        let worker = tokio::spawn(async move {
             let _permit = permit;
             service.complete_multipart_owned(req).await
-        })
-        .await
-        .map_err(|_| s3s::s3_error!(InternalError, "Multipart completion worker failed"))?
+        });
+        if self.state.multipart.client_capacity_backoff() {
+            // s3s emits S3's whitespace heartbeats while the owned worker runs.
+            // Dropping the response future detaches its JoinHandle; it does not
+            // cancel a backend write or release its completion/spool ownership.
+            return Ok(streaming_completion_response(worker));
+        }
+        worker
+            .await
+            .map_err(|_| s3s::s3_error!(InternalError, "Multipart completion worker failed"))?
     }
 
     async fn list_multipart_uploads(
@@ -1766,6 +1773,54 @@ async fn evaluate_put_etag_conditionals_s3s(
     Ok(())
 }
 
+#[derive(Clone)]
+struct StreamingCompletion;
+
+/// Keep the library's heartbeat stream and final XML error parseable.
+pub fn completion_http_response(response: axum::response::Response) -> axum::response::Response {
+    if response.extensions().get::<StreamingCompletion>().is_none() {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    parts.extensions.remove::<StreamingCompletion>();
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    let mut declaration_seen = false;
+    let stream = body.into_data_stream().map(move |chunk| {
+        chunk.map(|bytes| {
+            // s3s 0.14.1 emits an initial declaration, then another declaration
+            // in a late error's single XML frame. Strict SDK parsers reject it.
+            if bytes.starts_with(b"<?xml") {
+                if let Some(end) = bytes.windows(2).position(|pair| pair == b"?>") {
+                    if declaration_seen {
+                        return bytes.slice(end + 2..);
+                    }
+                    declaration_seen = true;
+                }
+            }
+            bytes
+        })
+    });
+    axum::http::Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
+fn streaming_completion_response(
+    worker: tokio::task::JoinHandle<
+        s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>>,
+    >,
+) -> s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput> {
+    let mut response = s3s::S3Response::new(s3s::dto::CompleteMultipartUploadOutput {
+        future: Some(Box::pin(async move {
+            worker
+                .await
+                .map_err(|_| s3s::s3_error!(InternalError, "Multipart completion worker failed"))?
+                .map(|response| response.output)
+        })),
+        ..Default::default()
+    });
+    response.extensions.insert(StreamingCompletion);
+    response
+}
+
 // Only proven pre-execution capacity refusals use this mapping. Keep the S3
 // SlowDown code for SDK backoff, but avoid an intermediary's automatic 5xx
 // replay of large bodies. Ambiguous/storage failures retain their usual status.
@@ -2228,6 +2283,136 @@ mod tests {
     #[test]
     fn adapter_type_implements_s3_trait() {
         assert_s3_service::<DeltaGliderS3Service>();
+    }
+
+    struct DeferredCompletion(
+        std::sync::Mutex<
+            Option<
+                tokio::task::JoinHandle<
+                    s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>>,
+                >,
+            >,
+        >,
+    );
+
+    #[async_trait::async_trait]
+    impl s3s::S3 for DeferredCompletion {
+        async fn complete_multipart_upload(
+            &self,
+            _req: s3s::S3Request<s3s::dto::CompleteMultipartUploadInput>,
+        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
+            Ok(streaming_completion_response(
+                self.0.lock().unwrap().take().unwrap(),
+            ))
+        }
+    }
+
+    async fn deferred_completion_http(
+        worker: tokio::task::JoinHandle<
+            s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>>,
+        >,
+    ) -> axum::response::Response {
+        let service = s3s::service::S3ServiceBuilder::new(DeferredCompletion(
+            std::sync::Mutex::new(Some(worker)),
+        ))
+        .build();
+        let response = service.call(axum::http::Request::builder()
+            .method("POST")
+            .uri("/backups/archive.gz?uploadId=test-upload")
+            .body(s3s::Body::from("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"abc\"</ETag></Part></CompleteMultipartUpload>".to_owned()))
+            .unwrap()).await.unwrap();
+        completion_http_response(response.map(axum::body::Body::new))
+    }
+
+    #[tokio::test]
+    async fn completion_heartbeat_preserves_late_error_xml() {
+        use futures::TryStreamExt;
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            wait.await.unwrap();
+            Err(s3s::s3_error!(NoSuchUpload))
+        });
+        let response = deferred_completion_http(worker).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let first = body.next().await.unwrap().unwrap();
+        assert!(first.starts_with(b"<?xml"));
+        let heartbeat = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(heartbeat.iter().all(u8::is_ascii_whitespace));
+        release.send(()).unwrap();
+        let rest: Vec<bytes::Bytes> = body.try_collect().await.unwrap();
+        let xml = String::from_utf8([vec![first, heartbeat], rest].concat().concat()).unwrap();
+        assert!(
+            xml.contains("<Code>NoSuchUpload</Code>"),
+            "late error must reach the SDK"
+        );
+        assert_eq!(
+            xml.matches("<?xml").count(),
+            1,
+            "embedded error must remain parseable XML"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_stream_preserves_final_result() {
+        let worker = tokio::spawn(async {
+            Ok(s3s::S3Response::new(
+                s3s::dto::CompleteMultipartUploadOutput {
+                    e_tag: Some(parse_s3s_etag("\"committed-etag\"").unwrap()),
+                    bucket: Some("backups".into()),
+                    key: Some("archive.gz".into()),
+                    ..Default::default()
+                },
+            ))
+        });
+        let response = deferred_completion_http(worker).await;
+        let xml = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&xml).unwrap();
+        assert!(text.contains("<CompleteMultipartUploadResult"));
+        assert!(
+            text.contains("committed-etag"),
+            "the final result must replace the placeholder"
+        );
+        assert!(!text.contains("<Error>"));
+        assert_eq!(text.matches("<?xml").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn completion_response_disconnect_preserves_owner_until_settlement() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = permits.clone().acquire_owned().await.unwrap();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let (settled, settlement) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _permit = permit;
+            wait.await.unwrap();
+            settled.send(()).unwrap();
+            Ok(s3s::S3Response::new(
+                s3s::dto::CompleteMultipartUploadOutput::default(),
+            ))
+        });
+        let response = deferred_completion_http(worker).await;
+        drop(response);
+        assert_eq!(
+            permits.available_permits(),
+            0,
+            "disconnect must not cancel or release owned work"
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), settlement)
+            .await
+            .unwrap()
+            .unwrap();
+        let _permit = tokio::time::timeout(std::time::Duration::from_secs(1), permits.acquire())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
