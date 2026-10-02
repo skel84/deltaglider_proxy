@@ -948,13 +948,9 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         content_type: Option<String>,
         user_metadata: HashMap<String, String>,
         multipart_etag: String,
-        target: Option<&(Box<dyn StorageBackend>, String)>,
+        admission: Option<&crate::multipart::NativeRelayAdmission>,
     ) -> Result<StoreResult, EngineError> {
-        let limit = if target.is_some() {
-            crate::multipart::LARGE_OBJECT_BYTES
-        } else {
-            self.max_object_size
-        };
+        let limit = admission.map_or(self.max_object_size, |a| a.object_limit);
         if total_size > limit {
             return Err(EngineError::TooLarge {
                 size: total_size,
@@ -1003,8 +999,8 @@ impl<S: StorageBackend> DeltaGliderEngine<S> {
         metadata.user_metadata = user_metadata;
         metadata.multipart_etag = Some(multipart_etag);
 
-        let (storage, storage_bucket): (&dyn StorageBackend, &str) = match target {
-            Some((storage, real_bucket)) => (storage.as_ref(), real_bucket),
+        let (storage, storage_bucket): (&dyn StorageBackend, &str) = match admission {
+            Some(a) => (a.target.0.as_ref(), &a.target.1),
             None => (self.storage.as_ref(), bucket),
         };
         storage

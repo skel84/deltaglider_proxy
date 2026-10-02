@@ -299,6 +299,12 @@ pub const ENV_VAR_REGISTRY: &[EnvVarEntry] = &[
         category: "Server",
     },
     EnvVarEntry {
+        name: "DGP_MPU_UPLOAD_PROFILE",
+        description: "Startup-only fixed native multipart envelope: NativeS3LargeBackup (default) or NativeS3LargeObject; requires DGP_MPU_LARGE_SPOOL_DIR",
+        example: "NativeS3LargeObject",
+        category: "Server",
+    },
+    EnvVarEntry {
         name: "DGP_MPU_MAX_PART_BYTES",
         description: "Optional UploadPart body ceiling in bytes (never raises object cap); disables UploadPartCopy",
         example: "16777216",

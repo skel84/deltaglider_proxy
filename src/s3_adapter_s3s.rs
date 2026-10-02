@@ -962,6 +962,7 @@ impl s3s::S3 for DeltaGliderS3Service {
                     Arc::new(crate::multipart::NativeRelayAdmission {
                         engine: Arc::downgrade(&engine),
                         target,
+                        object_limit: self.state.multipart.native_object_limit(),
                     })
                 })
         } else {
@@ -2111,7 +2112,7 @@ impl DeltaGliderS3Service {
                             completed.content_type,
                             completed.user_metadata,
                             etag.clone(),
-                            admission.as_ref().map(|a| &a.target),
+                            admission.as_deref(),
                         )
                         .await
                 }

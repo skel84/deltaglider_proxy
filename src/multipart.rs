@@ -76,6 +76,14 @@ const LARGE_UPLOADS: usize = 32;
 const LARGE_PARTS: usize = 4096;
 const LARGE_PARTS_PER_UPLOAD: usize = 256;
 
+/// Named, fixed envelopes. General engine and delta reconstruction limits do
+/// not change; only admitted native-S3 multipart uploads use these bounds.
+#[derive(Clone, Copy)]
+pub enum NativeMultipartProfile {
+    LargeBackup,
+    LargeObject,
+}
+
 #[cfg(test)]
 pub(crate) fn test_spool_dir() -> tempfile::TempDir {
     use std::os::unix::fs::PermissionsExt;
@@ -88,6 +96,7 @@ pub(crate) fn test_spool_dir() -> tempfile::TempDir {
 pub(crate) struct NativeRelayAdmission {
     pub engine: std::sync::Weak<crate::deltaglider::DynEngine>,
     pub target: (Box<dyn crate::storage::StorageBackend>, String),
+    pub object_limit: u64,
 }
 
 /// Drop is terminal only after begin-complete. The owned task never cancels a
@@ -361,6 +370,7 @@ pub struct MultipartStore {
     uploads: RwLock<HashMap<String, MultipartUpload>>,
     max_object_size: u64,
     max_uploads: usize,
+    max_parts_per_upload: usize,
     /// Global in-flight bytes across all uploads. Kept consistent with
     /// the sum of retained part sizes plus cleanup/temporary bytes — updated under the
     /// same write lock that mutates the parts map. Checked before each
@@ -387,6 +397,7 @@ impl MultipartStore {
             uploads: RwLock::new(HashMap::new()),
             max_object_size,
             max_uploads,
+            max_parts_per_upload: LARGE_PARTS_PER_UPLOAD,
             in_flight_bytes: std::sync::atomic::AtomicU64::new(0),
             max_total_multipart_bytes,
             idle_ttl: Duration::hours(idle_ttl_hours),
@@ -395,15 +406,42 @@ impl MultipartStore {
 
     /// Fixed, opt-in disk profile. Existing general PUT/delta engine caps stay
     /// unchanged. Startup fails closed on lock/reclamation/config errors.
-    pub fn with_large_spool(mut self, path: &Path) -> std::io::Result<Self> {
+    pub fn with_large_spool(self, path: &Path) -> std::io::Result<Self> {
+        self.with_native_spool(path, NativeMultipartProfile::LargeBackup)
+    }
+
+    pub fn with_native_spool(
+        mut self,
+        path: &Path,
+        profile: NativeMultipartProfile,
+    ) -> std::io::Result<Self> {
+        let (object, part, spool_bytes, parts) = match profile {
+            NativeMultipartProfile::LargeBackup => (
+                LARGE_OBJECT_BYTES,
+                LARGE_PART_BYTES,
+                LARGE_SPOOL_BYTES,
+                LARGE_PARTS_PER_UPLOAD,
+            ),
+            NativeMultipartProfile::LargeObject => (
+                8 * 1024 * 1024 * 1024,
+                64 * 1024 * 1024,
+                16 * 1024 * 1024 * 1024,
+                1024,
+            ),
+        };
         let spool = spool::Spool::open(path)?;
         self.relay_root = spool.root.clone();
         self.spool = Some(spool);
-        self.max_object_size = LARGE_OBJECT_BYTES;
-        self.max_total_multipart_bytes = LARGE_SPOOL_BYTES;
+        self.max_object_size = object;
+        self.max_total_multipart_bytes = spool_bytes;
         self.max_uploads = LARGE_UPLOADS;
-        self.ingress = MultipartIngress::new(Some(LARGE_PART_BYTES), Some(2));
+        self.max_parts_per_upload = parts;
+        self.ingress = MultipartIngress::new(Some(part), Some(2));
         Ok(self)
+    }
+
+    pub(crate) fn native_object_limit(&self) -> u64 {
+        self.max_object_size
     }
 
     pub fn large_profile(&self) -> bool {
@@ -419,7 +457,7 @@ impl MultipartStore {
         let mut uploads = self.uploads.write();
         if let Some(upload) = uploads.get_mut(id) {
             upload.accepted_limit = if admission.is_some() {
-                LARGE_OBJECT_BYTES
+                self.max_object_size
             } else {
                 small_limit
                     .min(self.max_object_size)
@@ -499,6 +537,7 @@ impl MultipartStore {
             uploads: RwLock::new(HashMap::new()),
             max_object_size,
             max_uploads: 1000,
+            max_parts_per_upload: LARGE_PARTS_PER_UPLOAD,
             in_flight_bytes: std::sync::atomic::AtomicU64::new(0),
             max_total_multipart_bytes,
             idle_ttl,
@@ -684,10 +723,10 @@ impl MultipartStore {
             .into());
         }
         if self.large_profile()
-            && (size > LARGE_PART_BYTES
+            && (size > self.ingress.part_limit(self.max_object_size)
                 || (!upload.parts.contains_key(&part_number)
                     && (total_parts >= LARGE_PARTS
-                        || upload.parts.len() >= LARGE_PARTS_PER_UPLOAD)))
+                        || upload.parts.len() >= self.max_parts_per_upload)))
         {
             return Err(PartUploadFailure::unexecuted_capacity(
                 "Multipart part budget reached".into(),

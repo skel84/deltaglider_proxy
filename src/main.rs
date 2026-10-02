@@ -516,10 +516,29 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Multipart uploads ---
     let mut multipart = MultipartStore::new(config.max_object_size);
-    if let Some(path) =
-        deltaglider_proxy::config::env_parse::<std::path::PathBuf>("DGP_MPU_LARGE_SPOOL_DIR")
-    {
-        multipart = multipart.with_large_spool(&path)?;
+    let spool_path = std::env::var_os("DGP_MPU_LARGE_SPOOL_DIR").map(std::path::PathBuf::from);
+    let profile = match std::env::var("DGP_MPU_UPLOAD_PROFILE") {
+        Ok(value) => {
+            if spool_path.is_none() {
+                return Err("DGP_MPU_UPLOAD_PROFILE requires DGP_MPU_LARGE_SPOOL_DIR".into());
+            }
+            match value.as_str() {
+                "NativeS3LargeBackup" => {
+                    deltaglider_proxy::multipart::NativeMultipartProfile::LargeBackup
+                }
+                "NativeS3LargeObject" => {
+                    deltaglider_proxy::multipart::NativeMultipartProfile::LargeObject
+                }
+                _ => return Err("unsupported DGP_MPU_UPLOAD_PROFILE".into()),
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {
+            deltaglider_proxy::multipart::NativeMultipartProfile::LargeBackup
+        }
+        Err(_) => return Err("invalid DGP_MPU_UPLOAD_PROFILE".into()),
+    };
+    if let Some(path) = spool_path {
+        multipart = multipart.with_native_spool(&path, profile)?;
     }
     let multipart = Arc::new(multipart);
     let multipart_sweep_interval_secs: u64 =
