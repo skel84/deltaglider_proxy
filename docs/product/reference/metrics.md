@@ -4,7 +4,7 @@
 
 ![Storage analytics dashboard](/_/screenshots/analytics.jpg)
 
-`GET /_/metrics` returns Prometheus text format on the same port as the S3 API. Metrics are collected via lock-free atomics on the hot path — no mutexes, no sampling, no performance impact.
+`GET /_/metrics` returns Prometheus text format on the same port as the S3 API. Counters use atomics on the request path. On scrape, multipart size takes a read lock over the bounded upload store; it does not read file contents.
 
 For scrape configuration, Grafana panels, and alerting rules, see [How to monitor with Prometheus and Grafana](../how-to/monitor-with-prometheus.md).
 
@@ -108,9 +108,20 @@ deltaglider_cache_miss_rate_ratio > 0.5     # cache thrashing
 
 ## Multipart uploads
 
+For the 8 GiB native-object profile, alert above 6 GiB and 7 GiB using
+`max_over_time(deltaglider_multipart_largest_upload_bytes[15m])`. Alert on an
+increase in `deltaglider_multipart_object_size_refusals_total` for a reached
+ceiling. These signals cover uploads observed by this proxy, not files still
+on a database's local disk. Completed and aborted uploads leave the size gauge;
+use a range window so the warning survives completion. No object keys,
+upload IDs, bucket names, or credentials become metric labels.
+
+
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `deltaglider_multipart_uploads_inflight` | Gauge | — | Current in-flight multipart upload count |
+| `deltaglider_multipart_largest_upload_bytes` | Gauge | — | Largest retained upload, including completion; zero when none remain |
+| `deltaglider_multipart_object_size_refusals_total` | Counter | — | Monotonic refusal count since process start; resets on restart |
 | `deltaglider_multipart_sweep_runs_total` | Counter | `phase` | Multipart sweeper runs by phase |
 | `deltaglider_multipart_sweep_duration_seconds` | Histogram | `phase` | Sweeper run duration in seconds |
 | `deltaglider_multipart_swept_uploads_total` | Counter | `state` | Uploads reclaimed by sweeper, by upload state |
