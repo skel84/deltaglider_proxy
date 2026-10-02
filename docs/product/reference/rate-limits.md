@@ -243,6 +243,44 @@ stopped spool, since the disabled profile does not reclaim that configured path.
 No live provider/Barman compatibility, deployed-image provenance or rollout
 acceptance is implied by this local implementation.
 
+
+### Opt-in native-S3 large-object profile
+
+Set `DGP_MPU_LARGE_SPOOL_DIR` and
+`DGP_MPU_UPLOAD_PROFILE=NativeS3LargeObject` at startup to select a separate,
+fixed envelope for native multipart objects above the backup cap. An absent
+profile retains the existing large-backup envelope. Unknown profile values or a
+profile without a spool path fail startup. The ordinary engine object cap,
+64 MiB reconstruction cap and native-route admission rules remain in force.
+
+| Boundary | Large-object value |
+| --- | --- |
+| Object payload | 8 GiB |
+| UploadPart / PUT wire body | 64 MiB |
+| Logical spool, including overwrite temporaries | 16 GiB process-wide |
+| Retained parts | 1024 per upload; 4096 process-wide |
+
+The same two ingress collectors, 32 upload slots, one owned completion, private
+spool lock, cleanup accounting and native-policy freeze apply. A larger PUT wire
+limit does not raise the engine's single-PUT cap. Completion still relays
+sequential 8 MiB backend parts without assembling an object in memory.
+
+Use a disk-backed volume with room for the 16 GiB reservation budget, up to
+4096 retained files and their checked allocation overhead, an overwrite
+temporary, and the 512 MiB free-space reserve. The operator allocates a 20 GiB
+emptyDir and requires matching ephemeral-storage scheduling plus additional log
+and volume headroom. Kubernetes accounting remains asynchronous; neither a
+sizeLimit nor these resource checks proves a hard physical quota or measured RSS.
+
+This profile covers finite objects, not arbitrary ClickHouse merge output.
+Verify each client's emitted part sizes, single PUTs, existing file sizes and
+future merge envelope. A rejected oversized file must remain recoverable locally.
+UploadPartCopy is still refused before source retrieval: increasing size limits
+does not make Distribution/Harbor's copy and resumable-write semantics compatible.
+AWS-chunked signature bodies also remain refused. Client/provider canaries and
+restart/recovery checks remain necessary before routing existing data.
+
+
 ## Replay detection cache
 
 Caches SigV4 signatures and rejects duplicates within the replay window. This is independent of `DGP_CLOCK_SKEW_SECONDS`, which governs how far a request timestamp may drift from the server clock during SigV4 verification — a different check.
@@ -334,6 +372,7 @@ During LIST operations that require per-object metadata, the proxy issues HEAD r
 | `DGP_REQUEST_TIMEOUT_SECS` | 300 | Per-request timeout |
 | `DGP_MAX_MULTIPART_UPLOADS` | 1000 | Max concurrent multipart uploads outside the fixed disk profile |
 | `DGP_MPU_LARGE_SPOOL_DIR` | unset | Opt-in fixed native-S3 disk profile; exclusive pre-provisioned path; restart required |
+| `DGP_MPU_UPLOAD_PROFILE` | `NativeS3LargeBackup` | Fixed native envelope; `NativeS3LargeObject` requires spool path and matching disk sizing |
 | `DGP_MPU_MAX_PART_BYTES` | unset | Independent UploadPart body ceiling; disables UploadPartCopy |
 | `DGP_MPU_MAX_BUFFERED_PARTS` | unset | Independent UploadPart collector count; disables UploadPartCopy |
 | `DGP_CLOCK_SKEW_SECONDS` | 300 | SigV4 request-timestamp drift tolerance |

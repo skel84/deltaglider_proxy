@@ -259,3 +259,67 @@ async fn completion_unwind_settles_sources_and_reservations() {
     assert_eq!(store.in_flight_bytes(), 0);
     assert_eq!(store.count_uploads(), 0);
 }
+
+#[test]
+fn native_profiles_enforce_distinct_admission_and_retained_byte_caps() {
+    for profile in [
+        NativeMultipartProfile::LargeBackup,
+        NativeMultipartProfile::LargeObject,
+    ] {
+        let dir = crate::multipart::test_spool_dir();
+        let mut store = MultipartStore::new(1024)
+            .with_native_spool(dir.path(), profile)
+            .unwrap();
+        let id = store
+            .create("bucket", "archive.gz", None, HashMap::new())
+            .unwrap();
+        let limit = store.native_object_limit();
+        {
+            // Put only accounting at the boundary; no huge allocation required.
+            let mut uploads = store.uploads.write();
+            let upload = uploads.get_mut(&id).unwrap();
+            upload.accepted_limit = limit;
+            upload.parts.insert(
+                1,
+                PartData {
+                    payload: PartPayload::InMemory(Bytes::new()),
+                    md5_hex: String::new(),
+                    md5_raw: [0; 16],
+                    size: limit,
+                    uploaded_at: Utc::now(),
+                },
+            );
+        }
+        assert!(matches!(
+            store.upload_part(&id, "bucket", "archive.gz", 2, Bytes::from_static(b"x")),
+            Err(S3Error::EntityTooLarge { .. })
+        ));
+        store.uploads.write().get_mut(&id).unwrap().parts.clear();
+        // The global gate must preserve the admitted data on refusal.
+        store.max_total_multipart_bytes = 4;
+        store
+            .upload_part(&id, "bucket", "archive.gz", 1, Bytes::from_static(b"keep"))
+            .unwrap();
+        assert!(matches!(
+            store.upload_part(&id, "bucket", "archive.gz", 1, Bytes::from_static(b"new")),
+            Err(S3Error::SlowDown(_))
+        ));
+        assert_eq!(store.in_flight_bytes(), 4);
+        assert_eq!(
+            store
+                .uploads
+                .read()
+                .get(&id)
+                .unwrap()
+                .parts
+                .get(&1)
+                .unwrap()
+                .payload
+                .load_bytes()
+                .unwrap(),
+            Bytes::from_static(b"keep")
+        );
+        store.abort(&id, "bucket", "archive.gz").unwrap();
+        assert_eq!(store.in_flight_bytes(), 0);
+    }
+}

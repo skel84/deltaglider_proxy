@@ -2,7 +2,9 @@
 //! Runs outside s3s: its aws-chunked decoder buffers an entire declared encoded
 //! chunk before yielding. The opt-in profile refuses that encoding without a
 //! body poll. Ordinary HTTP chunked transfer and SigV4 payload hashing remain.
-use super::{MultipartStore, LARGE_PART_BYTES};
+use super::MultipartStore;
+#[cfg(test)]
+use super::LARGE_PART_BYTES;
 use axum::{
     body::Body,
     extract::{Request, State},
@@ -57,7 +59,7 @@ pub async fn bound_multipart_wire(
         return refusal(StatusCode::BAD_REQUEST, "InvalidRequest");
     }
     let limit = if request.method() == Method::PUT {
-        LARGE_PART_BYTES
+        store.ingress.part_limit(store.native_object_limit())
     } else {
         128 * 1024
     };

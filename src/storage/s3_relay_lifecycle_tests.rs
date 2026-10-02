@@ -18,6 +18,14 @@ fn relay_adapter(
     backend: S3Backend,
     dir: &std::path::Path,
 ) -> crate::s3_adapter_s3s::DeltaGliderS3Service {
+    relay_adapter_profile(backend, dir, crate::multipart::NativeMultipartProfile::LargeBackup)
+}
+
+fn relay_adapter_profile(
+    backend: S3Backend,
+    dir: &std::path::Path,
+    profile: crate::multipart::NativeMultipartProfile,
+) -> crate::s3_adapter_s3s::DeltaGliderS3Service {
     use crate::{
         api::handlers::AppState,
         storage::{EncryptingBackend, EncryptionConfig},
@@ -44,7 +52,7 @@ fn relay_adapter(
         engine: arc_swap::ArcSwap::from_pointee(engine),
         multipart: Arc::new(
             crate::multipart::MultipartStore::new(64 * 1024 * 1024)
-                .with_large_spool(dir)
+                .with_native_spool(dir, profile)
                 .unwrap(),
         ),
         metrics: Arc::new(crate::metrics::Metrics::new()),
@@ -358,14 +366,14 @@ async fn relay_owned_client_drop_holds_create_abort_expiry_reservations() {
     let _ = server.await;
 }
 
-async fn generated_relay_integrity(size: u64) {
+async fn generated_relay_integrity(size: u64, profile: crate::multipart::NativeMultipartProfile) {
     use s3s::S3;
     use sha2::{Digest, Sha256};
     let (mut backend, remote, server) = relay_fixture().await;
     backend.native_encryption = NativeEncryptionConfig::SseS3;
     remote.lock().await.digest_only = true;
     let dir = crate::multipart::test_spool_dir();
-    let service = relay_adapter(backend, dir.path());
+    let service = relay_adapter_profile(backend, dir.path(), profile);
     let id = relay_create(&service, "archive.gz").await;
     let chunk = Bytes::from(
         (0..16 * 1024 * 1024)
@@ -421,13 +429,13 @@ async fn generated_relay_integrity(size: u64) {
 
 #[tokio::test]
 async fn relay_generated_large_stream_integrity_and_native_sse() {
-    generated_relay_integrity(80 * 1024 * 1024 + 123).await;
+    generated_relay_integrity(80 * 1024 * 1024 + 123, crate::multipart::NativeMultipartProfile::LargeBackup).await;
 }
 
 #[tokio::test]
 #[ignore = "local resource contract: writes/reads 2 GiB; run explicitly"]
 async fn relay_generated_two_gib_stream_integrity_and_cleanup() {
-    generated_relay_integrity(crate::multipart::LARGE_OBJECT_BYTES).await;
+    generated_relay_integrity(crate::multipart::LARGE_OBJECT_BYTES, crate::multipart::NativeMultipartProfile::LargeBackup).await;
 }
 
 #[tokio::test]
@@ -561,4 +569,15 @@ async fn relay_admission_cannot_bypass_compression_or_proxy_encryption() {
     assert_eq!(remote.lock().await.creates, 0);
     server.abort();
     let _ = server.await;
+}
+
+#[tokio::test]
+async fn relay_large_object_profile_preserves_integrity_and_cleanup() {
+    generated_relay_integrity(80 * 1024 * 1024 + 123, crate::multipart::NativeMultipartProfile::LargeObject).await;
+}
+
+#[tokio::test]
+#[ignore = "local resource contract: writes/reads over 2 GiB; run explicitly"]
+async fn relay_large_object_above_backup_cap_preserves_integrity_and_cleanup() {
+    generated_relay_integrity(3 * 1024 * 1024 * 1024 + 123, crate::multipart::NativeMultipartProfile::LargeObject).await;
 }
