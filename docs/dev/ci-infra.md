@@ -441,3 +441,15 @@ Do **not** use `--network host` — that puts MinIO on the k3s node's network, n
     ci.yml                  # CI pipeline (fmt, clippy, test, audit)
     release.yml             # Release pipeline (build, Docker, GitHub Release)
 ```
+
+
+## MinIO integration fixture source
+
+The PR integration job builds MinIO from upstream source
+`v0.0.0-20250907161309-07c3a429bfed` (release
+`RELEASE.2025-09-07T16-13-09Z`) using Go 1.25.6. The published Quay release image
+returned unauthorized during the 2026-10-02 gate. The source build keeps the
+existing local S3 endpoint, fixture credentials and buckets without using an
+unverified image mirror. Data, logs, binary and PID live under `RUNNER_TEMP`;
+the always-run cleanup verifies the executable before terminating the fixture.
+This is a test service, not the deployed proxy or a provider compatibility proof.

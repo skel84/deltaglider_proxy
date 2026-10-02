@@ -276,10 +276,15 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/mc" /usr/local/bin/mc
       - name: Start MinIO for tests
         run: |
-          docker run -d --name minio-ci -p 127.0.0.1:9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          # The release image is no longer publicly pullable. Build the same
+          # pinned upstream source instead of relying on an untrusted mirror.
+          GOTOOLCHAIN=go1.25.6 GOBIN="$RUNNER_TEMP/minio-ci-bin" \
+            go install github.com/minio/minio@v0.0.0-20250907161309-07c3a429bfed
+          MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
+            nohup "$RUNNER_TEMP/minio-ci-bin/minio" server \
+            --address 127.0.0.1:9000 "$RUNNER_TEMP/minio-ci-data" \
+            > "$RUNNER_TEMP/minio-ci.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/minio-ci.pid"
           for i in $(seq 1 30); do
             mc alias set local http://localhost:9000 minioadmin minioadmin 2>/dev/null && break
             sleep 1
@@ -384,7 +389,13 @@ jobs:
           mc rm --recursive --force local/deltaglider-data/ 2>/dev/null || true
       - name: Stop MinIO
         if: always()
-        run: docker rm -f minio-ci 2>/dev/null || true
+        run: |
+          if [ -f "$RUNNER_TEMP/minio-ci.pid" ]; then
+            minio_pid=$(cat "$RUNNER_TEMP/minio-ci.pid")
+            if [ "$(readlink "/proc/$minio_pid/exe" 2>/dev/null || true)" = "$RUNNER_TEMP/minio-ci-bin/minio" ]; then
+              kill "$minio_pid"
+            fi
+          fi
 
   test-delta:
     name: Delta & Optimization Tests

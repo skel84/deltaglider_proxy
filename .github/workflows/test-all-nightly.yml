@@ -51,10 +51,15 @@ jobs:
           echo "$RUNNER_TEMP/deltaglider-cli/bin" >> "$GITHUB_PATH"
       - name: Start MinIO
         run: |
-          docker run -d --name minio-nightly -p 127.0.0.1:9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          # The release image is no longer publicly pullable. Build the same
+          # pinned upstream source instead of relying on an untrusted mirror.
+          GOTOOLCHAIN=go1.25.6 GOBIN="$RUNNER_TEMP/minio-ci-bin" \
+            go install github.com/minio/minio@v0.0.0-20250907161309-07c3a429bfed
+          MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
+            nohup "$RUNNER_TEMP/minio-ci-bin/minio" server \
+            --address 127.0.0.1:9000 "$RUNNER_TEMP/minio-ci-data" \
+            > "$RUNNER_TEMP/minio-ci.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/minio-ci.pid"
           for i in $(seq 1 30); do
             mc alias set local http://localhost:9000 minioadmin minioadmin 2>/dev/null && break
             sleep 1
@@ -68,5 +73,11 @@ jobs:
         run: cargo test --all --locked -- --nocapture
       - name: Stop MinIO
         if: always()
-        run: docker rm -f minio-nightly 2>/dev/null || true
+        run: |
+          if [ -f "$RUNNER_TEMP/minio-ci.pid" ]; then
+            minio_pid=$(cat "$RUNNER_TEMP/minio-ci.pid")
+            if [ "$(readlink "/proc/$minio_pid/exe" 2>/dev/null || true)" = "$RUNNER_TEMP/minio-ci-bin/minio" ]; then
+              kill "$minio_pid"
+            fi
+          fi
 
