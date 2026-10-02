@@ -265,6 +265,16 @@ spool lock, cleanup accounting and native-policy freeze apply. A larger PUT wire
 limit does not raise the engine's single-PUT cap. Completion still relays
 sequential 8 MiB backend parts without assembling an object in memory.
 
+Pre-execution capacity refusals in this profile return HTTP 429 with the S3
+`SlowDown` code. SDK clients perform backoff; an HTTP intermediary must not
+replay a large refused body under a generic 5xx retry policy. The existing
+large-backup profile retains HTTP 503. Backend failures and ambiguous writes
+retain their ordinary status and replay protection.
+
+Use a read timeout that covers the whole sequential completion and reconcile
+a timed-out object before starting another upload. The per-backend operation
+timeout bounds each SDK request, not the complete object transfer.
+
 Use a disk-backed volume with room for the 16 GiB reservation budget, up to
 4096 retained files and their checked allocation overhead, an overwrite
 temporary, and the 512 MiB free-space reserve. The operator allocates a 20 GiB

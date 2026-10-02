@@ -72,7 +72,12 @@ pub async fn bound_multipart_wire(
         return refusal(StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge");
     }
     let Ok(_permit) = store.wire_bodies.clone().try_acquire_owned() else {
-        return refusal(StatusCode::SERVICE_UNAVAILABLE, "SlowDown");
+        let status = if store.client_capacity_backoff() {
+            StatusCode::TOO_MANY_REQUESTS
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        return refusal(status, "SlowDown");
     };
     let (parts, body) = request.into_parts();
     let mut remaining = limit;
@@ -94,6 +99,62 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn capacity_refusal_leaves_body_unpolled_and_uses_client_backoff() {
+        use super::super::NativeMultipartProfile;
+        for (profile, expected) in [
+            (
+                NativeMultipartProfile::LargeBackup,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                NativeMultipartProfile::LargeObject,
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+            ),
+        ] {
+            let dir = crate::multipart::test_spool_dir();
+            let store = Arc::new(
+                MultipartStore::new(1024)
+                    .with_native_spool(dir.path(), profile)
+                    .unwrap(),
+            );
+            let _first = store.wire_bodies.clone().try_acquire_owned().unwrap();
+            let _second = store.wire_bodies.clone().try_acquire_owned().unwrap();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let count = polls.clone();
+            let body = Body::from_stream(futures::stream::poll_fn(move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+                std::task::Poll::Ready(Some(Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+                    b"body",
+                ))))
+            }));
+            let app = axum::Router::new()
+                .fallback(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR })
+                .layer(axum::middleware::from_fn_with_state(
+                    store,
+                    bound_multipart_wire,
+                ));
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/bucket/a")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            assert_eq!(polls.load(Ordering::Relaxed), 0);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert!(std::str::from_utf8(&body)
+                .unwrap()
+                .contains("<Code>SlowDown</Code>"));
+        }
+    }
 
     #[tokio::test]
     async fn hostile_aws_chunked_is_refused_before_decoder_or_body_poll() {
