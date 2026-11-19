@@ -16,6 +16,7 @@ use aws_sdk_s3::config::BehaviorVersion;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
@@ -28,7 +29,6 @@ use crate::iam::{IamIndex, IamState, SharedIamState};
 /// Default S3 object key for the config database file (override with `DGP_CONFIG_SYNC_KEY`).
 pub const DEFAULT_CONFIG_SYNC_OBJECT_KEY: &str = ".deltaglider/config.db";
 
-/// Synchronizes the encrypted config DB file to/from S3.
 /// A validated, downloaded peer DB awaiting an IAM merge. The caller merges the
 /// IAM tables out of `temp_path`, deletes it, and — only on success — calls
 /// `commit_downloaded_etag(etag)` so a failed merge re-downloads next poll.
@@ -37,6 +37,20 @@ pub struct DownloadedDb {
     pub etag: Option<String>,
 }
 
+/// True while the startup download of the synced config DB has not succeeded.
+/// Until then this node may lack IAM users that exist in the synced DB, so
+/// `/_/ready` reports not-ready and unknown access keys get a retryable 503.
+static IAM_SYNC_PENDING: AtomicBool = AtomicBool::new(false);
+
+pub fn iam_sync_pending() -> bool {
+    IAM_SYNC_PENDING.load(Ordering::Acquire)
+}
+
+pub fn set_iam_sync_pending(pending: bool) {
+    IAM_SYNC_PENDING.store(pending, Ordering::Release);
+}
+
+/// Synchronizes the encrypted config DB file to/from S3.
 pub struct ConfigDbSync {
     s3_client: Client,
     bucket: String,
@@ -163,6 +177,15 @@ impl ConfigDbSync {
     /// deliberately NOT advanced here so a failed merge re-downloads next poll.
     /// Returns `None` when the local copy is already current.
     pub async fn download_if_newer(&self) -> Result<Option<DownloadedDb>, String> {
+        let result = self.fetch_if_newer().await;
+        // Nothing to merge: this node already holds the synced IAM state.
+        if matches!(result, Ok(None)) {
+            set_iam_sync_pending(false);
+        }
+        result
+    }
+
+    async fn fetch_if_newer(&self) -> Result<Option<DownloadedDb>, String> {
         // HEAD to get current ETag
         let head_result = self
             .s3_client
@@ -175,11 +198,8 @@ impl ConfigDbSync {
         let remote_etag = match head_result {
             Ok(head) => head.e_tag().map(|s| s.to_string()),
             Err(e) => {
-                let err_str = format!("{}", e);
-                if err_str.contains("404")
-                    || err_str.contains("NoSuchKey")
-                    || err_str.contains("Not Found")
-                {
+                // `SdkError` displays a 404 as just "service error"; match the type.
+                if e.as_service_error().is_some_and(|e| e.is_not_found()) {
                     debug!(
                         "Config DB not found in S3 (bucket={}) — using local copy",
                         self.bucket
@@ -280,6 +300,7 @@ impl ConfigDbSync {
     /// succeeds — a failed merge must leave the ETag behind so the poll retries.
     pub async fn commit_downloaded_etag(&self, etag: Option<String>) {
         *self.last_etag.write().await = etag;
+        set_iam_sync_pending(false);
     }
 
     /// Upload the local config DB file to S3.

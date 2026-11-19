@@ -1011,6 +1011,9 @@ pub async fn init_config_sync(
 
     info!("Config DB S3 sync: enabled (bucket={})", sync_bucket);
 
+    // Pending until a download succeeds; ConfigDbSync clears it.
+    deltaglider_proxy::config_db_sync::set_iam_sync_pending(true);
+
     // Try to download a newer version from S3
     match sync.download_if_newer().await {
         Ok(Some(dl)) => {
@@ -1059,33 +1062,50 @@ pub fn spawn_config_sync_poll(
     let password_hash = admin_password_hash.to_string();
 
     tokio::spawn(async move {
+        let sync_once = async || match sync.poll_and_sync().await {
+            Ok(Some(dl)) => {
+                let applied = reopen_and_rebuild_iam(
+                    &db_arc,
+                    &password_hash,
+                    &iam,
+                    &ext_auth,
+                    &dl.temp_path,
+                    "periodic poll",
+                )
+                .await;
+                if applied {
+                    sync.commit_downloaded_etag(dl.etag).await;
+                }
+            }
+            Ok(None) => {
+                tracing::debug!("Config DB S3 sync poll: no changes");
+            }
+            Err(e) => {
+                warn!("Config DB S3 sync poll failed: {}", e);
+            }
+        };
+
+        // A failed startup download would otherwise leave this node without
+        // the synced IAM users for a full poll interval: retry fast first.
+        for _ in 0..30 {
+            if !deltaglider_proxy::config_db_sync::iam_sync_pending() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            sync_once().await;
+        }
+        if deltaglider_proxy::config_db_sync::iam_sync_pending() {
+            // ponytail: bounded wait; past it the local copy beats an outage.
+            warn!("Config DB S3 sync: still failing after 5 min; serving the local IAM copy");
+            deltaglider_proxy::config_db_sync::set_iam_sync_pending(false);
+        }
+
         let mut tick = tokio::time::interval(Duration::from_secs(300));
         // Skip the immediate first tick (startup sync already ran)
         tick.tick().await;
         loop {
             tick.tick().await;
-            match sync.poll_and_sync().await {
-                Ok(Some(dl)) => {
-                    let applied = reopen_and_rebuild_iam(
-                        &db_arc,
-                        &password_hash,
-                        &iam,
-                        &ext_auth,
-                        &dl.temp_path,
-                        "periodic poll",
-                    )
-                    .await;
-                    if applied {
-                        sync.commit_downloaded_etag(dl.etag).await;
-                    }
-                }
-                Ok(None) => {
-                    tracing::debug!("Config DB S3 sync poll: no changes");
-                }
-                Err(e) => {
-                    warn!("Config DB S3 sync poll failed: {}", e);
-                }
-            }
+            sync_once().await;
         }
     });
 }

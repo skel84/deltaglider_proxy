@@ -190,6 +190,9 @@ pub struct ReadinessResponse {
     pub backend: &'static str,
     /// Config DB openability ("ready" | "locked" | "absent").
     pub config_db: &'static str,
+    /// Synced IAM state ("pending" until the first config-sync download
+    /// succeeds, else "ready").
+    pub config_sync: &'static str,
 }
 
 /// Readiness probe — actually exercises dependencies, so an LB can pull a node
@@ -218,7 +221,12 @@ pub async fn readiness_check(
         },
         None => "absent",
     };
-    let ready = backend == "ready" && config_db != "locked";
+    let config_sync = if crate::config_db_sync::iam_sync_pending() {
+        "pending"
+    } else {
+        "ready"
+    };
+    let ready = backend == "ready" && config_db != "locked" && config_sync == "ready";
     let code = if ready {
         StatusCode::OK
     } else {
@@ -230,6 +238,7 @@ pub async fn readiness_check(
             status: if ready { "ready" } else { "not_ready" },
             backend,
             config_db,
+            config_sync,
         }),
     )
 }
