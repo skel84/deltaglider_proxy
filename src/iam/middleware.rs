@@ -64,6 +64,7 @@ fn parse_bucket_key(path: &str) -> (&str, &str) {
 ///
 /// In legacy mode or open access, no `AuthenticatedUser` is present and
 /// the request passes through unchecked.
+#[allow(clippy::result_large_err)]
 pub async fn authorization_middleware(
     mut request: Request<Body>,
     next: Next,

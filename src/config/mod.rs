@@ -903,11 +903,7 @@ impl BackendEncryptionConfig {
                 clear_unless_ref(key);
                 clear_unless_ref(legacy_key);
             }
-            Self::SseKms {
-                legacy_key,
-                kms_key_id: _,
-                ..
-            } => {
+            Self::SseKms { legacy_key, .. } => {
                 // kms_key_id is an ARN — NOT secret. Operators need to
                 // see it to know WHICH KMS key.
                 clear_unless_ref(legacy_key);

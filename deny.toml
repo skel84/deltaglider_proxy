@@ -27,6 +27,11 @@ allow = [
 name = "deltaglider_proxy"
 allow = ["GPL-3.0-only"]
 
+# Bundled SQLCipher: SQLite's public-domain blessing and libtomcrypt's WTFPL.
+[[licenses.exceptions]]
+name = "sqlcipher-src"
+allow = ["blessing", "WTFPL"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
