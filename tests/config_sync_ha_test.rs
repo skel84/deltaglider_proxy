@@ -48,6 +48,16 @@ fn unique_config_sync_object_key() -> String {
     format!(".deltaglider/ha-ci-{}.db", Uuid::new_v4())
 }
 
+async fn config_sync_readiness(endpoint: &str) -> String {
+    let body: serde_json::Value = reqwest::get(format!("{endpoint}/_/ready"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["config_sync"].as_str().unwrap().to_string()
+}
+
 fn unique_user_name(prefix: &str) -> String {
     let n = TEST_USER_SEQ.fetch_add(1, Ordering::SeqCst);
     let ts = std::time::SystemTime::now()
@@ -81,6 +91,8 @@ async fn ha_startup_replica_pulls_state_from_s3() {
         .build()
         .await;
     let admin_a = admin_http_client(&server_a.endpoint()).await;
+    // No synced object yet (404): nothing to wait for.
+    assert_eq!(config_sync_readiness(&server_a.endpoint()).await, "ready");
 
     let user_name = unique_user_name("ha-startup");
     let resp = admin_a
@@ -140,6 +152,7 @@ async fn ha_startup_replica_pulls_state_from_s3() {
         users.iter().any(|u| u["name"] == user_name),
         "B should see the user created on A after startup pull; got: {users:?}"
     );
+    assert_eq!(config_sync_readiness(&server_b.endpoint()).await, "ready");
 }
 
 /// Operator-triggered propagation: B is already running. A creates a

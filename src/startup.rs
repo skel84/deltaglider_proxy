@@ -7,7 +7,7 @@ use axum::{extract::DefaultBodyLimit, middleware, Router};
 use deltaglider_proxy::api::auth::sigv4_auth_middleware;
 use deltaglider_proxy::api::handlers::{head_root, AppState};
 use deltaglider_proxy::config::{BackendConfig, Config};
-use deltaglider_proxy::config_db_sync::ConfigDbSync;
+use deltaglider_proxy::config_db_sync::{ConfigDbSync, DownloadedDb};
 use deltaglider_proxy::iam::authorization_middleware;
 use deltaglider_proxy::iam::{AuthConfig, IamState, SharedIamState};
 use deltaglider_proxy::metrics::Metrics;
@@ -1011,6 +1011,9 @@ pub async fn init_config_sync(
 
     info!("Config DB S3 sync: enabled (bucket={})", sync_bucket);
 
+    // Pending until a download succeeds; ConfigDbSync clears it.
+    deltaglider_proxy::config_db_sync::set_iam_sync_pending(true);
+
     // Try to download a newer version from S3
     match sync.download_if_newer().await {
         Ok(Some(dl)) => {
@@ -1059,33 +1062,58 @@ pub fn spawn_config_sync_poll(
     let password_hash = admin_password_hash.to_string();
 
     tokio::spawn(async move {
+        // Merge a fetched DB. Only the fetch is ever bounded by a timeout, so a
+        // merge is never cancelled halfway.
+        let apply = async |fetched: Result<Option<DownloadedDb>, String>| match fetched {
+            Ok(Some(dl)) => {
+                let applied = reopen_and_rebuild_iam(
+                    &db_arc,
+                    &password_hash,
+                    &iam,
+                    &ext_auth,
+                    &dl.temp_path,
+                    "periodic poll",
+                )
+                .await;
+                if applied {
+                    sync.commit_downloaded_etag(dl.etag).await;
+                }
+            }
+            Ok(None) => {
+                tracing::debug!("Config DB S3 sync poll: no changes");
+            }
+            Err(e) => {
+                warn!("Config DB S3 sync poll failed: {}", e);
+            }
+        };
+
+        // A failed startup download would otherwise leave this node without
+        // the synced IAM users for a full poll interval: retry fast first.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        while deltaglider_proxy::config_db_sync::iam_sync_pending()
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_secs(10)),
+            )
+            .await;
+            match tokio::time::timeout_at(deadline, sync.poll_and_sync()).await {
+                Ok(fetched) => apply(fetched).await,
+                Err(_) => break,
+            }
+        }
+        if deltaglider_proxy::config_db_sync::iam_sync_pending() {
+            // ponytail: bounded wait; past it the local copy beats an outage.
+            warn!("Config DB S3 sync: still failing after 5 min; serving the local IAM copy");
+            deltaglider_proxy::config_db_sync::set_iam_sync_pending(false);
+        }
+
         let mut tick = tokio::time::interval(Duration::from_secs(300));
         // Skip the immediate first tick (startup sync already ran)
         tick.tick().await;
         loop {
             tick.tick().await;
-            match sync.poll_and_sync().await {
-                Ok(Some(dl)) => {
-                    let applied = reopen_and_rebuild_iam(
-                        &db_arc,
-                        &password_hash,
-                        &iam,
-                        &ext_auth,
-                        &dl.temp_path,
-                        "periodic poll",
-                    )
-                    .await;
-                    if applied {
-                        sync.commit_downloaded_etag(dl.etag).await;
-                    }
-                }
-                Ok(None) => {
-                    tracing::debug!("Config DB S3 sync poll: no changes");
-                }
-                Err(e) => {
-                    warn!("Config DB S3 sync poll failed: {}", e);
-                }
-            }
+            apply(sync.poll_and_sync().await).await;
         }
     });
 }

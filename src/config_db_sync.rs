@@ -16,6 +16,7 @@ use aws_sdk_s3::config::BehaviorVersion;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
@@ -28,7 +29,6 @@ use crate::iam::{IamIndex, IamState, SharedIamState};
 /// Default S3 object key for the config database file (override with `DGP_CONFIG_SYNC_KEY`).
 pub const DEFAULT_CONFIG_SYNC_OBJECT_KEY: &str = ".deltaglider/config.db";
 
-/// Synchronizes the encrypted config DB file to/from S3.
 /// A validated, downloaded peer DB awaiting an IAM merge. The caller merges the
 /// IAM tables out of `temp_path`, deletes it, and — only on success — calls
 /// `commit_downloaded_etag(etag)` so a failed merge re-downloads next poll.
@@ -37,6 +37,20 @@ pub struct DownloadedDb {
     pub etag: Option<String>,
 }
 
+/// True while the startup download of the synced config DB has not succeeded.
+/// Until then this node may lack IAM users that exist in the synced DB, so
+/// `/_/ready` reports not-ready and unknown access keys get a retryable 503.
+static IAM_SYNC_PENDING: AtomicBool = AtomicBool::new(false);
+
+pub fn iam_sync_pending() -> bool {
+    IAM_SYNC_PENDING.load(Ordering::Acquire)
+}
+
+pub fn set_iam_sync_pending(pending: bool) {
+    IAM_SYNC_PENDING.store(pending, Ordering::Release);
+}
+
+/// Synchronizes the encrypted config DB file to/from S3.
 pub struct ConfigDbSync {
     s3_client: Client,
     bucket: String,
@@ -175,15 +189,13 @@ impl ConfigDbSync {
         let remote_etag = match head_result {
             Ok(head) => head.e_tag().map(|s| s.to_string()),
             Err(e) => {
-                let err_str = format!("{}", e);
-                if err_str.contains("404")
-                    || err_str.contains("NoSuchKey")
-                    || err_str.contains("Not Found")
-                {
+                // `SdkError` displays a 404 as just "service error"; match the type.
+                if e.as_service_error().is_some_and(|e| e.is_not_found()) {
                     debug!(
                         "Config DB not found in S3 (bucket={}) — using local copy",
                         self.bucket
                     );
+                    set_iam_sync_pending(false);
                     return Ok(None);
                 }
                 return Err(format!("Failed to HEAD config DB in S3: {}", e));
@@ -194,6 +206,7 @@ impl ConfigDbSync {
         let current_etag = self.last_etag.read().await;
         if *current_etag == remote_etag {
             debug!("Config DB S3 ETag unchanged — no download needed");
+            set_iam_sync_pending(false);
             return Ok(None);
         }
         drop(current_etag);
@@ -280,6 +293,7 @@ impl ConfigDbSync {
     /// succeeds — a failed merge must leave the ETag behind so the poll retries.
     pub async fn commit_downloaded_etag(&self, etag: Option<String>) {
         *self.last_etag.write().await = etag;
+        set_iam_sync_pending(false);
     }
 
     /// Upload the local config DB file to S3.
@@ -491,6 +505,37 @@ pub async fn reopen_and_rebuild_iam(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The only test that toggles the process-wide IAM sync flag.
+    #[tokio::test]
+    async fn iam_sync_stays_pending_until_a_download_is_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = BackendConfig::S3 {
+            endpoint: Some("http://127.0.0.1:1".into()),
+            region: "us-east-1".into(),
+            force_path_style: true,
+            access_key_id: Some("k".into()),
+            secret_access_key: Some("s".into()),
+            allow_local: true,
+        };
+        let sync = ConfigDbSync::new(
+            &backend,
+            "sync".into(),
+            "config.db".into(),
+            dir.path().join("config.db"),
+            true,
+            "hash".into(),
+        )
+        .await
+        .unwrap();
+
+        set_iam_sync_pending(true);
+        assert!(sync.download_if_newer().await.is_err());
+        assert!(iam_sync_pending(), "a failed download must not settle");
+
+        sync.commit_downloaded_etag(None).await;
+        assert!(!iam_sync_pending(), "an applied download settles");
+    }
 
     #[test]
     fn precondition_failed_detected_from_common_shapes() {
