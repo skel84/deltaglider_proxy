@@ -1229,7 +1229,7 @@ impl s3s::S3 for DeltaGliderS3Service {
                 .complete_multipart_owned(req, owner.as_deref_mut())
                 .await
         });
-        if self.state.multipart.client_capacity_backoff() {
+        if self.state.multipart.completion_heartbeats() {
             // s3s emits S3's whitespace heartbeats while the owned worker runs.
             // Dropping the response future detaches its JoinHandle; it does not
             // cancel a backend write or release its completion/spool ownership.
@@ -2175,7 +2175,7 @@ impl DeltaGliderS3Service {
                 }
             }
         };
-        if self.state.multipart.client_capacity_backoff() {
+        if self.state.multipart.completion_heartbeats() {
             // Not spawned: a disconnected waiter stops waiting; it owns nothing.
             return Ok(streaming_completion_response(async move { Ok(wait.await) }));
         }

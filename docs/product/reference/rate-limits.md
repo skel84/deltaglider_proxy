@@ -277,7 +277,12 @@ HTTP 200 headers and periodic XML whitespace keep an idle
 HTTP proxy or client connected. The final XML carries the result or an embedded
 S3 error; HTTP 200 alone is not proof of publication. SDK clients parse that
 final result. Capacity refusal still happens before the stream starts. The
-standard and large-backup profiles retain their existing completion response.
+large-backup profile streams its completion the same way; the standard profile
+retains its direct completion response.
+
+A Complete retried while the same upload's completion is still running waits
+for it, streaming in both native profiles, and returns its result. A Complete
+retried after success returns the completed object for up to one hour.
 
 A disconnected response leaves the backend owner running with its permit,
 spool and reservations until settlement. Reconcile HEAD and data after an
