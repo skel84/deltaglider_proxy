@@ -526,6 +526,7 @@ fn authenticate_form_post(
     let Some(iam_state) = iam_state else {
         return Ok(None);
     };
+    let sync_pending = crate::config_db_sync::iam_sync_pending();
     let snapshot = iam_state.load_full();
     if matches!(snapshot.as_ref(), IamState::Disabled) {
         return Ok(None);
@@ -567,7 +568,7 @@ fn authenticate_form_post(
         IamState::Disabled => unreachable!("checked above"),
         IamState::Legacy(auth) => {
             if auth.access_key_id != access_key {
-                return Err(S3Error::AccessDenied);
+                return Err(crate::api::auth::unknown_access_key_error(sync_pending));
             }
             let bootstrap_perms = vec![Permission {
                 id: 0,
@@ -591,10 +592,11 @@ fn authenticate_form_post(
             )
         }
         IamState::Iam(index) => {
-            let user = index
-                .get(access_key)
-                .filter(|u| u.enabled)
-                .ok_or(S3Error::AccessDenied)?;
+            let user = match index.get(access_key) {
+                Some(u) if u.enabled => u,
+                Some(_) => return Err(S3Error::AccessDenied),
+                None => return Err(crate::api::auth::unknown_access_key_error(sync_pending)),
+            };
             (
                 user.secret_access_key.clone(),
                 AuthenticatedUser {

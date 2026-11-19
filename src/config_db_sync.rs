@@ -177,15 +177,6 @@ impl ConfigDbSync {
     /// deliberately NOT advanced here so a failed merge re-downloads next poll.
     /// Returns `None` when the local copy is already current.
     pub async fn download_if_newer(&self) -> Result<Option<DownloadedDb>, String> {
-        let result = self.fetch_if_newer().await;
-        // Nothing to merge: this node already holds the synced IAM state.
-        if matches!(result, Ok(None)) {
-            set_iam_sync_pending(false);
-        }
-        result
-    }
-
-    async fn fetch_if_newer(&self) -> Result<Option<DownloadedDb>, String> {
         // HEAD to get current ETag
         let head_result = self
             .s3_client
@@ -204,6 +195,7 @@ impl ConfigDbSync {
                         "Config DB not found in S3 (bucket={}) — using local copy",
                         self.bucket
                     );
+                    set_iam_sync_pending(false);
                     return Ok(None);
                 }
                 return Err(format!("Failed to HEAD config DB in S3: {}", e));
@@ -214,6 +206,7 @@ impl ConfigDbSync {
         let current_etag = self.last_etag.read().await;
         if *current_etag == remote_etag {
             debug!("Config DB S3 ETag unchanged — no download needed");
+            set_iam_sync_pending(false);
             return Ok(None);
         }
         drop(current_etag);
@@ -512,6 +505,37 @@ pub async fn reopen_and_rebuild_iam(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The only test that toggles the process-wide IAM sync flag.
+    #[tokio::test]
+    async fn iam_sync_stays_pending_until_a_download_is_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = BackendConfig::S3 {
+            endpoint: Some("http://127.0.0.1:1".into()),
+            region: "us-east-1".into(),
+            force_path_style: true,
+            access_key_id: Some("k".into()),
+            secret_access_key: Some("s".into()),
+            allow_local: true,
+        };
+        let sync = ConfigDbSync::new(
+            &backend,
+            "sync".into(),
+            "config.db".into(),
+            dir.path().join("config.db"),
+            true,
+            "hash".into(),
+        )
+        .await
+        .unwrap();
+
+        set_iam_sync_pending(true);
+        assert!(sync.download_if_newer().await.is_err());
+        assert!(iam_sync_pending(), "a failed download must not settle");
+
+        sync.commit_downloaded_etag(None).await;
+        assert!(!iam_sync_pending(), "an applied download settles");
+    }
 
     #[test]
     fn precondition_failed_detected_from_common_shapes() {

@@ -7,7 +7,7 @@ use axum::{extract::DefaultBodyLimit, middleware, Router};
 use deltaglider_proxy::api::auth::sigv4_auth_middleware;
 use deltaglider_proxy::api::handlers::{head_root, AppState};
 use deltaglider_proxy::config::{BackendConfig, Config};
-use deltaglider_proxy::config_db_sync::ConfigDbSync;
+use deltaglider_proxy::config_db_sync::{ConfigDbSync, DownloadedDb};
 use deltaglider_proxy::iam::authorization_middleware;
 use deltaglider_proxy::iam::{AuthConfig, IamState, SharedIamState};
 use deltaglider_proxy::metrics::Metrics;
@@ -1062,7 +1062,9 @@ pub fn spawn_config_sync_poll(
     let password_hash = admin_password_hash.to_string();
 
     tokio::spawn(async move {
-        let sync_once = async || match sync.poll_and_sync().await {
+        // Merge a fetched DB. Only the fetch is ever bounded by a timeout, so a
+        // merge is never cancelled halfway.
+        let apply = async |fetched: Result<Option<DownloadedDb>, String>| match fetched {
             Ok(Some(dl)) => {
                 let applied = reopen_and_rebuild_iam(
                     &db_arc,
@@ -1087,12 +1089,18 @@ pub fn spawn_config_sync_poll(
 
         // A failed startup download would otherwise leave this node without
         // the synced IAM users for a full poll interval: retry fast first.
-        for _ in 0..30 {
-            if !deltaglider_proxy::config_db_sync::iam_sync_pending() {
-                break;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        while deltaglider_proxy::config_db_sync::iam_sync_pending()
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_secs(10)),
+            )
+            .await;
+            match tokio::time::timeout_at(deadline, sync.poll_and_sync()).await {
+                Ok(fetched) => apply(fetched).await,
+                Err(_) => break,
             }
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            sync_once().await;
         }
         if deltaglider_proxy::config_db_sync::iam_sync_pending() {
             // ponytail: bounded wait; past it the local copy beats an outage.
@@ -1105,7 +1113,7 @@ pub fn spawn_config_sync_poll(
         tick.tick().await;
         loop {
             tick.tick().await;
-            sync_once().await;
+            apply(sync.poll_and_sync().await).await;
         }
     });
 }

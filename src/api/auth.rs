@@ -102,13 +102,16 @@ fn classify_auth_gate(locked: bool, iam_state: &IamState) -> AuthGateDecision<'_
 }
 
 /// Until this node's first config-sync download succeeds, an unknown access key
-/// may belong to a user its peers already have. Answer a retryable 503 instead
-/// of AccessDenied, and keep it out of the auth-failure rate limiter.
-fn unknown_key_while_iam_sync_pending() -> Option<Response> {
-    crate::config_db_sync::iam_sync_pending().then(|| {
+/// may belong to a user its peers already have: answer a retryable 503 instead
+/// of AccessDenied. Callers keep the pending case out of the rate limiter, and
+/// read `sync_pending` BEFORE loading their IAM snapshot so a snapshot taken
+/// while pending never yields a plain denial.
+pub(crate) fn unknown_access_key_error(sync_pending: bool) -> S3Error {
+    if sync_pending {
         S3Error::ServiceUnavailable("IAM state is still syncing; retry shortly.".into())
-            .into_response()
-    })
+    } else {
+        S3Error::AccessDenied
+    }
 }
 
 fn prune_replay_cache(cache: &ReplayCache, replay_window: Duration, max_entries: usize) {
@@ -694,6 +697,7 @@ pub async fn sigv4_auth_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<Response, Response> {
+    let sync_pending = crate::config_db_sync::iam_sync_pending();
     // IAM state is read from an ArcSwap so admin API user management
     // updates take effect immediately without restart.
     let iam_snapshot = request
@@ -926,8 +930,8 @@ pub async fn sigv4_auth_middleware(
             let matches: bool = provided_hash.ct_eq(&configured_hash).into();
             if !matches {
                 debug!("SigV4: access key mismatch (legacy mode)");
-                if let Some(resp) = unknown_key_while_iam_sync_pending() {
-                    return Err(resp);
+                if sync_pending {
+                    return Err(unknown_access_key_error(true).into_response());
                 }
                 record_auth_failure("invalid_access_key");
                 return Err(S3Error::AccessDenied.into_response());
@@ -957,8 +961,8 @@ pub async fn sigv4_auth_middleware(
                 Some(u) => u,
                 None => {
                     debug!("SigV4: unknown access key '{}'", &params.access_key);
-                    if let Some(resp) = unknown_key_while_iam_sync_pending() {
-                        return Err(resp);
+                    if sync_pending {
+                        return Err(unknown_access_key_error(true).into_response());
                     }
                     record_auth_failure("invalid_access_key");
                     return Err(S3Error::AccessDenied.into_response());
@@ -1356,44 +1360,12 @@ mod tests {
         }
     }
 
-    /// The only test that toggles the process-wide IAM sync flag.
-    #[tokio::test]
-    async fn unknown_key_is_retryable_until_iam_sync_settles() {
-        use crate::config::BackendConfig;
-        use crate::config_db_sync::{iam_sync_pending, set_iam_sync_pending, ConfigDbSync};
-
-        let dir = tempfile::tempdir().unwrap();
-        let backend = BackendConfig::S3 {
-            endpoint: Some("http://127.0.0.1:1".into()),
-            region: "us-east-1".into(),
-            force_path_style: true,
-            access_key_id: Some("k".into()),
-            secret_access_key: Some("s".into()),
-            allow_local: true,
-        };
-        let sync = ConfigDbSync::new(
-            &backend,
-            "sync".into(),
-            "config.db".into(),
-            dir.path().join("config.db"),
-            true,
-            "hash".into(),
-        )
-        .await
-        .unwrap();
-
-        set_iam_sync_pending(true);
-        let resp = unknown_key_while_iam_sync_pending().expect("503 while pending");
-        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
-
-        // A failed download leaves the node pending.
-        assert!(sync.download_if_newer().await.is_err());
-        assert!(iam_sync_pending());
-
-        // An applied download settles it: unknown keys are denied again.
-        sync.commit_downloaded_etag(None).await;
-        assert!(!iam_sync_pending());
-        assert!(unknown_key_while_iam_sync_pending().is_none());
+    #[test]
+    fn unknown_access_key_is_retryable_only_while_sync_pending() {
+        use axum::http::StatusCode;
+        let status = |pending| unknown_access_key_error(pending).into_response().status();
+        assert_eq!(status(true), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(status(false), StatusCode::FORBIDDEN);
     }
 
     #[test]
