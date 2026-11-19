@@ -679,6 +679,7 @@ fn is_form_post_policy_candidate(request: &Request<Body>) -> bool {
 ///
 /// Inserted as a layer around the router. If `auth` is `None` (no credentials
 /// configured), all requests pass through unchanged.
+#[allow(clippy::result_large_err)]
 pub async fn sigv4_auth_middleware(
     mut request: Request<Body>,
     next: Next,

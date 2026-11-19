@@ -25,7 +25,7 @@ RUN npm run build
 # image build on every recent Rust. A plain single-stage build is correct and
 # robust; dependency compilation is cached by buildx's GHA layer cache across
 # release runs, so the lost cargo-chef dep-layer is not a meaningful regression.
-FROM rust:1.96.0-bookworm AS rust-build
+FROM rust:1.100.0-bookworm AS rust-build
 RUN apt-get -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
     pkg-config xdelta3=3.0.11-dfsg-1.2 \
     && rm -rf /var/lib/apt/lists/* \
@@ -47,7 +47,9 @@ RUN cargo build --locked --release
 # ── Runtime ──
 # Security notes:
 # - Runs as non-root user 'dg' (least privilege).
-# - Only ca-certificates, xdelta3, and curl are installed (minimal attack surface).
+# - Wolfi base: current glibc/OpenSSL instead of Debian packages that carry
+#   unfixed CVEs. Only CA certificates, the proxy's shared libraries (OpenSSL,
+#   libgcc, liblzma for xdelta3) and curl are installed.
 #   curl is required for the HEALTHCHECK probe; no shell utilities beyond busybox.
 # - No secrets are embedded in the image — all credentials are provided at runtime
 #   via environment variables or mounted config files.
@@ -65,7 +67,7 @@ RUN cargo build --locked --release
 #       mountPath: /data
 #     - name: tmp
 #       mountPath: /tmp
-FROM debian:bookworm-slim
+FROM cgr.dev/chainguard/wolfi-base@sha256:71f52fd289650f1d021d60ba11235550b1b5ce124f3797bd254ca70c4cef39f9
 
 LABEL org.opencontainers.image.title="DeltaGlider Proxy" \
       org.opencontainers.image.description="S3-compatible proxy with transparent delta compression" \
@@ -73,16 +75,13 @@ LABEL org.opencontainers.image.title="DeltaGlider Proxy" \
       org.opencontainers.image.source="https://github.com/beshu-tech/deltaglider_proxy" \
       org.opencontainers.image.licenses="GPL-3.0-only"
 
-# Install ca-certificates (HTTPS) and curl (healthcheck).
-# xdelta3 is copied from build stage to reduce apt dependency surface.
-# Use multiple retries + fallback to handle unreliable deb.debian.org.
-RUN (apt-get -o Acquire::Retries=5 update && apt-get install -y --no-install-recommends \
-    ca-certificates curl ntpstat chrony \
-    && rm -rf /var/lib/apt/lists/*) \
-    || (echo "WARN: apt-get failed — continuing without curl (healthcheck will use wget fallback)" && apt-get clean)
-RUN groupadd --system dg && useradd --system --gid dg --no-create-home dg
+# xdelta3 is copied from the build stage: Wolfi has no xdelta3 package, and the
+# pinned Debian build keeps the delta format stable (see the build stage).
+RUN apk add --no-cache ca-certificates-bundle curl libcrypto3 libgcc xz \
+    && addgroup -S -g 999 dg && adduser -S -D -H -u 999 -G dg dg
 COPY --from=rust-build /app/target/release/deltaglider_proxy /usr/local/bin/
 COPY --from=rust-build /usr/bin/xdelta3 /usr/bin/xdelta3
+RUN xdelta3 -V 2>&1 | grep -q "3.0.11" && deltaglider_proxy --version
 RUN mkdir -p /data && chown dg:dg /data
 USER dg
 WORKDIR /data
