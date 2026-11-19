@@ -1167,6 +1167,27 @@ impl s3s::S3 for DeltaGliderS3Service {
         &self,
         req: s3s::S3Request<s3s::dto::CompleteMultipartUploadInput>,
     ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
+        let input = &req.input;
+        let owner =
+            match self
+                .state
+                .multipart
+                .completion_owner(&input.upload_id, &input.bucket, &input.key)
+            {
+                Some(owner) => match owner.clone().try_lock_owned() {
+                    Ok(owner) => Some(owner),
+                    // A client whose Complete timed out retries while it still runs.
+                    Err(_) => return self.await_completion_owner(req, owner).await,
+                },
+                None => None,
+            };
+        if let Some(etag) = owner.as_deref().cloned().flatten().or_else(|| {
+            self.state
+                .multipart
+                .completed_etag(&input.upload_id, &input.bucket, &input.key)
+        }) {
+            return complete_output(input.bucket.clone(), input.key.clone(), &etag);
+        }
         let permit = if self.state.multipart.large_profile() {
             Some(
                 self.state
@@ -1200,8 +1221,13 @@ impl s3s::S3 for DeltaGliderS3Service {
         // It retains the permit, spool, reservations and SDK create/abort future
         // through quiescence. A disconnect does NOT mean an S3 abort succeeded.
         let worker = tokio::spawn(async move {
+            let mut owner = owner;
+            // Declared last, dropped first: a queued retry that finds the owner
+            // failed must also find the capacity free.
             let _permit = permit;
-            service.complete_multipart_owned(req).await
+            service
+                .complete_multipart_owned(req, owner.as_deref_mut())
+                .await
         });
         if self.state.multipart.client_capacity_backoff() {
             // s3s emits S3's whitespace heartbeats while the owned worker runs.
@@ -1776,6 +1802,22 @@ async fn evaluate_put_etag_conditionals_s3s(
 #[derive(Clone)]
 struct StreamingCompletion;
 
+fn complete_output(
+    bucket: String,
+    key: String,
+    etag: &str,
+) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
+    Ok(s3s::S3Response::new(
+        s3s::dto::CompleteMultipartUploadOutput {
+            location: Some(format!("/{bucket}/{key}")),
+            bucket: Some(bucket),
+            key: Some(key),
+            e_tag: Some(parse_s3s_etag(etag)?),
+            ..Default::default()
+        },
+    ))
+}
+
 /// Keep the library's heartbeat stream and final XML error parseable.
 pub fn completion_http_response(response: axum::response::Response) -> axum::response::Response {
     if response.extensions().get::<StreamingCompletion>().is_none() {
@@ -1804,9 +1846,13 @@ pub fn completion_http_response(response: axum::response::Response) -> axum::res
 }
 
 fn streaming_completion_response(
-    worker: tokio::task::JoinHandle<
-        s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>>,
-    >,
+    worker: impl std::future::Future<
+            Output = Result<
+                s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>>,
+                tokio::task::JoinError,
+            >,
+        > + Send
+        + 'static,
 ) -> s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput> {
     let mut response = s3s::S3Response::new(s3s::dto::CompleteMultipartUploadOutput {
         future: Some(Box::pin(async move {
@@ -2102,9 +2148,44 @@ fn parse_s3s_etag(etag: &str) -> s3s::S3Result<s3s::dto::ETag> {
 }
 
 impl DeltaGliderS3Service {
+    /// Wait for the request that owns this upload's completion, then answer from
+    /// its result as S3 does. Profiles with heartbeats stream while waiting.
+    async fn await_completion_owner(
+        &self,
+        req: s3s::S3Request<s3s::dto::CompleteMultipartUploadInput>,
+        owner: Arc<tokio::sync::Mutex<Option<String>>>,
+    ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
+        let multipart = self.state.multipart.clone();
+        let wait = async move {
+            let etag = owner.lock().await.clone();
+            match etag {
+                Some(etag) => complete_output(req.input.bucket, req.input.key, &etag),
+                None => {
+                    // The owner did not complete and this request ran nothing.
+                    if let Some(admission) = req
+                        .extensions
+                        .get::<crate::api::auth::UnexecutedReplayAdmission>()
+                    {
+                        admission.release();
+                    }
+                    Err(multipart_capacity_error(
+                        &multipart,
+                        s3s::s3_error!(SlowDown, "Multipart completion did not finish; retry"),
+                    ))
+                }
+            }
+        };
+        if self.state.multipart.client_capacity_backoff() {
+            // Not spawned: a disconnected waiter stops waiting; it owns nothing.
+            return Ok(streaming_completion_response(async move { Ok(wait.await) }));
+        }
+        wait.await
+    }
+
     async fn complete_multipart_owned(
         &self,
         req: s3s::S3Request<s3s::dto::CompleteMultipartUploadInput>,
+        completed: Option<&mut Option<String>>,
     ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
         let input = req.input;
         ensure_bucket_exists_s3s(&self.state, &input.bucket).await?;
@@ -2239,6 +2320,15 @@ impl DeltaGliderS3Service {
                 }
             }
         };
+        if let Some(completed) = completed {
+            *completed = Some(multipart_etag.clone());
+        }
+        self.state.multipart.record_completed(
+            &input.upload_id,
+            &input.bucket,
+            &input.key,
+            &multipart_etag,
+        );
         self.state.multipart.finish_upload(&input.upload_id);
         // A completed multipart upload created the final object — emit
         // ObjectCreated before `input.bucket`/`input.key` are moved into the
@@ -2253,14 +2343,7 @@ impl DeltaGliderS3Service {
             }),
         )
         .await;
-        let location = format!("/{}/{}", input.bucket, input.key);
-        let mut resp = s3s::S3Response::new(s3s::dto::CompleteMultipartUploadOutput {
-            bucket: Some(input.bucket),
-            key: Some(input.key),
-            e_tag: Some(parse_s3s_etag(&multipart_etag)?),
-            location: Some(location),
-            ..Default::default()
-        });
+        let mut resp = complete_output(input.bucket, input.key, &multipart_etag)?;
         // Parity with the legacy axum multipart handler: emit
         // `x-amz-storage-type` (and `x-deltaglider-stored-size`) on
         // CompleteMultipartUpload responses so tests / operators can
