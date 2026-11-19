@@ -587,6 +587,7 @@ async fn relay_large_object_above_backup_cap_preserves_integrity_and_cleanup() {
 
 #[tokio::test]
 async fn relay_completion_retry_waits_for_owner_then_replays_result() {
+    use futures::FutureExt;
     use s3s::S3;
     use std::sync::Arc;
     let (backend, remote, server) = relay_fixture().await;
@@ -608,12 +609,15 @@ async fn relay_completion_retry_waits_for_owner_then_replays_result() {
     let first = complete();
     wait_relay_condition(async || remote.lock().await.creates == 1).await;
     // A client that timed out retries the same upload: wait, do not SlowDown.
-    let retry = complete();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(!retry.is_finished(), "retry must wait for the in-flight owner");
+    let input = relay_complete_input(&id, vec![(1, etag.clone())]);
+    let mut retry = Box::pin(service.complete_multipart_upload(relay_request_input(input)));
+    assert!(
+        (&mut retry).now_or_never().is_none(),
+        "retry must wait for the in-flight owner"
+    );
     pause.add_permits(1);
     let first = first.await.unwrap().unwrap().output.e_tag;
-    assert_eq!(retry.await.unwrap().unwrap().output.e_tag, first);
+    assert_eq!(retry.await.unwrap().output.e_tag, first);
     // A retry after completion returns the completed object, not NoSuchUpload.
     assert_eq!(complete().await.unwrap().unwrap().output.e_tag, first);
     assert_eq!(remote.lock().await.completes, 1);

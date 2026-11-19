@@ -211,7 +211,8 @@ struct MultipartUpload {
     // Retained failed atomic-write reservation (including a partial temporary).
     cleanup_bytes: u64,
     part_owner: Arc<tokio::sync::Mutex<()>>,
-    completion_owner: Arc<tokio::sync::Mutex<()>>,
+    /// Held by the request completing this upload; holds its ETag on success.
+    completion_owner: Arc<tokio::sync::Mutex<Option<String>>>,
     admission: Option<Arc<NativeRelayAdmission>>,
     accepted_limit: u64,
 }
@@ -382,7 +383,8 @@ pub struct MultipartStore {
     object_size_refusals: prometheus::IntCounter,
     idle_ttl: Duration,
     /// upload_id -> (bucket, key, ETag) of recent completions, so a client
-    /// retrying a Complete it never saw succeed gets S3's idempotent answer.
+    /// retrying a Complete it never saw succeed gets S3's idempotent answer
+    /// after the upload itself is gone.
     completed: moka::sync::Cache<String, (String, String, String)>,
 }
 
@@ -520,10 +522,16 @@ impl MultipartStore {
 
     /// Held by the request that completes this upload, for the whole backend
     /// write. A client retrying Complete waits here instead of being refused.
-    pub(crate) fn completion_owner(&self, id: &str) -> Option<Arc<tokio::sync::Mutex<()>>> {
+    pub(crate) fn completion_owner(
+        &self,
+        id: &str,
+        bucket: &str,
+        key: &str,
+    ) -> Option<Arc<tokio::sync::Mutex<Option<String>>>> {
         self.uploads
             .read()
             .get(id)
+            .filter(|u| u.bucket == bucket && u.key == key)
             .map(|u| u.completion_owner.clone())
     }
 
@@ -685,7 +693,7 @@ impl MultipartStore {
         let upload = MultipartUpload {
             cleanup_bytes: 0,
             part_owner: Arc::new(tokio::sync::Mutex::new(())),
-            completion_owner: Arc::new(tokio::sync::Mutex::new(())),
+            completion_owner: Arc::new(tokio::sync::Mutex::new(None)),
             admission: None,
             accepted_limit: self.max_object_size,
             upload_id: upload_id.clone(),
