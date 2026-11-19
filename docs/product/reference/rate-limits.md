@@ -277,7 +277,19 @@ HTTP 200 headers and periodic XML whitespace keep an idle
 HTTP proxy or client connected. The final XML carries the result or an embedded
 S3 error; HTTP 200 alone is not proof of publication. SDK clients parse that
 final result. Capacity refusal still happens before the stream starts. The
-standard and large-backup profiles retain their existing completion response.
+large-backup profile streams its completion the same way; the standard profile
+retains its direct completion response.
+
+botocore, aws-sdk-go and AWS SDK for Java v2 retry a transient error embedded
+in that final XML. AWS SDK for Java v1 throws it without its SDK retries, so a
+v1 client behind a native profile needs its own completion retry.
+
+A Complete retried while the same upload's completion is still running waits
+for it, streaming in both native profiles. If that completion succeeds, the
+waiting request returns its result; otherwise it receives `SlowDown` and must
+reconcile with HEAD before retrying, because a failed native relay terminates
+the upload. Success is replayed from an in-memory, per-process cache for at
+most one hour.
 
 A disconnected response leaves the backend owner running with its permit,
 spool and reservations until settlement. Reconcile HEAD and data after an

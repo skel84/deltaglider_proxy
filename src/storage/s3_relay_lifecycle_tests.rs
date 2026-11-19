@@ -289,8 +289,7 @@ async fn relay_completion_capacity_rejection_releases_only_unexecuted_replay() {
     assert_eq!(service.state().multipart.in_flight_bytes(), 8);
     assert_eq!(service.state().multipart.count_uploads(), 1);
     drop(permit);
-    service
-        .complete_multipart_upload(make_request())
+    settle(service.complete_multipart_upload(make_request()).await)
         .await
         .unwrap();
     assert!(
@@ -475,14 +474,17 @@ async fn relay_hot_reload_refuses_old_admission_before_body_acceptance() {
         &s3s::S3ErrorCode::InvalidRequest
     );
     assert_eq!(
-        service
-            .complete_multipart_upload(relay_request_input(relay_complete_input(
-                &id,
-                vec![(1, etag)]
-            )))
-            .await
-            .unwrap_err()
-            .code(),
+        settle(
+            service
+                .complete_multipart_upload(relay_request_input(relay_complete_input(
+                    &id,
+                    vec![(1, etag)]
+                )))
+                .await
+        )
+        .await
+        .unwrap_err()
+        .code(),
         &s3s::S3ErrorCode::InvalidRequest
     );
     assert_eq!(service.state().multipart.in_flight_bytes(), 3);
@@ -529,7 +531,7 @@ async fn relay_reload_during_completion_uses_admitted_native_sse_target() {
         .engine
         .store(replacement.state().engine.load_full());
     pause.add_permits(1);
-    caller.await.unwrap().unwrap();
+    settle(caller.await.unwrap()).await.unwrap();
     let state = remote.lock().await;
     assert_eq!(state.native_sse, "AES256");
     assert_eq!(state.bodies.concat(), b"native-sse-bytes");
@@ -608,19 +610,36 @@ async fn relay_completion_retry_waits_for_owner_then_replays_result() {
     };
     let first = complete();
     wait_relay_condition(async || remote.lock().await.creates == 1).await;
-    // A client that timed out retries the same upload: wait, do not SlowDown.
+    // A client that timed out retries the same upload: it gets heartbeats
+    // while waiting for the in-flight owner, not SlowDown.
     let input = relay_complete_input(&id, vec![(1, etag.clone())]);
-    let mut retry = Box::pin(service.complete_multipart_upload(relay_request_input(input)));
+    let mut retry = service
+        .complete_multipart_upload(relay_request_input(input))
+        .await
+        .unwrap();
+    let mut retry = retry.output.future.take().expect("backup completion streams");
     assert!(
         (&mut retry).now_or_never().is_none(),
         "retry must wait for the in-flight owner"
     );
     pause.add_permits(1);
-    let first = first.await.unwrap().unwrap().output.e_tag;
-    assert_eq!(retry.await.unwrap().output.e_tag, first);
+    let first = settle(first.await.unwrap()).await.unwrap().e_tag;
+    assert_eq!(retry.await.unwrap().e_tag, first);
     // A retry after completion returns the completed object, not NoSuchUpload.
-    assert_eq!(complete().await.unwrap().unwrap().output.e_tag, first);
+    assert_eq!(settle(complete().await.unwrap()).await.unwrap().e_tag, first);
     assert_eq!(remote.lock().await.completes, 1);
     server.abort();
     let _ = server.await;
+}
+
+/// The final completion result, whether returned directly or streamed after
+/// heartbeats.
+async fn settle(
+    response: s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>>,
+) -> s3s::S3Result<s3s::dto::CompleteMultipartUploadOutput> {
+    let mut output = response?.output;
+    match output.future.take() {
+        Some(result) => result.await,
+        None => Ok(output),
+    }
 }

@@ -471,6 +471,13 @@ impl MultipartStore {
         self.spool.is_some()
     }
 
+    /// Native profiles stream whitespace while a completion runs, so a backend
+    /// write longer than an intermediary's idle timeout (Envoy: 300 s) keeps
+    /// its connection instead of being cut and retried.
+    pub(crate) fn completion_heartbeats(&self) -> bool {
+        self.native_profile.is_some()
+    }
+
     pub(crate) fn client_capacity_backoff(&self) -> bool {
         matches!(
             self.native_profile,
