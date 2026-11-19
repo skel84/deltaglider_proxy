@@ -1846,9 +1846,13 @@ pub fn completion_http_response(response: axum::response::Response) -> axum::res
 }
 
 fn streaming_completion_response(
-    worker: tokio::task::JoinHandle<
-        s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>>,
-    >,
+    worker: impl std::future::Future<
+            Output = Result<
+                s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>>,
+                tokio::task::JoinError,
+            >,
+        > + Send
+        + 'static,
 ) -> s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput> {
     let mut response = s3s::S3Response::new(s3s::dto::CompleteMultipartUploadOutput {
         future: Some(Box::pin(async move {
@@ -2172,7 +2176,8 @@ impl DeltaGliderS3Service {
             }
         };
         if self.state.multipart.client_capacity_backoff() {
-            return Ok(streaming_completion_response(tokio::spawn(wait)));
+            // Not spawned: a disconnected waiter stops waiting; it owns nothing.
+            return Ok(streaming_completion_response(async move { Ok(wait.await) }));
         }
         wait.await
     }
