@@ -78,7 +78,7 @@ LABEL org.opencontainers.image.title="DeltaGlider Proxy" \
 # xdelta3 is copied from the build stage: Wolfi has no xdelta3 package, and the
 # pinned Debian build keeps the delta format stable (see the build stage).
 RUN apk add --no-cache ca-certificates-bundle curl libcrypto3 libgcc xz \
-    && addgroup -S dg && adduser -S -D -H -G dg dg
+    && addgroup -S -g 999 dg && adduser -S -D -H -u 999 -G dg dg
 COPY --from=rust-build /app/target/release/deltaglider_proxy /usr/local/bin/
 COPY --from=rust-build /usr/bin/xdelta3 /usr/bin/xdelta3
 RUN xdelta3 -V 2>&1 | grep -q "3.0.11" && deltaglider_proxy --version
