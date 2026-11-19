@@ -1167,6 +1167,21 @@ impl s3s::S3 for DeltaGliderS3Service {
         &self,
         req: s3s::S3Request<s3s::dto::CompleteMultipartUploadInput>,
     ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
+        let input = &req.input;
+        // A client whose Complete timed out retries the same upload. Wait for
+        // the in-flight owner, then answer from its result like S3 does,
+        // instead of refusing the retry for capacity or with NoSuchUpload.
+        let owner = match self.state.multipart.completion_owner(&input.upload_id) {
+            Some(owner) => Some(owner.lock_owned().await),
+            None => None,
+        };
+        if let Some(etag) =
+            self.state
+                .multipart
+                .completed_etag(&input.upload_id, &input.bucket, &input.key)
+        {
+            return complete_output(input.bucket.clone(), input.key.clone(), &etag);
+        }
         let permit = if self.state.multipart.large_profile() {
             Some(
                 self.state
@@ -1201,6 +1216,7 @@ impl s3s::S3 for DeltaGliderS3Service {
         // through quiescence. A disconnect does NOT mean an S3 abort succeeded.
         let worker = tokio::spawn(async move {
             let _permit = permit;
+            let _owner = owner;
             service.complete_multipart_owned(req).await
         });
         if self.state.multipart.client_capacity_backoff() {
@@ -1776,6 +1792,22 @@ async fn evaluate_put_etag_conditionals_s3s(
 #[derive(Clone)]
 struct StreamingCompletion;
 
+fn complete_output(
+    bucket: String,
+    key: String,
+    etag: &str,
+) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
+    Ok(s3s::S3Response::new(
+        s3s::dto::CompleteMultipartUploadOutput {
+            location: Some(format!("/{bucket}/{key}")),
+            bucket: Some(bucket),
+            key: Some(key),
+            e_tag: Some(parse_s3s_etag(etag)?),
+            ..Default::default()
+        },
+    ))
+}
+
 /// Keep the library's heartbeat stream and final XML error parseable.
 pub fn completion_http_response(response: axum::response::Response) -> axum::response::Response {
     if response.extensions().get::<StreamingCompletion>().is_none() {
@@ -2239,6 +2271,12 @@ impl DeltaGliderS3Service {
                 }
             }
         };
+        self.state.multipart.record_completed(
+            &input.upload_id,
+            &input.bucket,
+            &input.key,
+            &multipart_etag,
+        );
         self.state.multipart.finish_upload(&input.upload_id);
         // A completed multipart upload created the final object — emit
         // ObjectCreated before `input.bucket`/`input.key` are moved into the
@@ -2253,14 +2291,7 @@ impl DeltaGliderS3Service {
             }),
         )
         .await;
-        let location = format!("/{}/{}", input.bucket, input.key);
-        let mut resp = s3s::S3Response::new(s3s::dto::CompleteMultipartUploadOutput {
-            bucket: Some(input.bucket),
-            key: Some(input.key),
-            e_tag: Some(parse_s3s_etag(&multipart_etag)?),
-            location: Some(location),
-            ..Default::default()
-        });
+        let mut resp = complete_output(input.bucket, input.key, &multipart_etag)?;
         // Parity with the legacy axum multipart handler: emit
         // `x-amz-storage-type` (and `x-deltaglider-stored-size`) on
         // CompleteMultipartUpload responses so tests / operators can
