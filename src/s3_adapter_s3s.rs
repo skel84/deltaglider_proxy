@@ -690,6 +690,13 @@ impl s3s::S3 for DeltaGliderS3Service {
         // checked here, so a prefix-scoped grant cannot delete outside its
         // prefix and a Deny carve-out still holds.
         let auth_user = req.extensions.get::<AuthenticatedUser>().cloned();
+        // Missing only if the middleware did not admit this as a batch
+        // delete; an empty context would skip conditioned Deny statements,
+        // so deny every key instead.
+        let policy_context = req
+            .extensions
+            .get::<crate::iam::BatchDeleteContext>()
+            .map(|c| c.0.clone());
         let input = req.input;
         validate_delete_objects_count(input.delete.objects.len())?;
         let quiet = input.delete.quiet.unwrap_or(false);
@@ -702,7 +709,10 @@ impl s3s::S3 for DeltaGliderS3Service {
         for obj in input.delete.objects {
             let key = obj.key.trim_start_matches('/').to_string();
             if let Some(user) = auth_user.as_ref() {
-                if !user.can(S3Action::Delete, &input.bucket, &key) {
+                let allowed = policy_context.as_ref().is_some_and(|ctx| {
+                    user.can_with_context(S3Action::Delete, &input.bucket, &key, ctx)
+                });
+                if !allowed {
                     crate::audit::audit_log(
                         "access_denied",
                         &user.name,

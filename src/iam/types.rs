@@ -233,6 +233,13 @@ pub enum ListScope {
     },
 }
 
+/// The policy context (aws:SourceIp, ...) the middleware evaluated a batch
+/// `POST /bucket?delete` with. The adapter checks every key in the body
+/// against it, so a conditioned statement decides a batch key exactly as it
+/// decides a single DeleteObject.
+#[derive(Clone)]
+pub struct BatchDeleteContext(pub iam_rs::Context);
+
 impl IamUser {
     /// Returns true if this user has full admin permissions:
     /// actions must contain "*" or "admin", AND resources must contain "*".

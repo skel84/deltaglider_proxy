@@ -572,6 +572,74 @@ async fn test_batch_delete_allowed_for_prefix_scoped_delete() {
         .is_err());
 }
 
+/// A conditioned Deny decides a batch key as it decides a single
+/// DeleteObject: the adapter evaluates each key with the request's
+/// aws:SourceIp, not an empty context that would skip the condition.
+#[tokio::test]
+async fn test_batch_delete_honours_ip_conditioned_deny() {
+    let h = IamTestHarness::setup().await;
+    let admin_client = admin_http_client(&h.server.endpoint()).await;
+    let carol = create_iam_user(
+        &admin_client,
+        &h.server,
+        "carol_ip_deny",
+        vec![
+            json!({
+                "effect": "Allow",
+                "actions": ["read", "delete", "list"],
+                "resources": ["bucket-a/carol/*"]
+            }),
+            json!({
+                "effect": "Deny",
+                "actions": ["delete"],
+                "resources": ["bucket-a/carol/*"],
+                "conditions": {"NotIpAddress": {"aws:SourceIp": "10.0.0.0/8"}}
+            }),
+        ],
+    )
+    .await;
+    seed_object(&h, "bucket-a", "carol/kept.txt").await;
+    let client = h.client_for(&carol).await;
+
+    assert!(
+        client
+            .delete_object()
+            .bucket("bucket-a")
+            .key("carol/kept.txt")
+            .send()
+            .await
+            .is_err(),
+        "single delete from 127.0.0.1 is denied by the conditioned Deny"
+    );
+    let out = client
+        .delete_objects()
+        .bucket("bucket-a")
+        .delete(
+            aws_sdk_s3::types::Delete::builder()
+                .objects(
+                    aws_sdk_s3::types::ObjectIdentifier::builder()
+                        .key("carol/kept.txt")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("the batch is admitted; its key is decided per key");
+    assert_eq!(out.errors().len(), 1, "{:?}", out.errors());
+    assert_eq!(out.errors()[0].code(), Some("AccessDenied"));
+    let admin = h.client_for(&h.admin_user).await;
+    assert!(admin
+        .head_object()
+        .bucket("bucket-a")
+        .key("carol/kept.txt")
+        .send()
+        .await
+        .is_ok());
+}
+
 // ============================================================================
 // Disabled user
 // ============================================================================

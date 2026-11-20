@@ -290,6 +290,11 @@ pub async fn authorization_middleware(
     if let Some(scope) = list_scope {
         request.extensions_mut().insert(scope);
     }
+    if is_batch_delete {
+        request
+            .extensions_mut()
+            .insert(super::types::BatchDeleteContext(context));
+    }
 
     Ok(next.run(request).await)
 }
