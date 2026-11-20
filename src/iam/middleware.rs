@@ -87,18 +87,20 @@ pub async fn authorization_middleware(
     // Determine the S3 action
     let mut action = classify_action(&method, &path);
 
-    // POST /{bucket}?delete is a batch DELETE, not a write.
+    let (bucket, key) = parse_bucket_key(&path);
+
+    // POST /{bucket}?delete is a batch DELETE, not a write. Its keys are in
+    // the body; the adapter checks each one.
     // Must check for exact "delete" query parameter, not substring
     // (otherwise ?delimiter= would also match).
-    if method == axum::http::Method::POST
+    let has_delete_query = method == axum::http::Method::POST
         && query
             .split('&')
-            .any(|p| p == "delete" || p.starts_with("delete="))
-    {
+            .any(|p| p == "delete" || p.starts_with("delete="));
+    if has_delete_query {
         action = S3Action::Delete;
     }
-
-    let (bucket, key) = parse_bucket_key(&path);
+    let is_batch_delete = has_delete_query && key.is_empty();
 
     // ListBuckets (GET /) is filtered at the handler level, not denied outright.
     // This lets IAM users see only the buckets they have permissions on.
@@ -226,6 +228,11 @@ pub async fn authorization_middleware(
         } else {
             (false, None)
         }
+    } else if is_batch_delete {
+        (
+            super::permissions::may_attempt_batch_delete(&user, bucket, &context),
+            None,
+        )
     } else {
         (user.can_with_context(action, bucket, key, &context), None)
     };
@@ -282,6 +289,11 @@ pub async fn authorization_middleware(
     // the AuthenticatedUser directly and don't need this marker.
     if let Some(scope) = list_scope {
         request.extensions_mut().insert(scope);
+    }
+    if is_batch_delete {
+        request
+            .extensions_mut()
+            .insert(super::types::BatchDeleteContext(context));
     }
 
     Ok(next.run(request).await)
